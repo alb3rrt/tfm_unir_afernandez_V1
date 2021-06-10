@@ -4,7 +4,7 @@
 %libreria origen utilizada https://github.com/MarkHershey/arxiv-dl
 
 %iteracion en la ID del paper en la
-%todos son de junio de 2021 (2106--> 2021 de junio)
+%todos son de junio de 2021 (2106--> junio de 2021)
 
 
 for i in `seq 0000 5000`
