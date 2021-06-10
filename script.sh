@@ -1,10 +1,13 @@
 #!/bin/bash
 # -*- ENCODING: UTF-8 -*#
  
-%iracion en la ID del paper
-%todos son de junio de 2021 
+%libreria origen utilizada https://github.com/MarkHershey/arxiv-dl
 
-for i in `seq 0498 5000`
+%iteracion en la ID del paper en la
+%todos son de junio de 2021 (2106--> 2021 de junio)
+
+
+for i in `seq 0000 5000`
 do
   sleep 5s
   getpaper 2106.0$i
