@@ -4,10 +4,9 @@
 %libreria origen utilizada https://github.com/MarkHershey/arxiv-dl
 
 %iteracion en la ID del paper en la
-%todos son de junio de 2021 (2106--> junio de 2021)
+%todos son de junio de 2021 2106--> junio de 2021
 
-
-for i in `seq 0000 5000`
+for i in `seq 0900 5000`
 do
   sleep 5s
   getpaper 2106.0$i
