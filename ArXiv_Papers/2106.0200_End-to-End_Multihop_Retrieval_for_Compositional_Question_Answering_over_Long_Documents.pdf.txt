@@ -1,0 +1,361 @@
+End-to-End Multihop Retrieval for Compositional Question Answering over Long Documents
+
+Haitian Sun School of Computer Science Carnegie Mellon University
+haitians@cs.cmu.edu
+
+William W. Cohen Google Research
+wcohen@google.com
+
+Ruslan Salakhutdinov School of Computer Science Carnegie Mellon University
+rsalakhu@cs.cmu.edu
+
+arXiv:2106.00200v1 [cs.CL] 1 Jun 2021
+
+Abstract
+Answering complex questions from long documents requires aggregating multiple pieces of evidence and then predicting the answers. In this paper, we propose a multihop retrieval method, DOCHOPPER, to answer compositional questions over long documents. At each step, DOCHOPPER retrieves a paragraph or sentence embedding from the document, mixes the retrieved result with the query, and updates the query for the next step. In contrast to many other retrieval-based methods (e.g., RAG or REALM) the query is not augmented with a token sequence: instead, it is augmented by "numerically" combining it with another neural representation. This means that model is end-to-end differentiable. We demonstrate that utilizing document structure in this was can largely improve question-answering and retrieval performance on long documents. We experimented with DOCHOPPER on three different QA tasks that require reading long documents to answer compositional questions: discourse entailment reasoning, factual QA with table and text, and information seeking QA from academic papers. DOCHOPPER outperforms all baseline models and achieves state-of-the-art results on all datasets. Additionally, DOCHOPPER is efficient at inference time, being 310 times faster than the baselines.
+1 Introduction
+Recent advances in Transformer-based pretrained Language Models (e.g., BERT (Devlin et al., 2019), RoBERTa (Liu et al., 2019)) have dramatically improved performance on question answering (QA) tasks (Rajpurkar et al., 2016). Although effective, Transformer-based models are usually limited to documents of fixed length, typically 512 tokens, due to their O(n2) memory complexity.
+
+This is an important restrictions for reading long documents such as Wikipedia pages, academic papers, and technical reports, which can contain tens of thousands of tokens.
+To address this issue, Transformer models that use sparse self-attention have been introduced (e.g., (Zaheer et al., 2020; Ainslie et al., 2020; Beltagy et al., 2020)). For example, ETC (Ainslie et al., 2020) introduced a global-local attention mechanism, where local tokens only attend to the global tokens they are assigned to, while global tokens attend to each other to communicate information across a document. This reduces the complexity of the model to the square of the number of global tokens. A similar idea is also adopted by Longformer (Beltagy et al., 2020). However, while these models can include larger documents than the original Transformer, their input size is still limited to 4,096 on finetuning tasks.
+An alternative way to perform question answering over long documents (Clark and Gardner, 2017) is to adopt the "retrieve and read" pipeline that is commonly used in open-domain QA. In retrieve-and-read systems, a retriever module retrieves the top passages from the documents, and then a Transformer-based reader extracts or generates answers from the retrieved passages. Even though dense retrievers (e.g. DPR (Karpukhin et al., 2020)) show competitive retrieval performance in open-domain QA tasks, and recent work (Zhao et al., 2021; Qi et al., 2021; Li et al., 2020) to extend the query with tokens from previously retrieved text, and re-encode the query to perform the next round of retrieval, such multi-hop retrieval process is not end-to-end differentiable, and requires careful training to avoid cascaded errors. These models also treat each passage independently, ignoring the rich information in document structures.
+In this work we propose a multi-hop retrieval method, DOCHOPPER, to solve compositional
+
+questions over long documents. DOCHOPPER first builds a retrieval index for each document from a pretrained language model. At each retrieval step, DOCHOPPER retrieves a candidate (paragraph or sentence) from the index and updates the query for the next step of retrieval. The update is computed in the dense space without having to re-encode the query or the context, making it differentiable end-to-end. Different from previous multi-hop retrieval methods (Zhao et al., 2021; Qi et al., 2021; Li et al., 2020; Sun et al., 2019) that treat each retrieval candidate independently, DOCHOPPER also utilizes the document structure to improve the retrieval accuracy: in particular, it performs retrieval at both paragraph-level and sentence-level. DOCHOPPER performs well on complex compositional reasoning tasks over long documents.
+We evaluate DOCHOPPER on three different tasks that require reading long documents to answer complex questions: conversational QA for discourse entailment reasoning (ShARC (Saeidi et al., 2018))1, factual QA with table and text (HybridQA (Chen et al., 2020)), and information seeking QA on academic papers (QASPER (Dasigi et al., 2021)). Since the outputs of the three tasks are different, additional layers or downstream models are appended to DOCHOPPER to make final predictions. DOCHOPPER achieves state-of-the-art results on all three datasets, outperforming the baseline models by 3%-5%. Additionally, DOCHOPPER runs 310 faster than the baseline models, because index of documents is pre-computed, which significantly reduces computation cost at inference time.
+2 Model
+In this section, we first introduce how to compute query embeddings for multi-hop questions. Then, we discuss building a retrieval index for documents using a finetuned language model, ETC (Ainslie et al., 2020), that is designed for encoding long sequences. DOCHOPPER utilizes the fact that long documents are often structured, i.e. relevant information in documents are grouped into sections, to build a retrieval index at both sentence and paragraph levels. Finally, we present our multi-hop retrieval algorithm from the precomputed index. Additional layers and downstream
+1We modify the original dataset and replace the oracle snippet with the entire web page as input. Please see section §3.2 for more details.
+
+models required for the experiments will be introduced in the next section (§3).
+2.1 Background
+Input A long document usually contains multiple layers of hierarchy, e.g. sections, sub-sections, paragraphs, sentences, etc. For simplicity, we only consider two levels of hierarchy in this paper: paragraph-level and sentence-level. A sentence is the lowest granularity that can be retrieved, while a paragraph is an abstraction of a collection of sentences, which can be used to represent sections or other levels in the hierarchy, depending on the application. Formally, let d = {p0, . . . , p|d|}  D be a document in the corpus D that contains a sequence of paragraphs pi, and let a paragraph pi = {si0, . . . , si|pi|} contain a sequence of sentences si0. A sentence sij will be encoded into a fixed length vector sij  Rd using a pretrained language model. Sentence Embeddings from ETC We take ETC (Ainslie et al., 2020) as our query and context encoder. ETC employs the global-local attention mechanism to reduce complexity of Transformer models. During pretraining, ETC assigns a global token to each sentence. A global token only attends to local tokens in the sentence but also attends to other global tokens of other sentences. Embeddings of global tokens are trained with Contrastive Predictive Coding (CPC) (Oord et al., 2018) to summarize sentence-level information. We use the embeddings of global tokens in ETC as sentence embeddings.
+Specifically, ETC takes a sequence of sentences pi = {si0, . . . , s|pi|i} as input, and returns a list of vectors si0, . . . , si|pi|, each represents a sentence in the embedding space sij  Rd.
+si0, . . . , si|pi| = ETC({si0, . . . , si|pi|})  R|pi|×d
+2.2 Query Embeddings
+An ETC encoder is finetuned to compute query embeddings. Here, we discuss two types of input, for conversational QA and multi-hop QA. Conversational QA In the conversational QA task, users start the conversation with an initial question q0. The model will decide if there's enough information to answer the question. If not, the model will ask a followup question f1 and take the user's answer a1 along with the initial question q0 to make its prediction. The model
+
+Figure 1: DOCHOPPER Overview. Left: The retrieval index of a document is a combination of paragraph and
+sentence embeddings produced from the context encoder (§2.3). This figure shows an example of query-agnostic
+embeddings, i.e. paragraph embeddings are output from the context encoder. Right: The query encoder operates
+on a question that consists of a sequence of sub-questions and computes query embeddings q0, . . . , qn, one for each sub-question (§2.2). At each step, DOCHOPPER retrieves a paragraph or a sentence from the combined
+retrieval index . If a query retrieves a paragraph, e.g. the first query q0 in the figure, sentences in the retrieved paragraph will be returned. If a query retrieves a sentence, e.g. the second query q1, only the retrieved sentence s01 will be returned (arrow not shown on the figure). DOCHOPPER computes an update vector q~0 from the retrieved sentences, and updates the query vector q1 for the next round of retrieval (§2.4). All retrieved sentences or the last retrieved sentence will be used to make final predictions, depending on different tasks (§3).
+
+will keep asking followup questions until it has enough information to answer the user's question. Let ai be the answer to the followup question fi received from the users. A query paragraph pq = {q0, (f1, a1), . . . , (fn, an)} is constructed by concatenating the initial question q0 and all followup question-answer pairs (fi, ai). Each followup question answer pair (fi, ai) is considered as a single sentence in the query paragraph pq.
+We use ETC to compute the query embeddings qi, one for each sentence in the query paragraph pq. The query embeddings qi will be used to perform multi-hop retrieval.
+q0, . . . , qn = ETC({q0, (f1, a1), . . . , (fn, an)}) (1)
+Multi-hop QA A multi-hop question, e.g. "Which gulf is north of the Somalian city with 550,000 residents", requires the model to first find the answer of the first "hop" of the question, and then perform a second round of retrieval to find the final answer. Different from conversational QA, questions in multi-hop QA do not have a clear split between the two hops of questions, making it impossible to explicitly split a question into two subquestions. Instead, we add a dummy question qnull to the question paragraph qp = {q0, qnull}. The global-to-local attention mask is modified to allow
+
+the global token of the dummy question to attend to tokens in the question q0. With this modification, both query embeddings q0 and q1 have access to all information in the original query, while being able to attend to different parts of the question respectively.
+
+q0, q1 = ETC({q0, qnull})
+
+(2)
+
+Note that we assume the true number of hops is known in multi-hop QA tasks, which is 2 for the experiments in this paper. However, one could append additional dummy questions to the question paragraph pq if the number of hops is more than 2. We leave this as a topic for future work.
+
+2.3 Context Embeddings
+Context embeddings can be computed in two ways, query-dependent or query-agnostic, depending on the application. Query-dependent embeddings are used if the query is seeking for specific information, e.g. "Which gulf is north of the Somalian city with 550,000 residents?", while query-agnostic embeddings are used if the query is seeking for general information, e.g. "Am I eligible for this benefit?". We will introduce the two different types of context embeddings separately, and discuss which one to use in each experiment in
+
+section §3. In both cases, sentence embeddings are directly output from ETC, while paragraph embeddings are computed differently. Context embeddings are always computed by paragraph. Query-agnostic Embeddings We slightly modify the ETC input to produce query-agnostic embeddings. Recall that a paragraph pi = {si0, . . . , si|pi|} contains a sequence of sentences sij. We prepend a dummy sentence snull to the beginning of the paragraph, and again, we modify the global-tolocal attention mask to allow the global token of the dummy sentence to attend to all tokens in the paragraph pi. Let pi  Rd be the embedding of paragraph pi. The query-agnostic embeddings for a paragraph and its contained sentences are:
+pi, si0, . . . , si|pi| = ETC({snull, si0, . . . , si|pi|})
+Query-dependent Embeddings In the querydependent case, paragraph embeddings are query dependent, while sentence embeddings remain unchanged. To start with, sentence embeddings sij in the paragraph pi are simply computed by applying ETC on the paragraph input.
+si0, . . . , si|pi| = ETC({si0, . . . , si|pi|})
+Let qt be the query embedding of the t'th hop of the question. The paragraph embedding pi is a weighted sum of sentence embeddings sij in the paragraph pi, where j is the attention weights of the query vector qt to the sentence embedding sij.
+pi = j sij, j = softmax(qTt sij) (3)
+j
+Note that the query-dependent paragraph embeddings are directly derived from sentence embeddings sij and do not require jointly encoding tokens from queries and context, as in many BERTstyle reading comprehension models. Computing paragraph embeddings with Eq.3 is very efficient. Finetune Context Encoder Context encoder can be finetuned to adapt to input from different domains or with special tokens such as snull. While finetuning the ETC context encoder can generally improve the retrieval performance of queryagnostic embeddings, pretrained ETC works reasonably well to produce sentence embeddings in the query-dependent case. Using pretrained ETC to generate sentence embeddings in the querydependent case further allows the model to precompute all sentence embeddings before training.
+
+This strategy significantly improves training efficiency.
+In both cases, the context encoder is fixed at inference time. Sentence embeddings and paragraph embeddings (in the query-agnostic case) will be pre-computed and saved in a retrieval index. Retrieval Index We iterate through all paragraphs in a document and apply the context encoder on each paragraph to compute its paragraph and sentences embeddings. Sentence and paragraph embeddings from all paragraphs are then merged together to form a combined retrieval index. When computing the retrieval scores, we do not differentiate sentence and paragraph embeddings, giving the model flexibility in deciding what to retrieve at each step, a paragraph or a sentence. We denote the combined retrieval index for document d as Cd = {p0, s00, . . . , s0|p0|, p1, s10, . . . , s1|p1|, . . . }. Let cm be the embedding of the m'th entry from the combined retrieval index. cm can represent either a sentence embedding or a paragraph embedding.
+
+2.4 Multi-hop Retrieval
+With the query embedding qt at step t and context embeddings Cd computed above, we now introduce the multi-hop retrieval algorithm. Retrieval Step At each iteration, DOCHOPPER computes the inner product scores between the query vector qt and context embeddings cm and returns the entry c^ with the largest score. c^ is not directly used for computation, but an intermediate notation for writing purpose.
+
+c^ = argmaxcm(qTt cm)
+Mixing Step DOCHOPPER then mixes the embedding of the retrieved entry c^ with the query vector qt to find the missing information. Since the combined retrieval index C contains both sentence and paragraph embeddings, the retrieved entry c^ can represent either a sentence or a paragraph. The two cases are separately considered. If c^ is a sentence, i.e. c^ = sij, DOCHOPPER computes the mixed embeddings as
+
+q~t = WTq [qt; sij]
+
+(4)
+
+where [qt; sij] is the concatenation of two vectors qt and sij. If c^ is a paragraph, i.e., c^ = pi, DOCHOPPER first looks up sentences in pi, i.e. the list {si0, . . . , si|pi|}. The following process is then used to compute the mixed embedding q~t: (1) DOC-
+HOPPER first computes the attention weights of
+
+the query vector qt to the embeddings of retrieved sentences {si0, . . . , si|pi|}. This attention weight is essentially the same as the weight j in Eq.3 that is used to compute the query-dependent paragraph
+embeddings, so we reuse j in this equation. In the implementation, we also re-use the value of j if it has been computed for the query-dependent
+paragraph embeddings. (2) The query vector qt is broadcast to the embeddings of every retrieved sentence sij with a weight of j and then linearly projected with a projection matrix:
+
+kj = WTq [j qt; sij]
+
+(5)
+
+Then (3) the concatenated vectors kj are summed with the weight j, where j is the attention weight of a learned vector v to the concatenated vector kj. The learned vector v coordinates the importance of sentences from the retrieved paragraph and decides what information to pass to the next step of retrieval.
+
+q~t = j kj, j = softmax(vT kj) (6)
+j
+
+It is not hard to see that computing the mixed
+embedding in Eq. 6 for the case that a paragraph
+is retrieved is essentially the same as in Eq. 4 if the retrieved paragraph pi only contains one sentence, i.e. j = 1 and j = 1 if |pi| = 1. Update Step The mixed embedding q~t is then used to update the query vector qt+1 for the next step. Intuitively, q~t is the residual from the previous retrieval step. Adding the residual embed-
+ding encourage the model to retrieve candidates
+that contain information relevant but not fully ful-
+filled from previous steps.
+
+qt+1  qt+1 + q~t
+
+(7)
+
+Loss Function The loss function is computed at
+each intermediate step t with distantly supervised retrieval labels. qTt cm is the inner product score between the query vector qt and a context embedding cm. Icm is an indicator function that equals to 1 iff the label of cm is positive.
+
+lt = cross_entropy(softmax(qTt cm), Icm)
+
+Intermediate retrieval labels are distantly constructed. For example, in an extractive QA task, a positive retrieval candidate is the sentence or paragraph that contains the answer span. We will discuss the intermediate retrieval labels for different tasks in section §3.
+
+2.5 Document Structure in DOCHOPPER
+To summarize, document structure is used in the following places in DOCHOPPER:
+1. Context embeddings are computed by paragraph, exploiting the fact that ETC is pretrained with Contrastive Predictive Coding (CPC). The CPC target forces a global token to attend to other global tokens in the input during pretraining, so sentence embeddings produced from ETC are aware of other sentences in the paragraph.
+2. DOCHOPPER performs retrieval from the combined retrieval index that contains both sentence and paragraph embeddings. At each step of retrieval, the model has the flexibility to decide whether to retrieve a paragraph or a sentence. As suggested in section §3, only retrieving sentences is insufficient for many tasks. Jointly retrieving sentences and paragraphs can significantly improve the performance.
+3. When a paragraph is retrieved, the mixed embedding q~t aggregates information from multiple sentences in the retrieved paragraph that are relevant to qt (Eq.6). These sentences contain rich contextual information for the next retrieval step, and it is shown in our experiments (§3) that passing the mixed embedding q~t to the next step is very effective in improving the retrieval accuracy.
+3 Experiments
+We evaluate our multi-hop retrieval model DOCHOPPER on three different datasets: ShARC (Saeidi et al., 2018), HybridQA (Chen et al., 2020), and QASPER (Dasigi et al., 2021). ShARC is a conversational QA datasets that requires the model to classify a conversation into one of the few classes. HybridQA and QASPER are extractive QA datasets. HybridQA contains factual questions that requires multi-hop reasoning using table and text. QASPER is an information seeking QA dataset. Different from factual QA, answers in QASPER are usually longer, with an average length of 14.4 tokens. Since the downstream tasks of the three datasets are different, we apply an additional layer for ShARC on top of the retrieval results from DOCHOPPER and a BERT-large extractive QA model for HybridQA and QASPER to
+
+extract the final answers. We will discuss model setup for each case separately.
+3.1 Conversational QA: ShARC-Long
+Dataset ShARC (Saeidi et al., 2018) is a conversational QA dataset for discourse entailment reasoning. Questions in ShARC are about government policy crawled from government websites. Users engage with a machine to check if they qualify for some benefits. A question in the dataset starts with a initial question, e.g. "Can I get standard deduction for my federal tax return?", with a user scenario, e.g. "I am a student visa holder and I've been to the US for 5 years", and a few followup questions and answers through the interaction between the machine and users, e.g. "Bot: Are you a resident alien for tax purpose? User: No". The model reviews the conversation and predicts one of the three labels: "Yes", "No", or "Irrelevant". If the model think there's not enough information to make the prediction, it should predict a fourth label "Inquire".2
+Besides the conversation, each example in the ShARC dataset provides a snippet that the conversation is originated from. A snippet is a short paragraph that the conversation is created from, e.g. "Certain taxpayers aren't entitled to the standard deduction: (1) A married individual filing as married... (2) An individual ...". Since the snippets are usually short, with an average of 54.7 tokens, previous baseline models, e.g. DISCERN (Gao et al., 2020), concatenate the snippet and the conversation, and jointly encode them with Transformerbased models, e.g. BERT or RoBERTa. In order to adapt the ShARC dataset to the long document setting, i.e. the model should first locate the snippet from the document, and then make predictions with it, we crawl the web pages using the URLs associated with the snippets. The crawled web pages contains 737.1 tokens on average, 13.5 times longer than the original snippets. The longest page contains 3927 tokens. We name this new dataset ShARC-Long.3 Implementation Details The query embeddings q0, . . . , qn are initialized from Eq. 1 where n is the number of followup questions in the conversation. The query vector qt at the step t will be up-
+2Since a multi-turn conversation has been split into multiple examples in the dataset, one for each turn, we won't evaluate the predictions at intermediate steps.
+3We will release the dataset upon the acceptance of this paper.
+
+dated with the residuals following the update rule in Eq.7. The paragraph embeddings in the retrieval index Cd is query-agnostic, because questions in this dataset mostly asked for general information, e.g. "whether I am eligible for this benefits?", that is not tied to the exact details in the paragraph. And since most documents in this dataset fit in the input of 1536 tokens, we can finetune the context encoder during training.
+The multi-hop retrieval process is distantly supervised with supervision at intermediate steps. At each step, the model is trained to retrieve both the correct paragraph and the correct sentences if they exists. Since the retrieval index Cd consists of both paragraph and sentence embeddings, we only need to compute the retrieval scores once at each step, but consider both the correct paragraph and the correct sentence as positive. The positive paragraph is one of the paragraphs from the crawled web page with the highest BLEU score.4 We notice that some web pages at the provided URLs have been changed significantly so the snippets provided in the datasets do not exist any more. We drop the data if the highest BLEU scores of the paragraphs is less than 0.7. We follow the heuristics used in baseline models (Gao et al., 2020) to get the positive sentence candidates by finding the sentence with the minimum edit distance.
+We run DOCHOPPER to perform multi-hop retrieval and then add a simple classification layer on the retrieved results to make the final prediction. We reuse the concatenated vector kj in Eq. 5. Let k(jt) be the concatenated vector of the sentence retrieved at the t'th retrieval step, either a sentence directly retrieved or from a retrieved paragraph. Concatenated embeddings at all retrieved steps {k(00), . . . , k(0), . . . , k(0n), . . . , k(n)} are weighted summed into one vector k~ that will be used to make the final prediction. The softmax weight j(t) is computed across the retrieved sentences from all steps t.
+
+k~ =
+t
+
+j(t) k(jt), j(t) = softmax(uT k(jt))
+j
+m = WTc k~  R4
+
+Here, m  R4 holds the logits of the 4 classes that is used to compute the softmax cross entropy with the one-hot encoding of the positive class labels.
+
+4We drop the brevity penalty term when computing the BLEU score.
+
+ShARC-Long Easy Strict runtime
+
+ETC
+
+61.1 ­
+
+BM25 + DISCERN
+
+64.8 50.0
+
+Dense + DISCERN
+
+65.2 50.7
+
+Sequential (DISCERN) 63.7 54.2
+
+12.0/s 58.2/s 47.2/s 9.5/s
+
+DOCHOPPER (w/o query update) (sentence only) (single-hop)
+
+72.3 60.2 181.8/s
+
+72.4 59.9
+
+­
+
+62.2 43.2
+
+­
+
+68.0 52.7
+
+­
+
+ShARC-Long
+
+BM25
+
+68.6
+
+DOCHOPPER
+
+82.2
+
+(w/o query update)
+
+81.8
+
+(sentence-only)
+
+63.0
+
+(single-hop)
+
+72.4
+
+Table 2: Retrieval accuracy on ShARC-Long. The accuracy is measured as the percentage of data that all required evidences are retrieved.
+
+Table 1: Classification accuracy on ShARC-Long dataset. The Easy setting only checks the predicted labels, while the Strict setting additionally checks if all required evidences are retrieved. DISCERN is run with their open-sourced codes.
+Baselines We compare our model with the plain ETC and a few "retrieve and read" baselines. For the plain ETC, we concatenate the full web page and the conversation into a single input, and prepend a global [CLS] token. The embedding of the global [CLS] token will be used to make the final prediction. For the "retrieve and read" pipeline, we adopt the previous state-of-the-art5 model DISCERN as the reader, and pair it with a sparse retriever (BM25 + DISCERN) or a dense retriever (Dense + DISCERN). The dense retriever is a ablated DOCHOPPER model that retrieves the positive paragraph only. We also run a sequential reading baseline with DISCERN where documents are chunked every 128 tokens with a stride of 32 tokens and then read with DISCERN. We predict the class with the highest probability among all chunked inputs.6 Results We evaluate DOCHOPPER on the ShARCLong dataset. The evaluation is performed in two settings: Easy and Strict. The Easy setting only evaluates the accuracy of classification, without considering whether the gold snippet is retrieved. It's important to note that the model can randomly guess the answer and get 25% accuracy without reading the document. In the Strict setting, we additionally require that all evidences (provided in
+5DGM (Ouyang et al., 2020) achieved a new state-of-theart on ShARC, outperforming DISCERN by 4.2%. But the codes have not been open-sourced.
+6The model is often extremely confident on the "Irrelevant" class (with probability >0.999) because most chunked inputs are obviously irrelevant. We tuned a hyper-parameter
+= 0.99 such that the model predicts "Irrelevant" if the probabilities of all chunked inputs are larger than and predicts one of the other three classes otherwise.
+
+the original dataset) have to be retrieved. We report the micro accuracy as the evaluation metric. Runtime is counted as number of examples per second with batch size 8.
+DOCHOPPER outperforms all baseline models by more than 7 points in both easy and strict settings, while being more than 3 times faster than all baseline models. We performed three ablated experiments: without query update (w/o query update) in Eq. 7, multi-hop retrieval on sentences only (sentence only), and single-hop retrieval on paragraphs7. Retrieving at both levels (vs. sentence only) improves the performance by >10 points in both settings. Multi-hop retrieval (vs. single-hop) improves the performance by more than 4 points.
+We also report the retrieval accuracy in Table 2. Since data in ShARC-Long requires aggregating multiple evidences to make the correct prediction, we measure the retrieval accuracy as whether required evidences are all retrieved by DOCHOPPER. For the (single-hop) variant of DOCHOPPER, we restrict the model to only retrieve paragraphs to improve retrieval accuracy ­ only retrieving one sentence is almost never enough to cover all required evidences.
+3.2 Extractive QA: HybridQA and QASPER
+Dataset HybridQA is a dataset that requires jointly using information from tables and text hyperlinked from table cells to find the answers of multi-hop questions. Tables and text are crawled from Wikipedia. Briefly, tables in Wikipedia group similar information together by rows. Each row in the table describes several attributes of an instance, for example, a person or an event. Attributes are organized by columns. For example,
+71-hop retrieval on sentences leads to extremely low coverage of evidence, so we don't include its numbers in Table 1
+
+HybridQA
+
+Dev
+
+Test
+
+QASPER (Extractive)
+
+Dev
+
+Test
+
+runtime
+
+BM25 + ETC Dense + ETC Sequential (ETC) Hybrider LED
+
+24.8 / 29.1 37.0 / 43.5 39.4 / 44.8 44.0 / 50.7
+­/­
+
+25.5 / 31.1 34.1 / 40.3 37.0 / 43.0 43.8 / 50.6
+­/­
+
+5.6 / 12.9 8.3 / 18.7 11.2 / 24.6
+­/­ ­ / 26.1
+
+5.8 / 13.4 9.6 / 19.1 12.4 / 27.0
+­/­ ­ / 31.0
+
+8.9/s 8.6/s 0.6±0.1/s 5.1/s 0.5/s
+
+DOCHOPPER (w/o sparse) (w/o query update) (sentence-only) (single-hop)
+
+47.7 / 55.0 44.4 / 51.2 44.2 / 50.9 36.7 / 43.7 27.8 / 34.1
+
+46.3 / 53.3 ­/­ ­/­ ­/­ ­/­
+
+14.0 / 29.6 (14.0 / 29.6) 12.2 / 28.0 11.4 / 27.2 11.8 / 27.3
+
+19.5 / 36.4 ­/­ ­/­ ­/­ ­/­
+
+79.8/s ­ ­ ­ ­
+
+Table 3: EM/F1 performance on HybridQA and QASPER. Hybrider (Chen et al., 2020) and LED (Dasigi et al., 2021) were the state-of-the-art model on the two datasets. The numbers of Hybrider and LED are copied from their original papers. Numbers for QASPER are only reported on the subset of extractive questions.
+
+the table of Medalist of Sweden in 1932,8 contains a row "[Medal:] Gold; [Name:] Rudolf Svensson; [Sport:] Wrestling (Greco-Roman); [Event:] Men's Heavyweight". Text in the square brackets are the headers of the table. The medal winner "Rudolf Svensson" and the event "Wrestling (Greco-Roman)" are hyperlinked to the first paragraph of their Wikipedia pages. A question asks "What was the nickname of the gold medal winner in the men 's heavyweight greco-roman wrestling event of the 1932 Summer Olympics?" requires the model to first locate the correct row in the table, and find the answer from other cells in the row or their hyperlinked text.
+To apply our model on the HybridQA dataset, we first convert a table with hyperlinked text into a long document. Each row in the table is considered a paragraph by concatenating the column header, cell text, and hyperlinked text if any. The column name and cell text are each treated as one sentence. Hyperlinked text is also split into sentences. In the example above, the row becomes "Medal. Gold. Name. Rudolf Svensson. Johan Rudolf Svensson (27 March 1899 ­ 4 December 1978) was a Swedish wrestler. He competed ...". On average, each table contains 14.8 rows and each row contains up to 67 sentences. The average length of documents is 9345.5. Dataset QASPER (Dasigi et al., 2021) is a QA dataset constructed from NLP papers from Arxiv. They hired graduate students to read NLP papers and ask questions about the papers. A different group of students are hired to answer the ques-
+8https://en.wikipedia.org/wiki/Sweden_ at_the_1932_Summer_Olympics
+
+tions. For example, a question asks "What are the baseline models used in this paper?". The answers are {"BERT", "RoBERTa"}. The dataset contains a mixture of extractive, abstractive, and yes/no questions. We focus on the subset of extractive questions (51.8% of the datasets) in this paper. The dataset is evaluated as a reading comprehension task that measures EM and F1. Some questions in the dataset are answerable with a singlehop of retrieval. However, as suggested in the original paper, 55.5% of the questions have multiparagraph evidence, and thus aggregating multiple pieces of information should improve the accuracy. Different from HybridQA, answers in the QASPER dataset is longer with an average of 14.4 tokens.
+Academic papers are often structured into sections and subsections. Here, we treat each subsection as a paragraph. Text in the parent section but not belong to any subsections is considered as another subsection. Text in subsections is split into sentences. We prepend the section title and subsection title to the beginning of each subsection.
+Implementation Details Question embeddings q0, q1 are initialized from Eq. 2 and updated as in Eq. 7. For the two datasets, we perform a 2hop retrieval: the first hop is trained to retrieve a paragraph, and the second hop to retrieve a sentence. Note that we do not require sentences retrieved from the second hop must be from the paragraphs retrieved from the first hop. At postprocessing step, we weighted sum the paragraph and sentence retrieval scores to find the best retrieved sentence. The retrieval score of the paragraph retrieved from the first hop is broadcast to the sen-
+
+tences in the paragraphs. The final retrieval score of a sentence sij  pi is
+score(sij) = qT1 sij + 1 · qT0 pi + 2 · sparse(q0, pi) (8)
+where qT1 sij and qT0 pi are the sentence and paragraph retrieval scores. Similar to the baseline model (Chen et al., 2020), we use paragraph-level sparse features to improve retrieval accuracy.9 sparse(q0, pi) computes the length of longest common substrings in the question q0 and the paragraph pi. 1 and 2 are hyper-parameters. We set 1 = 1.5 and 2 = 3.0 for HybridQA, and 1 = 0.5 and 2 = 0.0 for QASPER.
+The best retrieved sentence will be read with an extractive QA model. We use BERT-large as our reader that is trained to predict the start and end of the answer. The training data is distantly constructed with sentences from tables and/or papers that contain the answer. We end up with 143k training data for the reader for HybridQA and 1.2k for QASPER. Baselines We compare DOCHOPPER with a few competitive baselines to show the efficacy of DOCHOPPER. HYBRIDER (Chen et al., 2020) and LED (Dasigi et al., 2021) were the state-ofthe-art models on the two datasets. HYBRIDER is a complicated 4-stage pipeline system that (1) links cells, (2) reranks linked cells, (3) hops from one cell to another, and (4) reads text to find answers. And the four stages are trained separately. LED reads the entire paper with Longformer (Beltagy et al., 2020) and predicts the answer. Besides the two state-of-the-arts model, we also compare DOCHOPPER with a few internal baselines. BM25 + ETC retrieves a paragraph with BM25 and then read it with ETC.10 We also experiment with reading the paragraph retrieved from DOCHOPPER with ETC (Dense + ETC), and sequentially reading the document by paragraphs with ETC (Sequential (ETC)). The numbers are shown in Table 3. Results and Analysis DOCHOPPER outperforms the previous state-of-the-art models by 3-5% on both datasets, and runs more than 10 times faster. We performed an ablation study to analyze the contribution of each module in DOCHOPPER. Removing sparse features (w/o sparse) from Eq. 8
+9Sparse features are only used at the end of retrieval, not at any intermediate steps.
+10A paragraph can usually fit into ETC's input with 4096 tokens.
+
+HybridQA QASPER (Extractive)
+
+BM25 (sentence)
+
+2.6
+
+10.4
+
+BM25 (paragraph) 45.4
+
+20.1
+
+DOCHOPPER
+
+56.5
+
+(w/o sparse)
+
+53.3
+
+(w/o query update) 51.8
+
+(sentence-only)
+
+46.4
+
+(single-hop)
+
+34.2
+
+39.1 (39.1) 37.2 36.1 36.8
+
+Table 4: Hits@1 performance on retrieving the correct sentence from the document. Numbers are reported on the dev set.
+
+when computing the final retrieval scores causes 3.3% drop in EM on HybridQA. We don't use sparse features for QASPER. Query update (w/o query update) in Eq. 7 is also important, causing 3.5% and 1.8% difference in performance on both datasets. We also let DOCHOPPER to directly retrieve the most relevant sentence from the document (single-hop). The performance drops significantly. Adding one more steps of retrieval, while still retrieving one sentence at a time (sentenceonly), leads to some improvement on HybridQA but still worse than retrieving from both paragraph and sentence levels. Performing 2-hop sentence retrieval (sentence-only) on QASPER won't improve the performance, since many questions in QASPER won't require intermediate answers from the first hop to answer the second-hop of the question. However, retrieving at both paragraph and sentence levels allows the model to aggregate multiple pieces of evidence and thus improves the final EM by 2.2%.
+We report the sentence-level retrieval accuracy in Table 4.11 We take the performance of BM25 as a reference. Other baselines in Table 3 either don't have a retrieval module or only retrieves at paragraph level. The retrieval accuracy of the ablated variants of our model is also presented in the table. Similar changes in performance are observed.
+4 Related Work
+Multi-hop retrieval has been used in many models to solve compositional questions. SplitQA (Talmor and Berant, 2018) splits compositional questions into subquestions, and sequentially answers each subquestion with a retrieve and read model. Subquestions in the later steps are composed using
+11BM25 (paragraph) is the accuracy of retrieving the correct paragraph.
+
+answers of subquestions from the previous steps, causing cascaded errors in this pipeline system. PullNet (Sun et al., 2019) improves SplitQA by introducing a "classify and retrieve" system. At each step, it runs the classifier to decide what to retrieve and then retrieve from the corpus with the sparse retriever. KB information has also been used to improve retrieval accuracy (Min et al., 2020; Sun et al., 2018, 2019), e.g. GraphRetriever (Min et al., 2020) uses KB triples in Wikidata to build a local reasoning graph to solve compositional questions. However, most of their retrieval steps are usually discrete, e.g. with TF-IDF or KB lookup, making the model not differentiable end-to-end.
+Recent dense retrieval methods, e.g. DPR (Karpukhin et al., 2020), significantly improves the retrieval performance over sparse retrievers like TF-IDF and BM25, and has been extended to multi-hop retrieval (Zhao et al., 2021; Qi et al., 2021; Li et al., 2020). However, it relies on re-encoding the concatenated text of questions and previously retrieved passages to generate the query embeddings for the next step of retrieval. Re-encoding the token sequence is also crucial for many retrieval-based language models, e.g. REALM (Guu et al., 2020) and RAG (Lewis et al., 2021).
+Key-Value memory have been commonly used to answer entity-centric compositional questions (Miller et al., 2016; Dhingra et al., 2020; Sun et al., 2021), where contextual information about entities are encoded in the key memory and retrieved by the query vector. The value embeddings of the retrieved entries are returned as answers or used to update the query for the next iteration. The key-value memory based methods have been successfully applied on entity-centric tasks, such as KBQA tasks and factual open-domain QA, but has not been seen at other tasks, e.g. discourse reasoning or information seeking QA tasks.
+5 Conclusion
+We propose an end-to-end differentiable multi-hop retrieval model DOCHOPPER for answering complex questions over long documents. We demonstrate that utilizing document structure can significantly improve retrieval accuracy and accuracy of downstream tasks. DOCHOPPER achieves the start-of-the-art results on three challenging QA datasets, outperforming the baseline models by 35%, while being 310 times faster than the
+
+baseline models.
+References
+Joshua Ainslie, Santiago Ontanon, Chris Alberti, Vaclav Cvicek, Zachary Fisher, Philip Pham, Anirudh Ravula, Sumit Sanghai, Qifan Wang, and Li Yang. 2020. Etc: Encoding long and structured inputs in transformers. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP), pages 268­284.
+Iz Beltagy, Matthew E Peters, and Arman Cohan. 2020. Longformer: The long-document transformer. arXiv preprint arXiv:2004.05150.
+Wenhu Chen, Hanwen Zha, Zhiyu Chen, Wenhan Xiong, Hong Wang, and William Wang. 2020. Hybridqa: A dataset of multi-hop question answering over tabular and textual data. Findings of EMNLP 2020.
+Christopher Clark and Matt Gardner. 2017. Simple and effective multi-paragraph reading comprehension.
+Pradeep Dasigi, Kyle Lo, Iz Beltagy, Arman Cohan, Noah A Smith, and Matt Gardner. 2021. A dataset of information-seeking questions and answers anchored in research papers. arXiv preprint arXiv:2105.03011.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2019. BERT: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers), pages 4171­4186, Minneapolis, Minnesota. Association for Computational Linguistics.
+Bhuwan Dhingra, Manzil Zaheer, Vidhisha Balachandran, Graham Neubig, Ruslan Salakhutdinov, and William W Cohen. 2020. Differentiable reasoning over a virtual knowledge base. arXiv preprint arXiv:2002.10640.
+Yifan Gao, Chien-Sheng Wu, Jingjing Li, Shafiq Joty, Steven CH Hoi, Caiming Xiong, Irwin King, and Michael R Lyu. 2020. Discern: Discourse-aware entailment reasoning network
+
+for conversational machine reading. arXiv preprint arXiv:2010.01838.
+Kelvin Guu, Kenton Lee, Zora Tung, Panupong Pasupat, and Ming-Wei Chang. 2020. Realm: Retrieval-augmented language model pretraining. arXiv preprint arXiv:2002.08909.
+
+read, rerank, then iterate: Answering opendomain questions of varying reasoning steps from text.
+Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and Percy Liang. 2016. Squad: 100,000+ questions for machine comprehension of text.
+
+Vladimir Karpukhin, Barlas Oguz, Sewon Min, Ledell Wu, Sergey Edunov, Danqi Chen, and Wen-tau Yih. 2020. Dense passage retrieval for open-domain question answering. arXiv preprint arXiv:2004.04906.
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen tau Yih, Tim Rocktäschel, Sebastian Riedel, and Douwe Kiela. 2021. Retrieval-augmented generation for knowledge-intensive nlp tasks.
+Shaobo Li, Xiaoguang Li, Lifeng Shang, Xin Jiang, Qun Liu, Chengjie Sun, Zhenzhou Ji, and Bingquan Liu. 2020. Hopretriever: Retrieve hops over wikipedia to answer complex questions.
+
+Marzieh Saeidi, Max Bartolo, Patrick Lewis, Sameer Singh, Tim Rocktäschel, Mike Sheldon, Guillaume Bouchard, and Sebastian Riedel. 2018. Interpretation of natural language rules in conversational machine reading. arXiv preprint arXiv:1809.01494.
+Haitian Sun, Tania Bedrax-Weiss, and William W. Cohen. 2019. Pullnet: Open domain question answering with iterative retrieval on knowledge bases and text.
+Haitian Sun, Bhuwan Dhingra, Manzil Zaheer, Kathryn Mazaitis, Ruslan Salakhutdinov, and William W Cohen. 2018. Open domain question answering using early fusion of knowledge bases and text. arXiv preprint arXiv:1809.00782.
+
+Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Mandar Joshi, Danqi Chen, Omer Levy, Mike Lewis, Luke Zettlemoyer, and Veselin Stoyanov. 2019. Roberta: A robustly optimized bert pretraining approach. arXiv preprint arXiv:1907.11692.
+Alexander Miller, Adam Fisch, Jesse Dodge, Amir-Hossein Karimi, Antoine Bordes, and Jason Weston. 2016. Key-value memory networks for directly reading documents.
+Sewon Min, Danqi Chen, Luke Zettlemoyer, and Hannaneh Hajishirzi. 2020. Knowledge guided text retrieval and reading for open domain question answering.
+Aaron van den Oord, Yazhe Li, and Oriol Vinyals. 2018. Representation learning with contrastive predictive coding. arXiv preprint arXiv:1807.03748.
+
+Haitian Sun, Pat Verga, Bhuwan Dhingra, Ruslan Salakhutdinov, and William W Cohen. 2021. Reasoning over virtual knowledge bases with open predicate relations. arXiv preprint arXiv:2102.07043.
+Alon Talmor and Jonathan Berant. 2018. The web as a knowledge-base for answering complex questions.
+Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, et al. 2020. Big bird: Transformers for longer sequences. arXiv preprint arXiv:2007.14062.
+Chen Zhao, Chenyan Xiong, Jordan Boyd-Graber, and Hal Daumé III au2. 2021. Multi-step reasoning over unstructured text with beam dense retrieval.
+
+Siru Ouyang, Zhuosheng Zhang, and Hai Zhao. 2020. Dialogue graph modeling for conversational machine reading.
+
+Peng Qi, Haejun Lee, Oghenetegiri "TG" Sido, and Christopher D. Manning. 2021. Retrieve,
+
+

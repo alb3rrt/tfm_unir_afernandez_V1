@@ -1,0 +1,1203 @@
+Reinforced Iterative Knowledge Distillation for Cross-Lingual Named Entity Recognition
+
+arXiv:2106.00241v1 [cs.CL] 1 Jun 2021
+
+Shining Liang1,2,, Ming Gong3, Jian Pei4, Linjun Shou3, Wanli Zuo1,2, Xianglin Zuo1,2, Daxin Jiang3
+1College of Computer Science and Technology, Jilin University 2Key laboratory of Symbolic Computation and Knowledge Engineering, Ministry of Education
+3STCA NLP Group, Microsoft 4School of Computing Science, Simon Fraser University
+{liangsn17,zuoxl17}@mails.jlu.edu.cn,{migon,lisho,djiang}@microsoft.com,jpei@cs.sfu.ca,zuowl@jlu.edu.cn
+
+ABSTRACT
+Named entity recognition (NER) is a fundamental component in many applications, such as Web Search and Voice Assistants. Although deep neural networks greatly improve the performance of NER, due to the requirement of large amounts of training data, deep neural networks can hardly scale out to many languages in an industry setting. To tackle this challenge, cross-lingual NER transfers knowledge from a rich-resource language to languages with low resources through pre-trained multilingual language models. Instead of using training data in target languages, cross-lingual NER has to rely on only training data in source languages, and optionally adds the translated training data derived from source languages. However, the existing cross-lingual NER methods do not make good use of rich unlabeled data in target languages, which is relatively easy to collect in industry applications. To address the opportunities and challenges, in this paper we describe our novel practice in Microsoft to leverage such large amounts of unlabeled data in target languages in real production settings. To effectively extract weak supervision signals from the unlabeled data, we develop a novel approach based on the ideas of semi-supervised learning and reinforcement learning. The empirical study on three benchmark data sets verifies that our approach establishes the new state-ofthe-art performance with clear edges. Now, the NER techniques reported in this paper are on their way to become a fundamental component for Web ranking, Entity Pane, Answers Triggering, and Question Answering in the Microsoft Bing search engine. Moreover, our techniques will also serve as part of the Spoken Language Understanding module for a commercial voice assistant. We plan to open source the code of the prototype framework after deployment.
+Work done during the first author's internship at Microsoft STCA. Daxin Jiang and Xianglin Zuo are the corresponding authors.
+Permission to make digital or hard copies of all or part of this work for personal or classroom use is granted without fee provided that copies are not made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for components of this work owned by others than ACM must be honored. Abstracting with credit is permitted. To copy otherwise, or republish, to post on servers or to redistribute to lists, requires prior specific permission and/or a fee. Request permissions from permissions@acm.org. KDD '21, August 14­18, 2021, Virtual Event, Singapore © 2021 Association for Computing Machinery. ACM ISBN 978-1-4503-8332-5/21/08. . . $15.00 https://doi.org/10.1145/3447548.3467196
+
+CCS CONCEPTS
+· Information systems  Information extraction; · Computing methodologies  Natural language processing; Reinforcement learning.
+KEYWORDS
+named entity recognition, knowledge distillation, reinforcement learning, cross lingual
+ACM Reference Format: Shining Liang, Ming Gong, Jian Pei, Linjun Shou, Wanli Zuo, Xianglin Zuo, Daxin Jiang. 2021. Reinforced Iterative Knowledge Distillation for CrossLingual Named Entity Recognition. In Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '21), August 14­18, 2021, Virtual Event, Singapore. ACM, New York, NY, USA, 9 pages. https://doi.org/10.1145/3447548.3467196
+1 INTRODUCTION
+Named entity recognition (NER) [37] identifies text spans that belong to predefined entity categories, such as persons, locations, and organizations. For example, in the sentence "John Doe wrote to the association of happy entrepreneurs.", NER may identify that the first two words, "John Doe", refer to a person, and the last five words, "the association of happy entrepreneurs" refer to an organization. As a fundamental component in Natural Language Processing (NLP), NER has numerous applications in various industrial products. For example, in a commercial Web search engine, such as Microsoft Bing, NER is crucial for Query Understanding [4], Web Information Extraction [27], and Question Answering [8, 17]. For voice assistants such as Siri, Alexa, and Cortana, NER is a key building block for Spoken Language Understanding (SLU) [42]. For global companies, such as Microsoft, cross-lingual NER is critical to deploy and maintain their products across hundreds of regions with a large number of languages (typically over one hundred).
+Recently, deep neural networks achieve great performance in NER [1, 5]. However, deep neural network models typically require large amounts of training data, which presents a huge challenge for global companies to deploy and maintain their products across different regions with many languages. Importantly, labeling training data is not a one-off effort, instead, maintaining high-quality NER models requires periodical training data refresh, e.g., tens of thousands of new annotated instances every few months per language. Moreover, with the evolving of products, there are often
+
+Table 1: The performance comparison between NER performance in English and some target languages. Following [36], we fine-tune mBERT with English data and directly test on the target languages.
+
+Languages English Spanish
+
+Dutch
+
+German
+
+F1 Score
+
+90.87 75.56 (-15.31) 78.86 (-12.01) 71.94 (-18.93)
+
+needs for schema update, e.g., adding more classes of named entities to be recognized, merging some existing classes, or retiring some classes. Such schema updates cause extra cost in adjusting or even relabeling training data to comply with new schema. Although the crowd-sourcing approach can substantially reduce the cost of data labeling, when data refreshes, schema updates, as well as a large number of languages are considered, it is still too expensive, if not unrealistic at all, to manually label training data at an industrial scale. In addition to financial constraints, hiring crowd-sourcing workers, building labeling guidelines and pipelines, and controlling labeling quality especially on low resource languages are also challenging and time-consuming. Therefore, scaling out NER to a large number of languages remains a grand challenge to the industry.
+To reduce the cost of human labeling training data, cross-lingual NER tries to transfer knowledge from rich-resource (source) languages to low-resource (target) languages. This approach usually pre-trains a multilingual model to learn a unified representation of different languages (such as mBERT [13], Unicoder [11], and XLM-Roberta [2]). Then the pre-trained model is further fine-tuned using the training data in the source language, and is applied to other languages [20, 43]. Although this approach has shown good results for classification tasks, the performance on sequence labeling tasks, such as NER and SLU, is still far from perfect [12, 43]. Table 1 compares the NER performance in English versus that in some target languages. Following [36], we fine-tune mBERT with English data and directly test on the target languages. A dramatic drop in F1 score in every target language clearly indicates a big performance loss.
+To enhance the transferability of cross-lingual models, several methods convert training examples in a source language into examples in a target language through machine translation [12, 25]. The annotation of entities is derived through word or phrase alignments between source and target languages [14, 16]. Despite the improved transferability across languages, this approach still suffers from several critical limitations. First, parallel data and machine translators may not be available for all target languages. Second, translated data may not be diverse enough compared to real target data, and there may exist some translation artifacts in the data distribution [19]. Finally, there are both translation errors and alignment errors in translated data, which hurt the performance of models [14].
+In this paper, we describe a different approach to cross-lingual NER practiced in the Microsoft product team. Our approach is based on the industry reality that in real product settings, it is often feasible to collect large amounts of unlabeled data in target languages. For example, in both Web search engines and voice assistants, there are huge amounts of user queries or utterances recorded in the search/product logs. Compared with the existing approaches, our method does not need parallel data or machine translators. Moreover, the real user input is much larger in size and much richer in
+
+the diversity of expressions. Leveraging such rich and diversified unlabeled data is far from straightforward. Although some recent effort [22] explore a semi-supervised knowledge distillation [10] approach to allow a student model to learn the knowledge of NER from the teacher model through the distillation process, as shown in Table 1 as well as the previous works [12, 43], fine-tuning using English data alone often leads to inferior results for sequence labeling tasks.
+In our approach, we adopt the knowledge distillation framework and use a weak model M0 tuned from English data alone as a starting point. The novelty of our approach is that we develop a reinforcement learning (RL) based framework, which trains a policy network to predict the utility of an unlabeled example to improve the student model M1. Then, based on the predicted utility, the examples are selectively added to the knowledge distillation process. We observe that this screening process can effectively improve the performance of the derived student model. Moreover, we adopt a bootstrapping approach and extend the knowledge distillation step into an iterative process: the student model derived from the last round can take the role of teacher model in the next round. With the guidance of the policy network, the noise in supervision signals, that is, the prediction errors made by teacher models is reduced step by step. The model evolves towards better performance for NER in each round, which in turn generates stronger supervision signals for the next round.
+We make the following contributions in this paper. First, we target an underlying component in many industrial applications and call out the unaddressed challenges for cross-lingual NER. After analyzing various existing approaches to this problem and considering the industry practice, we propose to leverage large amounts of unlabeled data, which can often be easily collected in real applications. Second, we present our findings that by smartly selecting the unlabeled data in an iterated reinforcement learning framework, the model performance can be improved substantially. We develop an industry solution that can be used in many products built on NER. Third, we conduct experiments on three widely used datasets and demonstrate the effectiveness of the proposed framework. We establish the new SOTA performance with a clear gain comparing to the existing strong baselines. Now, the NER techniques reported in this paper are on their way to become a fundamental component for Web ranking, Entity Pane, Answers Triggering, and Question Answering in the Microsoft Bing search engine. Moreover, our techniques will also serve as part of the Spoken Language Understanding module for a commercial voice assistant.
+The rest of the paper is organized as follows. We review the related work in Section 2, and present our method in Section 3. We report an empirical study in Section 4, and conclude the paper in Section 5. Table 2 summarizes some frequently used symbols.
+2 RELATED WORK
+Our approach is highly related to the existing work on cross-lingual NER, knowledge distillation, and reinforcement learning. In this section, we briefly review some most related studies, in addition to those discussed in Section 1.
+Zero-shot cross-lingual NER seeks to extract entities in a target language but assumes only annotated data in a source language.
+
+Table 2: Frequently used notations in the paper.
+
+Symbol
+
+~
+
+M   M   
+M
+
+
+
+
+
+
+A
+
+D
+
+
+,
+
+D
+
+Description
+probability distribution of teacher/student model model for source language model for target language student model in the -th distillation iteration policy network used to select instances batch of state vectors sampled action with policy network batches of instances and selected instances in target language
+
+Pseudo training data in a target language may be generated by leveraging parallel corpus and word alignment models [14] or by machine translation approaches [16, 25]. In addition to training using synthetic data, some approaches directly transfer models in source languages to target languages using a shared vector space to represent different languages [7, 31].
+Recently, pre-trained multilingual language models are adopted to address the challenge of cross-lingual transfer using only the labeled training data in the source language and directly transferring to target languages [15, 43, 44]. Taking advantage of large-scale unsupervised pre-training, these methods achieve prominent results in cross-lingual NER. However, the performance in target languages is still unsatisfactory due to the lack of corresponding knowledge about target languages. In this work, on top of those pre-trained multilingual models, we propose an iterative distillation framework under the guidance of reinforcement learning to enhance the cross-lingual transfer-ability using unlabeled data in target languages.
+Knowledge distillation (KD) is effective in transferring knowledge from a complex teacher model to a simple student model [10, 32]. In a standard KD procedure, a teacher model is first obtained by training using golden standard labeled data. A student model is then optimized by learning from the ground-truth labels as well as mimicking the output distribution of the teacher model. KD has also been used for cross-lingual transferring. For example, Xu and Yang [45] leverage soft labels produced by a model in a richresource language to train a target language model on the parallel corpus. Wu et al. [22] train a teacher model based on a pre-trained multilingual language model and directly distill knowledge using unlabeled data in target languages. Nevertheless, these methods directly perform knowledge distillation with all instances and do not address the subtlety that some samples may have a negative impact due to teacher model prediction errors.
+In this work, we establish a reinforcement learning based framework to select unlabeled instances for knowledge distillation in cross-lingual knowledge transfer by removing the errors in teacher model predictions in the target language. This framework can be applied to not only NER, but also more cross-lingual Web applications, such as relation extraction and question answering.
+Reinforcement learning (RL) [40] has been widely used in natural language processing, such as dialogue systems [33] and machine translation [18]. Those methods leverage semantic information as rewards to train generative models. Particularly, a series of studies use RL to select proper training instances. For example, Wang et al. [26] leverage a selector to select source domain data closed to
+
+the target and accept the reward from the discriminator and the transfer learning module.
+Motivated by the above studies, in this work, we leverage RL to smartly select unlabeled instances for knowledge distillation. To the best of our knowledge, our work is the first to apply reinforcement learning for cross-lingual transfer learning.
+
+3 METHODOLOGY
+In this section, we first define the problem and review the preliminaries. Then, we introduce our iterative knowledge distillation framework for cross-lingual NER. Last, we develop our reinforced selective knowledge distillation technique.
+
+3.1 Problem Definition and Preliminaries
+
+We model cross-lingual named entity recognition as a sequence
+
+labeling problem. Given a sentence  = { }=1 with  tokens, a NER model produces a sequence of labels  = { }=1, where  indicates the category of the entity (or not an entity) of the
+
+corresponding
+
+token  .
+
+Denote by
+
+D
+  
+
+=
+
+{ (, ) }
+
+the
+
+annotated
+
+data in the source language, where the superscript  indicates that
+
+this is a data set in the source language. In the target language,
+
+annotated data is not available for training except for a test set
+
+D , where the superscript  indicates that those are data sets in
+
+the target language. We also assume unlabeled data in the target
+
+language, denoted by D
+
+= {}, which may be leveraged
+
+
+
+for knowledge distillation. Formally, zero-shot cross-lingual NER
+
+is to learn a model by leveraging both D and D
+
+to
+
+  
+
+
+
+obtain
+
+good
+
+performance
+
+on
+
+D
+
+
+.
+
+An encoder M is used to learn contextualized embedding
+
+and produce hidden states  = { }=0, that is,  = M (; ), where  denotes the parameters of the encoder. Here we adopt
+
+two pre-trained multilingual language models, mBERT and XLM-
+
+Roberta (XLM-R) as the basic encoders separately, to verify the
+
+generalization of our method. In general, any encoding model that
+
+produces a hidden state  for the corresponding input token 
+
+may be employed. For each token of the sequence, the probability
+
+of each category is learned by ( ; ) = softmax( ·  + ), where   R× and   R are the weight and the bias term.
+
+In general, the Knowledge Distillation (KD) approach [10] uses
+
+the soft output (logits) of one large model or the ensemble of mul-
+
+tiple large models as the knowledge and transfers the knowledge
+
+to a small/single student model. The distilled student model can
+
+achieve decent performance with high efficiency as well. Although
+
+KD was initially proposed for model compression, in this paper,
+
+we apply this approach to cross-lingual NER in order to transfer
+
+knowledge learned from the training data in the (rich-resource)
+
+source language to the (low-resource) target language.
+
+For a NER task, given an unlabeled sentence   D
+
+,
+
+
+
+the distillation loss is the mean squared error loss between the pre-
+
+dicted probability distributions of entity labels by the student model
+
+and that of the teacher model. To be specific, the loss with regard
+
+to  to train a student model is formalized as L (;  ) =
+
+1 
+
+  =1
+
+MSE(~(
+
+;
+
+
+
+),
+
+~( ;  )), where 
+
+and  are the parameters of the teacher model and the stu-
+
+dent model, respectively, ~(·;  ) and ~(·;  ) are the
+
+predicted label distributions of the teacher model and the student
+
+
+1 2 3 4 5 6 ... N
+
+Update
+
+Inference
+Model Mk - Teacher
+ with soft labels
+RL Selective KD
+  with soft labels
+2 3 5 7 10 ...
+
+Unlabeled Target Batch
+States Policy Agent
+Actions
+Selected Target Batch
+
+Cached distillation loss
+
+Current distillation loss
+
+Delayed reward
+
+Target Model (Mk+1)
+
+Probability Distribution
+Knowledge Distillation
+
+Training
+Model Mk+1 - Student
+
+Source Model (Mk)
+
+Probability Distribution
+
+(a)
+
+(b)
+
+Figure 1: The architecture of our proposed method Reinforced Iterative Knowledge Distillation for cross-lingual NER. (a) The iterative KD framework. (b) RL based selective KD. Please note that model M0 is first obtained through fine-tuning the base model with the labeled data D in the source language.
+  
+
+model, respectively, and MSE represents the mean squared error. The parameters of the teacher model are fixed during the training. In our knowledge distillation framework, both the teacher model and the student model share the same architecture (multilingual models) but with different parameter weights.
+3.2 Iterative KD for Cross-Lingual NER
+One challenge in cross-lingual NER is that the teacher model is trained by the source language but applied to the target language. Due to the differences between languages, the knowledge transferred from teacher model to student model may contain much noise. To address this challenge, we propose a framework Reinforced Iterative Knowledge Distillation (or RIKD for short).
+The overall architecture of our method is shown in Figure 1(a). A source multilingual model is first trained using the annotated data D in the source language. The source multilingual model
+  
+is leveraged as a teacher model to train a target model by transferring the shared knowledge from the source language to the target language. To reduce noise in knowledge transfer, we introduce a reinforced instance selector to select unlabeled data in the distillation step for better transfer learning. Through the smart selection of examples in knowledge distillation, the student model can be improved over the teacher model on the target language. Therefore, we further iterate this RL-based knowledge distillation step multiple rounds to drive the final target model, where the student model derived from the last round takes the role of teacher model in the next round.
+In cross-lingual knowledge distillation for NER, although the source model M0 is only trained using the labeled data in the source language, it is capable of inferring directly on the cases in the target language, since it is benefited from the language-independent common feature space of pre-trained multilingual encoder and entity-specific knowledge of the labeled data. The cross-lingual transfer step aims to transfer language-agnostic knowledge from the source model to the model in the target language by minimizing the distance between the prediction distribution of the source model and that of the target model.
+
+Algorithm 1 : Reinforced Iterative Knowledge Distillation.
+
+Input: Iteration number ; Training steps number  ; Pre-trained model
+
+M0
+
+in
+
+source
+
+language;
+
+Target
+
+language
+
+unlabeled
+
+data
+
+D
+
+
+;
+
+Base NER model M  initialized using the pre-trained weights of
+
+mBERT or XLM-R.
+
+Output: Distilled student model M for target language. 1: for  = 1 to  do
+
+2: Initialize a new model M with M  . 3: for  = 1 to  do
+
+4:
+
+Sample a batch D from D
+
+then distill knowledge from
+
+
+
+
+
+M -1
+
+to
+
+M
+
+with
+
+D
+
+
+by
+
+Algorithm
+
+2.
+
+5: end for
+
+6: end for
+
+Specifically, given an instance  in the target language, we
+
+minimize the MSE of the output probability distributions be-
+
+tween the source model and the target model, which is given
+
+by L (;  )
+
+=
+
+1 
+
+  =1
+
+MSE(~(
+
+;
+
+
+
+),
+
+~( ;  )),
+
+where  and  are the parameters of the source
+
+model and the target model, respectively, and ~(·;  ) and
+
+~(·;  ) are the predicted label distributions of the source
+
+model and the target model, respectively. This cross-lingual distil-
+
+lation step enables the target model to leverage the unlabeled data
+
+in the target language by mimicking the soft labels predicted by
+
+the source model to transfer knowledge from the source language.
+
+Inspired by the self-training paradigm [23, 28], where a model
+
+itself is used to generate labels from unlabeled data and the model
+
+is retrained using the same structure based on the generated labels,
+
+we further leverage the target model to produce the probability
+
+distributions of the training instances on the unlabeled data in the
+
+target language and conduct another knowledge distillation step to
+
+derive a new model in the target language. The training objective
+
+of this distillation step is formulated as
+
+L (;  )
+
+=
+
+1
+
+
+ MSE(~( ; -1),
+
+~( ;  ))
+
+(1)
+
+
+
+ =1
+
+where -1 and  are the parameters of the model from the previous iteration and the new model to be trained, respectively, and ~(·; -1) and ~(·;  ) are the predicted label distributions of these two models, respectively.
+This iterative training step may be conducted multiple rounds by leveraging unlabeled data in the target language, which is relatively easy to obtain than labeled data. In our experiments on the benchmark datasets, we find that three rounds can achieve decent and stable results. Algorithm 1 shows the pseudo-code of our RIKD method.
+
+3.3 Reinforced Selective Knowledge
+Distillation
+Now let us explain the instance selector in our approach shown in Figure 1(b). While conventional knowledge distillation directly transfers knowledge from the source model to the target model, the discrepancy between the source language and the target language may induce noise in the soft labels of the source model. As shown in Table 1, the model in the source language has low performances on other languages, thus the supervision from the predictions of the model in the source language may be noisy.
+To address this challenge, we use reinforcement learning to select the most informative training instances to strengthen transfer learning between the two languages (or two generations after the first round). We adopt this method in each round of RIKD. The major elements in our reinforcement learning procedure include states, actions, and awards.
+
+3.3.1 State. We model the state of a given unlabeled instance in
+
+the target language by a continuous real-valued vector   R . Given a target language instance , we first obtain a pseudo labeled-
+
+sequence ^ = {^ }=1 using the source model, and use the concatenation of a series of features to form the state vector.
+
+The first two features are based on the prediction results from
+
+the source model only. The number of predicted entities indicates
+
+the informativeness of an instance by the source model, that is,
+
+ =
+
+  =1
+
+(^
+
+
+
+),
+
+where 
+
+denotes
+
+non-entities in BIO
+
+tagging schema following [43]. The inference loss of the source model
+
+indicates how confident the source model is about the prediction,
+
+ 
+
+= -1
+
+
+  =1
+
+
+
+(~
+
+(^
+
+|
+
+;
+
+
+
+)).
+
+The third feature is the MSE loss of the output prob-
+
+ability distributions between the source model and the tar-
+
+get model on the unlabeled instances, which is  =
+
+1 
+
+  =1
+
+MSE(~(
+
+;
+
+
+
+),
+
+~( ;  )). It combines the pre-
+
+dictions by the source model and the target model. This feature
+
+is based on the intuition that the agreement between the source
+
+model and the target model may indicate how well the target model
+
+imitates the source model on the current instance.
+
+The fourth feature describes the internal representation as well
+
+as the output for the target model after seeing the example using the
+
+label-aware representation of the target model. We convert the pre-
+
+dicted label ^ into label embedding  through a shared trainable embedding matrix   R× , which is trained during the optimiza-
+
+tion process of policy network. Then a linear transformation is used
+
+to
+
+build
+
+a
+
+label-aware
+
+vector
+
+for
+
+each
+
+token:
+
+
+
+=
+
+
+
+(
+
+[
+
+
+;
+
+ ])
+
++  ,
+
+where   R×(+ ) and   R are the weight matrix and
+
+the bias term, respectively, symbol [; ] denotes the concatenation operation and  is the hidden state of token  at the last layer of the
+
+target model. A max-pooling operation over the length is used to
+generate the semantic feature:  = MaxPooling({ }=1). Last, we use the length of the target unlabeled instance  = ,
+which relies on only the instance itself and is used to balance the effects of the instance length and number of predicted entities. The parameters introduced to learn the state features are part of the policy network to be trained.
+
+3.3.2 Action. We introduce a binary action space   {0, 1}, which indicates whether to keep or drop the current instance  from a batch of instances to optimize the target model. A policy function  ( ) takes the state as input and outputs the probability distribution where the action  is derived from. The policy network  is implemented using a two-layer fully connected network computed as  ( ) = sigmoid(2 ·  (1 ·  + 1) + 2), where  and  , respectively, are the weight matrix and the bias term of the -th fully connected layer, and  is the ReLU activation function.
+
+3.3.3 Reward. The selector takes as input a batch of states 
+
+corresponding to a batch of unlabeled data D , and samples actions
+
+to keep a subset D of the batch. Since we sample a batch of actions in each updating step, the proposed method assigns one reward to
+
+a batch of actions.
+
+We adopt delayed reward [26] to update the selector. Recall that
+
+we aim to select a subset of informative training data to improve
+
+the cross-lingual NER task. For the -th training step in iteration
+
+, we sample actions and use the selected sub-batch to optimize
+
+the
+
+new
+
+target
+
+model
+
+M
+
+with
+
+parameters
+
+ .
+
+
+The
+
+optimization
+
+objective is formulated as below according to Equation 1.
+
+L
+
+(
+
+D
+
+;
+
+
+
+
+)
+
+=
+
+1  L (;  )
+
+| D | D
+
+
+
+(2)
+
+Since we target the zero-shot setting where no labeled data is
+available in the target language including development set, we
+use the training loss delta on D to obtain the delayed reward motivated by Yuan et al. [9], that is,
+
+
+
+=
+
+L
+
+(
+
+D
+
+;
+
+  -1
+
+
+)
+
+-
+
+L
+
+(
+
+D
+
+;
+
+
+
+
+)
+
+(3)
+
+where
+
+L (D ;
+
+  -1 )
+
+
+is
+
+cached
+
+beforehand,
+
+and
+
+initialized
+
+by
+
+the
+
+training loss of the last warm-up training step when the reinforced
+
+training starts.
+
+3.3.4 Optimization. We use the policy-based RL method [24] to train the selector. Algorithm 2 shows the pseudo-code. First, we pre-train the target model without instance selection for several warm-up steps. Second, for each batch D , we sample actions based
+
+on the probabilities given by the policy network. Denote by D the selected instances. Those selected target-language instances are then used as the inputs to perform knowledge distillation and update the parameters of the target model. The selector remains unchanged. Last, we calculate the delayed reward  according to Equation 3 and optimize the selector using this reward with cached states and actions, that is,
+
+| |
+
+L
+
+(
+
+
+
+
+,
+
+
+
+)
+
+=
+
+1 | |
+
+
+
+ (- ) [ (1 -  ) (1 -  ( )) +   ( ) ]
+ =1
+
+(4)
+
+Algorithm 2 : Algorithm for Reinforced Instance Selection.
+
+Input: Policy network  ; Target language unlabeled data D
+
+;
+
+
+
+Teacher model M-1 and student model M initialized using mBERT
+
+or XLM-R; Warm-up training steps  and reinforced training steps  ,
+
+ =  +  .
+
+Output: Distilled student model  in iteration .
+
+1: for   [1,  ] do
+
+2: Sample a random batch D from D
+
+.
+
+
+
+  
+
+3: Update the target model with D according to Equation 1.
+
+
+4: end for
+
+5: for   [1,  ] do
+
+6: Sample a random batch D from D
+
+.
+
+
+
+  
+
+|D |
+
+7:
+
+Obtain states 
+
+
+=
+
+{
+
+}
+
+
+ =1
+
+for
+
+instances
+
+in
+
+D
+
+
+with
+
+M -1
+
+and
+
+M .
+
+8: Sample a batch of actions A based on the probabilities estimated by  ( ).
+
+9: Obtain the selected training batch D according to A . 10: Update the target model with D according to Equation 2. 11: Utilize the training loss of the current step and the previous step to
+
+obtain delayed reward  according to Equation 3.
+
+12:
+
+Update
+
+policy
+
+model
+
+
+
+with  ,
+
+
+
+
+and
+
+A
+
+according
+
+to
+
+Equation
+
+4.
+
+13: end for
+
+4 AN EMPIRICAL STUDY
+In this section, we report a systematic empirical study using three well-accepted benchmark data sets and compare our proposed methods with a series of state-of-the-art methods.
+4.1 Datasets
+We use the datasets from CoNLL 2002 and 2003 NER shared tasks [38, 39] with 4 distinct languages (Spanish, Dutch, English, and German). Moreover, to evaluate the generalization and scalability of our proposed framework, we select three non-western languages (Arabic, Hindi, and Chinese) from another multilingual NER dataset: WikiAnn [29], partitioned by Rahimi et al. [3]. Each datasets is split into training, development, and test sets. The statistics of those datasets are shown in Table 3. All of those datasets are annotated with 4 types of entities, namely PER, LOC, ORG and MISC in BIO tagging schema following Wu et al. [22] and Wu and Dredze [43]. The words are tokenized using WordPiece [30] and, following Wu et al. [22] and Wu and Dredze [43], we only tag the first sub-word if a word is split.
+For both CoNLL and WikiAnn, we use English as the source language and the others as target languages. The pre-trained multilingual language models are fine-tuned using the annotated English training data. As for target languages, we remove the entity labels in the corresponding training data and adopt them as the unlabeled target-language instances. Note that to follow the zero-shot setting, we use the English development set to select the best checkpoints and evaluate them directly on the target language test sets.
+4.2 Implementation Details
+We leverage the PyTorch version of cased multilingual BERTbase and XLM-Rbase in HuggingFace's Transformers as the basic encoders for all variants. Each of the two models has 12 Transformer layers,
+ https://github.com/huggingface/transformers
+
+Table 3: Statistics of the datasets. (a) Statistics of CoNLL.
+
+Language
+English-en (CoNLL-2003)
+Spanish-es (CoNLL-2002)
+Dutch-nl (CoNLL-2002)
+German-de (CoNLL-2003)
+
+Type
+Sentence Entity
+Sentence Entity
+Sentence Entity
+Sentence Entity
+
+Train
+14,987 23,499
+8,323 18,798
+15,806 13,344
+12,705 11,851
+
+Dev
+3,466 5,942
+1,915 4,351
+2,895 2,616
+3,068 4,833
+
+Test
+3,684 5,648
+1,517 3,558
+5,195 3,941
+3,160 3,673
+
+(b) Statistics of WikiAnn.
+
+Language English-en Arabic-ar Hindi-hi Chinese-zh
+
+Type
+Sentence Entity
+Sentence Entity
+Sentence Entity
+Sentence Entity
+
+Train
+20,000 27,931
+20,000 22,500
+5,000 6,124
+20,000 25,031
+
+Dev
+10,000 14,146
+10,000 11,266
+1,000 1,226
+10,000 12,493
+
+Test
+10,000 13,958
+10,000 11,259
+1,000 1,228
+10,000 12,532
+
+12 self-attention heads and 768 hidden units (i.e.  = 768). The hidden sizes of the policy network and the label embedding vector are set to  =  = 256 and  = 50, respectively. We set the batch size to 64 and train each model for 5 epochs with a linear scheduler. The parameters of embedding and the bottom three layers are fixed, following Wu and Dredze [43]. We use the AdamW optimizer [35] for all source and target models with a weight decay rate selected from {5e-3, 7.5e-3} and a learning rate chosen from {3e-5, 5e-5, 7e-5}. The policy network is optimized using stochastic gradient descent and the learning rate is set to 0.01. The warm-up steps is selected from {250, 500}. For evaluation, we use entity-level F1 score as the metric. The target models are evaluated on the development set every 100 steps and the checkpoints are saved based on the evaluation results. Training of each round using 8 Tesla V100 GPUs takes 5 - 40 minutes depending on the encoder and target language.
+4.3 Baseline Models
+We compare our method with the following baselines. [41] is trained using cross-lingual word cluster features. [6, 14] leverage extra knowledge base or word alignment tools to annotate training data. [16, 25] generate target-language training data with machine translation. [36, 43] are trained using monolingual data and directly inference in the target language. [21] leverages a meta-learning based method that benefits from similar instances. [22] explores teacherstudent paradigm to directly distill knowledge from a source language to a target language using the unlabeled data in the target language. [44] proposes a contrastive alignment objective for multilingual encoders and outperforms previous word-level alignments. [15] introduces language, task, and invertible adapters to enable
+
+Table 4: The F1 scores of our method and the baseline models. Notes:  the reported results w.r.t. with the bottom three layers of language model fixed. ¶ statistically significant improvements over Wu et al. [22].  the approaches utilizing training data from multiple source languages.
+(a) Results on CoNLL.
+
+Method
+Täckström [41] Tsai et al. [6] Ni et al. [14] Mayhew et al. [25] Xie et al. [16] Wu and Dredze [43] Moon [36] Wu et al. [21] Wu et al. [22] (mBERT)
+RIKD (mBERT)
+Wu et al. [22] (XLM-R)
+RIKD (XLM-R)
+Täckström [41]  Moon [36]  Wu et al. [22] 
+
+es
+59.30 60.55 65.10 65.95 72.37 74.50 75.67 76.75 76.94 77.84 ¶
+78.77 79.46 ¶
+61.90 76.53 78.00
+
+nl
+58.40 61.56 65.40 66.50 71.25 79.50 80.38 80.44 80.89 82.46 ¶
+80.99 81.40 ¶
+59.90 83.35 81.33
+
+de
+40.40 48.12 58.50 59.11 57.76 71.10 71.42 73.16 73.22 75.48 ¶
+74.67 78.40 ¶
+36.40 72.44 75.33
+
+Average
+52.70 56.74 63.00 63.85 67.13 75.03 75.82 76.78 77.02 78.59 ¶
+78.14 79.75 ¶
+52.73 77.44 78.22
+
+(b) Results on WikiAnn.
+
+Method
+Wu and Dredze [44] Wu et al. [22] (mBERT) RIKD (mBERT)
+Pfeiffer et al. [15] Wu and Dredze [44] Wu et al. [22] (XLM-R) RIKD (XLM-R)
+
+ar
+42.30 43.12 45.96 ¶
+41.80 45.50 50.91 54.46 ¶
+
+hi
+67.60 69.54 70.28 ¶
+66.60 72.48 74.42 ¶
+
+zh
+52.90 48.12 50.40 ¶
+20.50 43.90 31.14 37.48 ¶
+
+Average
+54.27 53.59 55.55 ¶
+52.00 51.51 55.45 ¶
+
+pre-trained multilingual models with high portability and efficient transfer capability. We test statistical significance using t-test with p-value threshold 0.05.
+4.4 Major Results
+Table 4 shows the results on cross-lingual NER of our method and the baseline methods. The first block compares our model (on top of mBERT) with the SOTA mBERT-based and the nonpretrained model based approaches. The second block compares our method (on top of XLM-R) with the SOTA XLM-R based models. The third block of Table 4 (a) denote works utilizing training data from multiple source languages. We can see that our proposed method significantly outperforms the baseline methods and achieves the new state-of-the-art performance. The results clearly manifest the effectiveness of the proposed cross-lingual NER framework.
+The pre-trained contextualized embedding based models [21, 22, 36] outperform by a large margin those models learned from scratch. Our mBERT and XLM-R based methods further achieve average gains of 1.57 and 1.61 percentage points over the strongest
+
+Table 5: F1 scores of ablation of reinforced selector and
+iterative knowledge distillation. RIKDFull is the proposed framework with iterative knowledge distillation and reinforced selectively transfer. -RL removes Reinforced Knowledge Distillation from the full method. -IKD removes Iterative Knowledge Distillation from the full method. -KD removes knowledge distillation from the full method and directly conducts inference using the source model M0.
+
+RIKDFull
+-RL -IKD -RL&IKD -KD
+
+es
+79.46
+79.21 78.90 78.77 76.79
+
+nl
+81.40
+81.21 81.02 80.99 79.88
+
+de
+78.40
+76.65 74.86 74.67 70.64
+
+Average
+79.75
+79.02 (0.73 ) 78.26 (1.49 ) 78.14 (1.60 ) 75.77 (3.97 )
+
+baseline (i.e., [22]) in F1 score on CoNLL, respectively. As for results of non-western languages on WikiAnn, RIKD shows consistent improvements over [22] and non-distillation methods using additional layers [15] and external resource [44]. (Note that Wu and Dredze [44] re-tokenize Chinese dataset and obtain relatively high results.) While the pre-trained methods directly adopt models trained on the source language, our proposed framework enables the model to take advantage of learning target language information from the unlabeled text and thus achieves even better performance.
+In particular, [22] represents the previous state-of-the-art performance. It also employs a teacher-student framework to distill knowledge from a teacher model in the source language to the target model. However, it directly transfers knowledge from a source model but neglects the noise in it. Our proposed reinforced framework selectively transfers knowledge to reduce noise from the source language and fits the target languages better.
+We further compare our method with the state-of-the-art multisource cross-lingual NER approaches [22, 36, 41], where humanannotated data on multiple source languages are assumed available. Although using only labeled data in English and unlabeled data in the target languages, our proposed method achieves the best average performance compared to the SOTA multi-source methods in our experiments. This further verifies that iterative knowledge distillation with reinforced instance selector is effective for the zero-shot cross-lingual NER task.
+From the application point of view, our method is more convenient and less data-consuming, especially for scenarios where multilingual training data is not available. Our proposed method also has great potentials in multi-source settings and other crosslingual tasks, which are left for future work.
+4.5 Further Analysis
+4.5.1 Ablation Study. We conduct experiments on different variants of the proposed framework to investigate the contributions of different components. Table 5 presents the results of removing one component at a time.
+In general, all of the proposed techniques contribute to the crosslingual setting. The full model consistently achieves the best performance on all languages experimented. "-KD" is trained using the annotated data in the source language and directly infers in the target languages. It suffers from a decrease of 3.97 points in
+
+F1 on average. Both the single step and our iterative knowledge distillation settings outperform the direct model transfer approach, indicating that knowledge distillation is an efficient way to transfer knowledge across languages. "-IKD" leads to a gain of 0.11 points in F1 on average compared to "-RL&IKD", which directly performs cross-lingual knowledge distillation. Since the IKD step does not introduce extra supervision signals, we believe that the gain may come from that our iterative distillation framework benefits from better teacher models compared with the single round method.
+The RL-based instance selection module contributes to both a single step and the iterative knowledge distillation framework. Directly forcing the student model in the target language to imitate all behaviors of the teacher model may introduce source language specific bias [34] as well as the teacher model inference errors. The intuition behind our instance selector is that selective distillation from the most informative cases can lead to better knowledge transfer performance on the target languages. The experimental results verify that the RL-based selector is capable of enhancing knowledge distillation by removing the noises in the teacher model prediction.
+4.5.2 Effect of Multiple Iterations in RIKD. We further conduct experiments to study the effect of iterations in the RIKD training framework. Five rounds of iterations are conducted. For each iteration, the RL-based instance selector is leveraged to select instances for KD. The results are shown in Figure 2. Taking German as an example, RIKD gets gains over the last round by 4.22, 1.98, 1.56 in the 1st, 2nd, and 3rd rounds, respectively. This further demonstrates the effectiveness of our proposed iterative training approach. It reduces noises in supervision signals step by step under the guidance of reinforcement learning. The figure also shows that the model performance stabilizes after three rounds.
+83.0
+
+80.0
+
+F1 Score (%)
+
+77.0
+
+74.0
+
+Language es
+
+nl
+
+de
+
+71.0
+
+Average
+
+M0
+
+M1
+
+M2 Iteration M3
+
+M4
+
+M5
+
+Figure 2: Effect of different iterations in RIKD (XLM-R) on
+CoNLL.
+4.5.3 Data Selection Strategy. We study the effect of reinforced training instance selection by comparing with two other selection strategies including Confidence Selection and Agreement Selection.
+A straightforward method for training data selection is to keep those cases that the teacher model can predict with high confidence. Specifically, in an instance  of  tokens, for each token, we use the entity label of the highest probability predicted by the teacher model as the entity label. The confidence of  is the average token entity label probability. That is,
+
+
+
+(;  )
+
+=
+
+1 
+
+
+
+
+
+ =1
+
+max
+entity label
+
+
+
+{~
+
+(
+
+;
+
+
+
+
+
+)}
+
+(5)
+
+For
+
+each instance
+
+
+
+
+
+D
+
+
+with 
+
+(;  )
+
+over a predefined
+
+threshold  ,  is selected; otherwise, it is discarded.
+
+Table 6: Average discard ratio of our approach. We first calculate the percentage of discarded cases in each batch and then average over all training batches in one iteration.
+es nl de ar hi zh Discard ratio (%) 38.8 56.7 52.4 60.8 23.5 57.2
+
+Table 7: Analysis of different selection strategies.
+
+RIKDM1 Agreement Selection
+Confidence Selection
+
+es
+78.90 78.47 78.61
+
+nl
+81.02 77.64 78.54
+
+de
+74.86 72.18 74.45
+
+ar
+52.38 51.71 52.37
+
+hi
+72.88 72.02 71.99
+
+zh
+32.14 32.86 32.15
+
+Average
+65.36 64.15 (1.21 ) 64.69 (0.67 )
+
+Table 8: Analysis of different features in the state vector from Section 3.3.
+
+RIKDM1 -  -  -  -  - 
+
+ar
+52.38 49.98 50.08 51.24 49.20 48.14
+
+hi
+72.88 71.95 71.78 71.77 71.68 72.37
+
+zh
+32.14 30.92 30.31 30.49 28.05 29.77
+
+Average
+52.47 50.95 (2.52 ) 50.72 (1.75 ) 51.17 (1.30 ) 49.64 (2.83 ) 50.09 (2.38 )
+
+Another straightforward way for data selection is based on the agreement between the teacher model prediction and that of the student model. Specifically, the agreement score for each instance is defined as the minus of mean squared loss of the output probability distribution between the source and target model, that is,
+
+ ()
+
+=
+
+-
+
+1
+
+
+ MSE(~( ;  ),
+
+~( ;  ))
+
+(6)
+
+
+
+ =1
+
+For each instance   D , if  () passes a predefined threshold
+
+ ,  is selected otherwise discarded. For fair comparisons, we set  and  properly
+to select a comparable amount of training instances in each batch as our RIKD method. As shown in Table 6, we record the number of discarded instances under our reinforced learning strategy and obtain the average discard ratio for each target language in iteration 1. Besides, we only adopt the performance of RIKD in iteration 1.
+The results in Table 7 show that the reinforced selection method achieves the best results, which verify that RIKD can select more informative cases for better knowledge transfer.
+
+4.5.4 State Vector Study. This section investigates the effect of different features of the proposed state vector. Table 8 shows the results when we remove each feature vector from the state vector introduced in Section 3.3. The results show that ablation of features causes performance to degrade to different extents. Among them  ,  and  show the biggest contributions. One explanation is that these features could represent both the semantic meaning of the input training case but also how noisy the input training instance (in the target language) is. To be specific,  encodes both the internal representation and the predicted labels of the training instance.  denotes the prediction confidence of the source model.  denotes the agreement degree (through MSE metric) between the predictions of source and target models. If the agreement is low, the training instance may have noise.
+
+4.5.5 Application to Industry Scenarios. We further apply RIKD to one production scenario from the Microsoft Bing search engine to illustrate its practical effectiveness. The dataset consists of a human-annotated 50k en training set and multilingual test sets. Large scale unlabeled sentences are collected from web documents for distillation which includes 70.9k, 30.1k, 55.3k for es, hi, and zh respectively and we use the corresponding 5.6k, 3.2k, and 11k test data from the dataset for evaluation. As shown in Table 9, RIKD outperforms Wu et al. [22] by 3.07 average F1 score. This manifests the effectiveness and generalization of our proposed method.
+
+Table 9: Results on industry scenario.
+
+Wu et al. [22] RIKD
+
+es
+77.94 79.59
+
+hi
+65.61 68.29
+
+zh
+31.17 36.06
+
+Average
+58.24 61.31 (3.07 )
+
+5 CONCLUSION AND INDUSTRY IMPACT
+In this paper, we propose a reinforced knowledge distillation framework for cross-lingual named entity recognition (NER). The proposed method iteratively distills transferable knowledge from the model in the source language and performs language adaption using only unlabeled data in the target language. We further introduce a reinforced instance selector that helps to selectively transfer useful knowledge from a teacher model to a student model. We report a series of experiments on several widely used benchmark datasets. The results verify that the proposed framework outperforms the existing methods and establishes the new state-of-the-art performance on the cross-lingual NER task.
+Moreover, RIKD is on the way to be deployed as an underlying technique in the Microsoft Bing search engine to serve many core modules such as Web ranking, Entity Pane, Answers Triggering, etc. And our framework will be adopted to improve User Intent Recognition and Slot Filling in a commercial voice assistant.
+ACKNOWLEDGMENTS
+Shining Liang's research is supported by the National Natural Science Foundation of China (61976103, 61872161), the Scientific and Technological Development Program of Jilin Province (20190302029GX, 20180101330JC, 20180101328JC), and the Development and Reform Commission Program of Jilin Province (2019C0538). Jian Pei's research is supported in part by the NSERC Discovery Grant program. All opinions, findings, conclusions and recommendations in this paper are those of the authors and do not necessarily reflect the views of the funding agencies.
+REFERENCES
+[1] A. Akbik. 2019. Pooled Contextualized Embeddings for Named Entity Recognition. In NAACL-HLT. 724­728.
+[2] A. Conneau et al. 2020. Unsupervised Cross-lingual Representation Learning at Scale. In ACL. 8440­8451.
+[3] A. Rahimi et al. 2019. Massively Multilingual Transfer for NER. In ACL. 151­164. [4] B. Liu et al. 2019. A user-centered concept mining system for query and document
+understanding at tencent. In KDD. 1831­1841. [5] C. Liang et al. 2020. Bond: Bert-assisted open-domain named entity recognition
+with distant supervision. In KDD. 1054­1064. [6] C. Tsai et al. 2016. Cross-Lingual Named Entity Recognition via Wikification. In
+CoNLL. 219­228. [7] D. Wang et al. 2017. A Multi-task Learning Approach to Adapting Bilingual Word
+Embeddings for Cross-lingual Named Entity Recognition. In IJCNLP. 383­388.
+
+[8] F. Yuan et al. 2020. Enhancing Answer Boundary Detection for Multilingual Machine Reading Comprehension. In ACL.
+[9] F. Yuan et al. 2020. Reinforced Multi-Teacher Selection for Knowledge Distillation. arXiv preprint arXiv:2012.06048 (2020).
+[10] G. Hinton et al. 2015. Distilling the knowledge in a neural network. arXiv preprint arXiv:1503.02531 (2015).
+[11] H. Huang et al. 2019. Unicoder: A Universal Language Encoder by Pre-training with Multiple Cross-lingual Tasks. In EMNLP-IJCNLP. 2485­2494.
+[12] H. Li et al. 2020. MTOP: A Comprehensive Multilingual Task-Oriented Semantic Parsing Benchmark. arXiv preprint arXiv:2008.09335 (2020).
+[13] J. Devlin et al. 2019. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. In NAACL-HLT. 4171­4186.
+[14] J. Ni et al. 2017. Weakly Supervised Cross-Lingual Named Entity Recognition via Effective Annotation and Representation Projection. In ACL. 1470­1480.
+[15] J. Pfeiffer et al. 2020. MAD-X: An Adapter-Based Framework for Multi-Task Cross-Lingual Transfer. In EMNLP. 7654­7673.
+[16] J. Xie et al. 2018. Neural Cross-lingual Named Entity Recognition with Minimal Resources. In EMNLP. 369­379.
+[17] L. Shou et al. 2020. Mining Implicit Relevance Feedback from User Behavior for Web Question Answering. KDD.
+[18] L. Wu et al. 2018. A Study of Reinforcement Learning for Neural Machine Translation. In EMNLP. 3612­3621.
+[19] M. Artetxe et al. 2020. Translation Artifacts in Cross-lingual Transfer Learning. In EMNLP. 7674­7684.
+[20] M. Bari et al. 2020. Zero-Resource Cross-Lingual Named Entity Recognition. In AAAI. 7415­7423.
+[21] Q. Wu et al. 2020. Enhanced Meta-Learning for Cross-Lingual Named Entity Recognition with Minimal Resources. In AAAI. 9274­9281.
+[22] Q. Wu et al. 2020. Single-/Multi-Source Cross-Lingual NER via Teacher-Student Learning on Unlabeled Data in Target Language. In ACL. 6505­6514.
+[23] Q. Xie et al. 2020. Self-training with noisy student improves imagenet classification. In CVPR. 10687­10698.
+[24] R. Sutton et al. 1999. Policy Gradient Methods for Reinforcement Learning with Function Approximation. In NIPS. 1057­1063.
+[25] S. Mayhew et al. 2017. Cheap Translation for Cross-Lingual Named Entity Recognition. In EMNLP. 2536­2545.
+[26] W. Bo et al. 2019. A minimax game for instance based selective transfer learning. In KDD. 34­43.
+[27] X. Dong et al. 2020. Multi-modal Information Extraction from Text, Semistructured, and Tabular Data on the Web. In KDD. 3543­3544.
+[28] X. Liu et al. 2020. Self-supervised Learning: Generative or Contrastive. arXiv preprint arXiv:2006.08218 (2020).
+[29] X. Pan et al. 2017. Cross-lingual Name Tagging and Linking for 282 Languages. In ACL. 1946­1958.
+[30] Y. Wu et al. 2016. Google's neural machine translation system: Bridging the gap between human and machine translation. arXiv preprint arXiv:1609.08144 (2016).
+[31] Z. Yang et al. 2017. Transfer Learning for Sequence Tagging with Hierarchical Recurrent Networks. In ICLR.
+[32] Z. Yang et al. 2020. Model Compression with Two-stage Multi-teacher Knowledge Distillation for Web Question Answering System. In WSDM. 690­698.
+[33] Ana Valeria González-Garduño. 2019. Reinforcement Learning for Improved Low Resource Dialogue Generation. In AAAI. 9884­9885.
+[34] Z. Liu. 2020. Do We Need Word Order Information for Cross-lingual Sequence Labeling. arXiv preprint arXiv:2001.11164 (2020).
+[35] I. Loshchilov and F. Hutter. 2017. Fixing Weight Decay Regularization in Adam. CoRR abs/1711.05101 (2017).
+[36] T. Moon. 2019. Towards lingua franca named entity recognition with bert. arXiv preprint arXiv:1912.01389 (2019).
+[37] D. Nadeau and S. Sekine. 2007. A survey of named entity recognition and classification. Lingvisticae Investigationes 30, 1 (2007), 3­26.
+[38] E. Sang. 2002. Introduction to the CoNLL-2002 Shared Task: LanguageIndependent Named Entity Recognition. In CoNLL.
+[39] E. Sang and F. De Meulder. 2003. Introduction to the CoNLL-2003 Shared Task: Language-Independent Named Entity Recognition. In CoNLL. 142­147.
+[40] R.S. Sutton and A.G. Barto. 2018. Reinforcement learning: An introduction. MIT press.
+[41] O. Täckström. 2012. Nudging the Envelope of Direct Transfer Methods for Multilingual Named Entity Recognition. In NAACL-HLT Workshop on the Induction of Linguistic Structure. 55­63.
+[42] G. Tur and R. De Mori (Eds.). 2011. Spoken Language Understanding: Systems for Extracting Semantic Information from Speech.
+[43] S. Wu and M. Dredze. 2019. Beto, Bentz, Becas: The Surprising Cross-Lingual Effectiveness of BERT. In EMNLP-IJCNLP. 833­844.
+[44] S. Wu and M. Dredze. 2020. Do Explicit Alignments Robustly Improve Multilingual Encoders?. In EMNLP. 4471­4482.
+[45] R. Xu and Y. Yang. 2017. Cross-lingual Distillation for Text Classification. In ACL. 1415­1425.
+
+

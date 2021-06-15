@@ -1,0 +1,2337 @@
+A generalised drift-correcting time integration scheme for Brownian suspensions of rigid particles with arbitrary shape
+Timothy A Westwooda, Blaise Delmotteb, Eric E Keavenya
+aDepartment of Mathematics, Imperial College London, South Kensington Campus, London, SW7 2AZ, UK bLadHyX, CNRS, Ecole Polytechnique, Institut Polytechnique de Paris, 91120 Palaiseau, France
+
+arXiv:2106.00449v1 [physics.comp-ph] 1 Jun 2021
+
+Abstract
+The efficient computation of the overdamped, random motion of micron and nanometre scale particles in a viscous fluid requires novel methods to obtain the hydrodynamic interactions, random displacements and Brownian drift at minimal cost. Capturing Brownian drift is done most efficiently through a judiciously constructed time-integration scheme that automatically accounts for its contribution to particle motion. In this paper, we present a generalised driftcorrecting (gDC) scheme that accounts for Brownian drift for suspensions of rigid particles with arbitrary shape. The scheme seamlessly integrates with fast methods for computing the hydrodynamic interactions and random increments and requires a single full mobility solve per time-step. As a result, the gDC provides increased computational efficiency when used in conjunction with grid-based methods that employ fluctuating hydrodynamics to obtain the random increments. Further, for these methods the additional computations that the scheme requires occur at the level of individual particles, and hence lend themselves naturally to parallel computation. We perform a series of simulations that demonstrate the gDC obtains similar levels of accuracy as compared with the existing state-of-the-art. In addition, these simulations illustrate the gDC's applicability to a wide array of relevant problems involving Brownian suspensions of non-spherical particles, such as the structure of liquid crystals and the rheology of complex fluids.
+Keywords: Brownian motion, suspensions, time integration, fluctuations, simulation
+
+Contents
+
+1 Introduction
+
+2
+
+2 Brownian Dynamics of rigid particles of arbitrary shape
+
+4
+
+2.1 The overdamped Langevin equation for rigid body motion . . . . . . . . . . . . . 5
+
+2.2 Mobility matrix . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 6
+
+3 The generalised drifter-corrector (gDC)
+
+8
+
+4 Applying M and computing v
+
+9
+
+4.1 RPY tensor . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+
+4.2 Fluctuating Force Coupling Method . . . . . . . . . . . . . . . . . . . . . . . . . 10
+
+5 Computational cost of the gDC
+
+11
+
+6 Simulations
+
+12
+
+6.1 Implementations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+
+6.2 Convergence study: boomerang above no-slip boundary . . . . . . . . . . . . . . 13
+
+6.3 Confined liquid crystal . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+
+6.4 Rheology of suspensions of Czech hedgehog colloids . . . . . . . . . . . . . . . . . 17
+
+1
+
+7 Summary and conclusions
+
+20
+
+Appendix A Quaternions
+
+21
+
+Appendix B Expressing torques in terms of the Lie algebra element
+
+23
+
+Appendix C Equivalence between the Lie algebra and quaternion SDEs 23
+
+Appendix D Algorithm for Euler-Maruyama scheme
+
+25
+
+Appendix E Proof of consistency for GDC
+
+25
+
+References
+
+28
+
+1. Introduction
+Brownian motion, the random motion exhibited by colloidal particles due to thermal fluctuations in the surrounding viscous fluid, is a common and important feature of fluidic systems at the micron and nanometre scales [1, 2, 3]. It plays a fundamental role in determining the distribution and configuration of polymers and particles that comprise complex fluids [4, 5], which then in turn affect suspension rheology and bulk mechanical response to applied stresses [6, 7, 8]. Further, Brownian motion and thermal fluctuations play a critical role in biological and cellular transport processes, often in conjunction with the cell's active mechanisms that utilise chemical energy [9].
+To simulate these systems, one often considers the equations of motion in the Brownian dynamics [10], or overdamped [11], limit where momentum variables are taken to have reached thermal equilibrium and the velocity field in the surrounding fluid is governed by the steady Stokes equations. In the context of rigid particles, this means that the dynamics of the particle positions and orientations are provided by the overdamped Langevin equations, and accordingly, the dynamics of the corresponding probability distribution of the particle positions and orientations is described by Smoluchowski's equation.
+The hydrodynamic interactions between the particles due to the surrounding fluid are embodied in the dense, position-dependent mobility matrix [12, 13] that relates the generalised forces on the particles to the resulting particle velocities. The hydrodynamic interactions between the particles also impact the fluctuations that they experience. The fluctuation-dissipation theorem [14] stipulates that the covariance of the random particle velocities is proportional to the mobility matrix and hence so too is the particle diffusion matrix. This requires the random particle velocities to be proportional to the square root of the mobility matrix. Finally, due to hydrodynamic interactions, the overdamped limit produces a nontrivial thermal, or Brownian, drift term [10] in the equations of motion that is proportional to the divergence of the mobility matrix with respect to the particle positions and orientations.
+Initially, the computations of these three quantities ­ the mobility matrix, random velocities, and Brownian drift ­ in approaches such as Stokesian Dynamics [15] utilised a variety of direct methods. The entries of the mobility matrix were determined pairwise from analytical expressions derived in relevant asymptotic limits and the random particle velocities were computed using a Cholesky decomposition of the resulting matrix. Finally, Brownian drift was incorporated directly by evaluating expressions for the derivatives of the mobility matrix entries. A reliance on these direct approaches limited system sizes, as well as particle shapes to spheres.
+Since these first computations, there have been several key advances, some of which have been incorporated into Stokesian dynamics [16, 17], including fast, matrix-free methods for determining the particle velocities given the forces applied to them. These methods provide the action of the mobility matrix on a vector in O(N log N ) operations, where N is the vector length, without ever computing the matrix itself. Such approaches are built around fast summation
+
+2
+
+techniques such as the FMM [18, 19, 20], or the FFT and include spectrally-accurate Ewald summation [21], positively split Ewald summation [22, 23], Accelerated and Fast Stokesian Dynamics [16, 17, 24, 25], in addition to the immersed boundary [26] or similar methods, such as the force-coupling method [27, 28], that utilise fast, grid-based solvers.
+Recent work on computational methods for Brownian suspensions has focused on developing similarly rapid computations of the random particle velocities that can be used with the matrixfree methods described above. While the early work of Fixman [29] relying on a Chebyshev expansion of the spectrum of the mobility matrix has been adopted in implementations of Accelerated Stokesian Dynamics [17] and Brownian Dynamics [30], only more recently have techniques been developed that can be used more seamlessly with fast summation methods. These include the Lanczos algorithm [31] which computes iteratively an approximation of the matrix-square root using the Ritz values and vectors generated at the final iteration. For methods that utilise grid-based solvers, the random particle velocities can be computed rapidly from the flows generated by the spatially uncorrelated fluctuating stress originally considered by Landau and Lifshitz [32]. This fluctuating hydrodynamics approach provides the foundation for several methods that capture particle Brownian motion including Lattice Boltzmann [33], distributed Lagrange multiplier technique [34], finite element methods [35], the fluctuating [36] and stochastic [37, 38] immersed boundary methods and the fluctuating force-coupling method [39, 40]. Further, computations that rely on decomposing the mobility matrix, as is the case with positively split Ewald summation [22, 23] or discretisations of the fluctuating boundary integral equations [41], may use the fluctuating hydrodynamics approach and the Lanczos algorithm sideby-side to compute different contributions to the particle stochastic velocities resulting from the decomposition.
+The final aspect of the computation is to account for Brownian drift when advancing the particle positions. This is done most efficiently using a well-designed time integration scheme that automatically accounts for Brownian drift, yielding a numerical solution whose moments converge to the their true values as the time step size goes to zero. Fixman again provides [42, 43] an early example of a midpoint scheme which, to leading order in the time step size, emits the Brownian drift term as part of its error expansion. This scheme, however, relies on a resistance formulation, where the dense, long-ranged mobility matrix must be inverted, introducing costly additional linear systems. Recent work, however, has shown that similar integration schemes can be constructed that avoid these additional linear systems. It has been shown [36] that the drift can be incorporated into the Euler-Maruyama scheme using random finite differences (RFD). This involves applying the mobility matrix evaluated at randomly displaced positions to a random force vector with an appropriate covariance. This limits additional costs due to mobility matrix multiplications. For the grid-based methods built around fluctuating hydrodynamics, the drifter-corrector (DC) midpoint scheme [40] eliminates the additional mobility matrix multiplication completely. Here, the drift term is incorporated by advancing the particle positions to the midpoint using the particle velocity extracted from the flow generated by the fluctuating stress. The full mobility computation is then performed at the midpoint.
+While RFD and the DC represent important advances in designing schemes that capture Brownian drift and naturally interface with matrix-free methods, they were originally limited to the case of spherical particles with mobility matrices obtained through singular multipole expansions, or their regularised equivalents. Recent work has extended the RFD approach for simulation of rigid particles of arbitrary shape that are represented by multiple discrete degrees of freedom constrained to move as a rigid body. Sprinkle et al. [44, 45] proposed a family of time integration schemes that use the chain rule to split the computation of the divergence of the body mobility matrix into three contributions that can be obtained at a lower cost using RFD. The resulting schemes, called Euler-Maruyama Traction (EM-T) and Trapezoidal Slip (T-S), are both weakly first-order accurate, but achieve first (resp. second) order accuracy for deterministic problems and require two (resp. three) full mobility solves per time step.
+3
+
+In this work, we generalise the DC scheme to simulate rigid bodies of arbitrary shape. Like the original DC, the generalised DC (gDC) scheme requires a single full mobility solve per time step. This significantly accelerates time integration for schemes built around grid-based solvers that can take advantage of the flows generated by a fluctuating stress. The gDC may also be used for matrix-based computations at a cost comparable to the existing state-of-the-art. The main idea behind the scheme is to advance to the mid-step using particle velocities obtained by orthogonally projecting the fluctuating velocities onto the space of rigid body motions. At the midstep, the full mobility is treated and important factors based on the divergence of the projected fluctuating velocity are incorporated into the update. The gDC has the nice property that many of the additional computations needed to capture Brownian drift occur at the level of individual particles, and hence naturally lend themselves to parallel computation and largerscale simulation. We show that the resulting scheme is weakly first-order accurate and, in practice, provides errors similar in magnitude to the T-S scheme. Finally, we demonstrate the applicability of the scheme for larger-scale simulation by considering confined suspensions of rod-like particles, as well as the rheology of Czech hedgehog particle suspensions.
+2. Brownian Dynamics of rigid particles of arbitrary shape
+
+B(t) = R(qp(t))b
+
+Yp
+
+b = B(0)
+
+Figure 1: Illustration of a rigid body with position Yp and orientation qp.
+
+Consider a suspension of N rigid particles where the centre of mass position of particle p at time t is Yp(t), while the rotation relative to its initial orientation is given by the unit quaternion qp(t) (see fig. 1). We provide a detailed overview of using quaternions to represent rotations in Appendix A, but present some of the key facts here. Any vector b in the body frame of particle p is given by B(t) = R(qp(t))b in the lab frame at time t. The rotation matrix R is related to entries of the quaternion through
+
+ 1 - 2q22 - 2q32 2 (q1q2 - q3q0) 2 (q1q3 + q2q0)
+
+R (q) = 2 (q1q2 + q3q0) 1 - 2q12 - 2q32 2 (q3q2 - q1q0) .
+
+(1)
+
+2 (q1q3 - q2q0) 2 (q3q2 + q1q0) 1 - 2q22 - 2q12
+
+The quaternions are advanced in time using the formula
+
+qp(t) = exp (up(t)) · qp(0),
+
+(2)
+
+where · is the Hamiltonian product (see Appendix A), u  R3 is the Lie algebra element, and
+
+exp (u) = cos
+
+u 2
+
+, sin
+
+u 2
+
+u u
+
+.
+
+(3)
+
+4
+
+We will be interested in numerically integrating the overdamped Langevin equations for hydrodynamically interacting rigid bodies that govern the positions, Yp, and Lie algebra elements, up, for each rigid body p.
+
+2.1. The overdamped Langevin equation for rigid body motion
+Suppose that the particles are subject to an external potential U (Y1, u1, . . . , YN , uN ). The force on particle p is then -YpU , while the corresponding torque is -Du-p upU . A derivation of this expression for the torque is presented in Appendix B. The matrix Du-p1 is the 3 × 3 `dexpinv' matrix defined by
+
+Du-p1
+
+=
+
+I
+
+-
+
+1 2
+
+[up×]
+
+-
+
+2
+
+1 up
+
+2
+
+up cot
+
+up 2
+
+- 2 [up×]2 ,
+
+(4)
+
+where [v×]ij = ikjvk and [×v] = - [v×] = [v×] for any v  R3. The `dexpinv' matrix relates the angular velocity of particle p, p, to the time derivative of up through
+
+dup dt
+
+=
+
+Du-p1p.
+
+(5)
+
+In the overdamped limit, the force and torque vectors are linearly related to their contributions to the particle velocity and angular velocity vectors via the 6N × 6N mobility matrix, N, whose entries depend on the particle configuration. The application of the mobility matrix is equivalent to solving the Stokes boundary value problem for a collection of rigid particles subject to applied forces and torques. Thus, in the absence of Brownian motion, the equations of motion are given by the system of differential equations
+
+dx dt
+
+=
+
+-N x U,
+
+(6)
+
+where x = Y1 , u1 , . . . , YN , uN describes the positions and orientations of all particles and N = N with
+
+I3 0 . . . . . . 0 
+
+ 
+
+0
+
+
+
+=
+
+  
+
+...
+
+Du-11
+
+...
+
+...
+
+ 
+
+...
+
+ . 
+
+(7)
+
+  
+
+...
+
+
+
+I3
+
+0
+
+ 
+
+0 . . . . . . 0 Du-N1
+
+When Brownian motion is present, the particles will also move randomly due to thermal
+
+fluctuations in the surrounding fluid. In the overdamped limit, the effects of Brownian motion are
+
+captured through the inclusion of random increments of the positions and Lie algebra elements,
+
+turning the equations of motion into these increments are given by 2kBT
+
+a system N1/2dW ,
+
+of stochastic differential equations. Specifically, where kBT is the thermal energy, N1/2 = N1/2
+
+with N1/2 being the matrix square root of the mobility matrix, and W is a 6N × 1 vector
+
+of independent Wiener processes. The dependence on the mobility matrix ensures that the
+
+fluctuation-dissipation theorem is satisfied, a necessary condition for the Boltzmann distribution
+
+to be recovered at equilibrium.
+
+Finally, along with the random velocities, the overdamped equations of motion require the
+
+inclusion of the thermal drift term, kBT x ·Ndt [10]. This ensures that the stochastic differential
+
+equation with an It^o interpretation of the stochastic integral yields dynamics consistent with
+
+those of Smoluchowski's equation for the corresponding probability distribution. Putting these
+
+terms together, we arrive at the equations of motion for the particle positions and orientations,
+
+dx = -NxU + kBT x · N dt + 2kBT N1/2dW .
+
+(8)
+
+5
+
+2.2. Mobility matrix The purpose of this paper is to develop time integration schemes for eq. (8) that avoid the
+direct computation of the thermal drift term and naturally interface with matrix-free methods for computing the random increments and particle velocities arising from the applied forces. In doing so, we will assume that the particles are discretised into M total degrees of freedom, as depicted in fig. 2. This discretisation can involve the surface of the particles, as is done when considering the first-kind boundary integral representation of the Stokes equations [46, 12], or can be related to a volume discretisation where elements of the particle volume are represented by regularised distributions of force, for example.
+dri/dt = Yp + p × (ri - Yp)
+ri
+Y p Yp p
+
+Figure 2: Discretisation of the rigid body surface with discrete degrees of freedom.
+
+Let ri denote the position of discrete degree of freedom i, vi  dri/dt be its velocity and i be the force it exerts on the fluid. The hydrodynamic interactions between the discrete degrees of freedom provide a linear relationship between vi and i such that
+
+M
+
+vi = Mijj,
+
+(9)
+
+j=1
+
+where Mij is the matrix that relates the force on discrete degree of freedom j to the velocity of discrete degree of freedom i. Additionally, the requirement that all discrete degrees of freedom belonging to particle p move as a single rigid body (see fig. 2) stipulates that
+
+vi = Yp + p × (ri - Yp) , i  Bp,
+
+(10)
+
+where Yp is the translational velocity of particle p, p is its angular velocity and Bp is the set
+of discrete degrees of freedom belonging to particle p. Introducing the vectors  = [1 , . . . , M ] and V = [V1 , . . . , VN ] with Vp = [Yp , p ] ,
+eqs. (9) and (10) for all particles p = 1, . . . , N can be equated to yield
+
+M = KV ,
+
+(11)
+
+where
+
+ M11 . . . M1M 
+
+M = 
+
+...
+
+...
+
+...
+
+ 
+
+(12)
+
+MM1 . . . MMM
+
+is the 3M × 3M mobility matrix for the discrete degrees of freedom and K is a 3M × 6N block matrix that maps the velocity and angular velocity from the space of rigid body motions to the
+
+6
+
+velocities of the discrete degrees of freedom. Specifically
+
+
+
+ 
+
+I3
+
+[×(ri - Yp)]
+
+,
+
+if i  Bp,
+
+Ki(p) = 
+
+(13)
+
+
+
+ 
+
+03
+
+03
+
+,
+
+otherwise,
+
+is the 3 × 6 block that relates the rigid body motion of particle p to the translational velocity of discrete degree of freedom i. Note that the specific form of M will depend on how the discretisation is performed, however, here we will assume that the discretisation results in a positive definite M, thereby preserving the structure of the underlying continuous equations. This is an important ingredient for the fluctuation-dissipation theorem to be satisfied exactly in the discrete setting.
+In the absence of inertia, the conservation of linear and angular momentum reduce to the balance of force and torque, which can be written compactly for the N particles as
+
+K  = F,
+
+(14)
+
+where F is the total force and torque vector applied on the particles. The mobility problem given by eqs. (11) and (14) forms a saddle point system
+
+M -K -K 0
+
+ V
+
+=
+
+0 -F
+
+.
+
+(15)
+
+After eliminating , one obtains
+
+V=
+
+K
+
+M -1 K
+
+-1
+F
+
+(16)
+
+and therefore the mobility matrix is given by
+
+N=
+
+K
+
+M -1 K
+
+-1
+.
+
+(17)
+
+As we describe later, our discretisation will follow from the rigid blob framework [47], but the gDC time integration scheme is applicable to any spatial discretisation provided that the resulting mobility matrix N can be related to the saddle point system in eq. (15). This particular decomposition has the advantage that the computation of the stochastic particle velocities can be readily incorporated into the system by including a random velocity for the discrete degrees of freedom [44]. Specifically, we consider the system
+
+M -K -K 0
+
+ V
+
+=
+
+-v -F
+
+.
+
+(18)
+
+with the random velocity,
+
+v = 2kBT M1/2W (t),
+
+(19)
+
+where M1/2 is the square root of M which satisfies M1/2(M1/2) vector of Wiener processes. After eliminating , one obtains
+V = NF + V
+
+= M, and W (t) is a 3M × 1 (20)
+
+where V = NK M-1v. As a result the fluctuating body velocities are given by
+
+V = 2kBT NK M-1M1/2W (t) = 2kBT N1/2W (t),
+
+(21)
+
+where N1/2 satisfies the fluctuation dissipation balance with N1/2(N1/2) = N. As shown by Balboa-Usabiaga et al. [48], the symmetric saddle point problem (18) can be
+efficiently solved with an iterative Krylov subspace method, such as GMRES, using a simple block diagonal preconditioner P . The matrix P is constructed by setting to zero the entries of M in (18) if they correspond to interactions between discrete degrees of freedom from different rigid bodies. As K is a block diagonal matrix, the cost of solving the linear system (18) will be related primarily to the costs of applying the matrix M and computing v.
+
+7
+
+3. The generalised drifter-corrector (gDC)
+The primary result of this paper is the following generalisation of the DC scheme to rigid bodies of arbitrary shape. The gDC updates the particle positions and Lie algebra elements while automatically accounting for the Brownian drift term that arises in the equations of motion. It has the advantage of requiring only a single full mobility solve per time step. For gridbased solvers, the gDC incurs nearly the same cost as applying the well-known Euler-Maruyama scheme, outlined in Appendix D, which does not capture the Brownian drift. For matrix-based approaches the cost will be similar to the existing state-of-the-art [44, 45].
+Below we present the gDC algorithm. The time-step is indicated by superscript, n, e.g. Vn would correspond to V (xn) = V (x(tn)) in the continuous setting. For the purposes of implementing the algorithm, it should be noted that the collection of Lie algebra elements contained in xn is set to zero at the start of each time step (see Appendix A).
+
+For each time step n = 0, 1, 2, ...
+1. Generate a vector W (or tensor W if using fluctuating hydrodynamics) of N (0, 1) random variables.
+
+2. Solve the following saddle point problem at the start of the time-step,
+
+I -K
+
+-Kn n0
+
+n Vn
+
+=
+
+-vn = -
+
+2kB T t
+
+M1/2 n W
+
+,
+
+0
+
+(22)
+
+yielding
+
+Vn = K n Kn -1 K n vn.
+
+(23)
+
+Note that this is also the solution of the least-squares problem minVn KnVn - vn .
+
+3.
+
+Define 
+
+=
+
+1
+
++
+
+t 2
+
+(x
+
+·
+
+V )n .
+
+For a small parameter , the divergence can be calculated
+
+via1
+
+(a) finite-differencing:
+
+6
+(x · V)n =
+
+N
+
+Vi(p)
+
+xn + e(ip) 
+
+- Vi(p) (xn) + O(2)
+
+i=1 p=1
+
+(24)
+
+where Vi(p) is the i-th component of the velocity of particle p, and e(ip) is a 6N × 1 vector whose nonzero entries, corresponding to the position and orientation of particle p, are given by the i-th Cartesian basis vector of R6; or
+(b) random finite-differences:
+
+(x · V)n =
+
+6
+
+N W · e(ip) 
+
+Vi(p)(xn + W ) - Vi(p)(xn)
+
+i=1 p=1
+
++ O(2),
+
+(25)
+
+where W is a vector of independent N (0, 1) random variables which is also independent of W . By replacing the divergence in the definition of  with the term inside the expectation in eq. (25), the appropriate value of  will be achieved in expectation, which is ultimately all that is required to demonstrate weak-accuracy.
+
+1In order to respect the physical units of the problem and to minimize the variance of the RFD approximation, we multiply  by a typical length scale Lp when computing the translational part of (x · V)n [44]. Lp is the maximum distance between two discrete degrees of freedom in the body and represents the typical size of body p.
+8
+
+We find that option (a) is best partnered with grid-based mobility methods, whilst option (b) is best suited to matrix-based methods to reduce the computational cost. We discuss this in more detail in section 5.
+
+4. Move the body positions and orientations to the mid-step according to
+
+xm
+
+=
+
+xn
+
++
+
+t 2
+
+V
+
+n.
+
+(26)
+
+5. Solve the full mobility problem at the mid-step,
+
+Mm -Km -K m 0
+
+m Vm
+
+=
+
+-vm = -
+
+2kB T t
+
+M1/2 m W
+
+-F m
+
+,
+
+(27)
+
+for
+
+V m = Nm F m + K m M-1 m vm = NmF m + V m,
+
+(28)
+
+where F m contains the forces and torques acting on the bodies at the mid-step. Note that quantities are evaluated at the mid-step using the mid-step quaternions qpm = exp ump · qpn.
+
+6. Update the positions and orientations of the bodies according to
+
+xn+1 = xn + tV m,
+
+(29)
+
+with the new orientation quaternion of each particle p defined by qpn+1 = exp unp+1 · qpn.
+In words, the gDC first computes a set of particle velocities by solving a least squares problem to find the appropriate stochastic velocity, V, in the space of rigid body motions. This velocity is used to advance the particle positions to the mid-step where the full computation is performed. The positions are then updated using the velocity computed at the mid-step scaled by a factor based on the divergence of V. As shown in Appendix E, the scheme recovers the first and second moments of the increment x = xn+1 - xn to first-order in expectation.
+
+4. Applying M and computing v
+As shown in section 2.2, hydrodynamic interactions between bodies are directly obtained from the matrix M. The action of M on a vector is required to compute the deterministic velocities V = NF , while the product M1/2W is necessary to obtain the Brownian velocities V . It is therefore essential to use and develop efficient methods to compute the action of M and its square root.
+In this section, we outline two distinct strategies with similar resolution of hydrodynamic interactions between the discrete degrees of freedom. The first follows directly from an implementation of the rigid multiblob model [47] where the rigid particles are discretised into surface or volume elements that interact via the Rotne-Prager-Yamakawa (RPY) tensor. The other approach called the fluctuating Force Coupling Method (FCM) is matrix-free and simultaneously applies M and computes V by solving the fluctuating Stokes equations on a grid with a forcing term that accounts for the presence of the particles.
+4.1. RPY tensor
+The well-known RPY mobility matrix was originally developed to provide a symmetric positive definite, pairwise approximation of the mobility matrix for a collection of spherical particles of equal radii in an unbounded domain [49]. Extensions of the RPY matrix for particles of different radii [50], in a background shear flow [49], and above a no-slip boundary [51] are available
+
+9
+
+in the literature. Following the rigid multiblob model, the RPY tensor can be used to provide the hydrodynamic interactions between the discrete degrees of freedom making up the rigid particles. When discretising a particle surface, the rigid multiblob model provides a first-order accurate approximation to the particle mobility.
+In general, the computational cost of these matrix-vector products scales quadratically with the number of discrete degrees of freedom. More sophisticated methods, such as the fast multipole methods (FMM) [52] and Ewald methods, achieve a linear scaling. For periodic domains, one can use the positively split Ewald method [22, 23] to compute the action of M on a vector. In our computations below, we perform a direct pairwise evaluation of the wall-corrected RPY tensor [51].
+The action of M1/2 on the random vector W is obtained through the Lanczos algorithm [31]. To achieve convergence, the Krylov subspace K is enriched iteratively with basis vectors that are linear combinations of the powers of the mobility matrix times the random vector: K = span W , MW , M2W , ... . The cost of the method therefore depends on the number of basis vectors, and thus mobility-vector products, required to reach a given tolerance .
+
+4.2. Fluctuating Force Coupling Method
+The other approach relies on a matrix-free method called fluctuating Force Coupling Method (FCM) [53], which combines FCM [54] with fluctuating hydrodynamics [32]. With fluctuating FCM, the coupling between the discrete degrees of freedom and the fluid is achieved through a forcing term added to the fluctuating Stokes equations,
+
+p - 2u =  · W + f ,
+
+(30)
+
+ · u = 0,
+
+(31)
+
+where  is the dynamic fluid viscosity, u the fluid velocity and p is the pressure. The first term in the RHS of eq. (30) is the divergence of the fluctuating stress tensor, W .
+W is delta correlated in time and space with the following statistics,
+
+W(x, t) = 0,
+
+(32)
+
+W(x, t)W(y, t ) = 2kBT ( + ) (x - y)(t - t ).
+
+(33)
+
+The second term on the RHS of eq. (30) is the forcing transferred to the fluid with a spreading operator S,
+
+Nb
+
+f (x) = S[](x) = ii (x) ,
+
+(34)
+
+i=1
+
+where the finite size of the discrete degrees of freedom is accounted for with a Gaussian spreading envelope,
+
+i(x) = (22)-3/2 exp
+
+-
+
+x - ri 22
+
+2
+
+.
+
+(35)
+
+The length scale  functions in a similar way diagonal entries of the FCM mobility matrices
+
+to the bead radius, a, will match those of the
+
+in the RPY RPY tensor
+
+itfens=or.a/The
+
+[54].
+
+The fluid velocity, obtained after solving eqs. (30) and (31), is the sum of a deterministic
+
+part, due to the forcing , and a fluctuating term, stemming from the fluctuating stress. We
+
+may express the total fluid velocity as
+
+u = L-1 (S + DW )
+
+(36)
+
+= uD + u,
+
+(37)
+
+10
+
+where S is the spreading operator in eq. (34), L-1 is the inverse Stokes operator (i.e. the fluid solver), and D the divergence operator applied to the fluctuating stress [36].
+The velocities of the discrete degrees of freedom are then obtained from the fluid velocity using an averaging operator, J, such that
+
+vi = (J[u])i = ui(x)d3x = viD + vi, i = 1, .., Nb,
+
+(38)
+
+where J = S is adjoint to the spreading operator. We see then that the FCM mobility matrix can be written as the composition of three
+linear operators: MF CM = JL-1S. Additionally, as demonstrated in [39] the velocity v satisfies the fluctuationdissipation theorem with the covariance given by the FCM approximation of the mobility matrix,
+
+v(t)v(t ) = 2kBT MF CM (t - t ),
+
+(39)
+
+where
+
+v
+
+=
+
+ 2kB
+
+T
+
+MF1/C2M
+
+W
+
+(t),
+
+with
+
+MF1/C2M
+
+=
+
+J L-1 D.
+
+Thus, we see that fluctuating FCM simultaneously computes the actions of M and M1/2 on
+
+ and W , respectively, by considering solutions to the forced fluctuating Stokes equations.
+
+Following [39, 40], we implement fluctuating FCM in periodic domains. This involves first
+
+evaluating the forcing, f (x), and the fluctuating stress, W , on a regular grid. Next, the Stokes
+
+equations are solved using a Fourier spectral method. Finally, the trapezoidal rule is used to
+
+numerically integrate eq. (38) to obtain the translational velocity for each of the discrete degrees
+
+of freedom making up the rigid bodies.
+
+5. Computational cost of the gDC
+
+Due to the differences in their implementations, there is a distinct difference in cost between
+
+RPY and grid-based fluctuating FCM that manifests itself when computing the random velocity
+
+vector, v. For both implementations, the most expensive computation is applying the matrix
+
+M. With RPY, as we are directly handling M, any time the particle positions change, we
+
+must compute v = M1/2W using the Lanczos algorithm, for which each iteration requires a
+
+matrix-vector multiplication involving M.
+
+suchFotrhafltucvtu=atin2gkFBCT MJ L, -h1oDwWev(etr),.
+
+we In
+
+are instead working this decomposition,
+
+with a decomposition of MF1/C2M the only matrix that depends on
+
+the particle configuration is J. Thus, provided that W remains the same, changing the particle
+
+positions simply requires reaveraging the fluid velocity u at the new positions, and avoids having
+
+to recompute the velocity field itself.
+
+Cost of Step 2: Along with the computation of v, Step 2 of the gDC algorithm in section 5
+
+involves solving a simplified mobility problem with M replaced by I. This is equivalent to solving
+
+the least squares problem minV KV - v , the solution of which is given by eq. (23) and involves
+
+the 6N × 6N symmetric, block-diagonal matrix K K. The 6 × 6 block associated with body p
+
+is given by
+
+
+
+Nb(p)I3
+
+(K K)(p) =  
+
+[(ri - Yp)×]
+
+iBp
+
+[×(ri - Yp)] 
+
+iBp
+-
+
+[(ri - Yp)×]2
+
+, 
+
+iBp
+
+(40)
+
+where Bp is the set of discrete degrees of freedom belonging to body p. Therefore, computing K K -1 just requires inverting N small 6 × 6 blocks using dense linear algebra, which is
+negligible in terms of computational cost and, additionally, naturally lends itself to parallel
+computation.
+
+11
+
+Thus, the primary cost associated with Step 2 involves computing v, which for fluctuating FCM incurs the cost of one Stokes solve and M averaging operations. The RPY implementation will require MLanczos mobility-vector products with the Lanczos method. Cost of Step 3: The main cost of this step is computing the scalar term  using finite differences (FD) or RFD to generate x · V. Finite differencing involves perturbing the positions and orientations of each rigid body and calculating the new fluctuating velocities for the discrete degrees of freedom at the disturbed states. With RFD, the new fluctuating velocities are only calculated once, after disturbing the particles' positions and orientations with a random vector W.
+For fluctuating FCM, FD is straight forward and incurs minimal cost. Since the body velocities are uncorrelated in eq. (22), the finite-differencing step in eq. (24) requires 6M averaging operations. As discussed above, however, changing the particle position with the RPY-based implementation will require recomputing M1/2W with each displacement. Thus, we require 6N × MLanczos mobility-vector products. This is a cost that could rise quickly as the particle number increases. On the other hand, using RFD in eq. (25) only requires MLanczos mobilityvector products with matrix-based methods and M averaging operations with fluctuating FCM. Cost of Step 5: This step involves the costliest computation of solving the full mobility problem, eq. (18), along with the additional computation of v.
+For the fluctuating FCM implementation, each GMRES iteration requires a full fluctuating FCM computation that involves spreading the force vector , solving the Stokes equations, and finally averaging the resulting flow field to obtain the velocities for the discrete degrees of freedom. A single additional averaging is needed to incorporate the fluctuating velocities, vm, on the RHS of eq. (27).
+For matrix-based methods, each GMRES iteration will incur the cost of a matrix-vector product involving M. There will also be the cost of MLanczos Lanczos interations needed to obtain vm.
+For a tolerance of = 10-3, both the Lanczos and GMRES with block preconditioning require approximately MLanczos = MGMRES = 5 interations on average. The tolerance of = 10-3 has been shown [44] to be a suitable choice for simulations involving fluctuations. Adding these costs together assuming = 10-3, we see that the cost for one gDC-FD time iteration with fluctuating FCM is (1 + 5 =) 6 Stokes solves, 5M spreading operations and (1 + 6 + 1 + 5 =) 13M averaging operations. For the RPY based implementation, we have (5 + 6N × 5 + 5 + 5 =) 5 × (6N + 3) matrix-vector products involving M. With gDC-RFD the number of averaging operations reduces to 8M for fluctuating FCM, and the total number of matrix-vector products involving M with the RPY based implementation lowers to 20, becoming independent of the particle number N .
+As shown in section 6.2, the gDC is more stable with FD than with RFD. For grid-based methods, the 5M additional averaging operations incurred by FD are negligible compared to the Stokes solve. This is not true for matrix based methods for which RFD represents a significant cost reduction.
+Based on these costs, we see that the gDC with FD is well-suited for grid-based methods utilising fluctuating hydrodynamics such as fluctuating FCM [53, 55], PSE [22, 23] or the fluctuating and stochastic Immersed Boundaries methods [56, 57, 36, 45], while gDC with RFD is the best compromise between numerical stability and computational cost for matrix-based methods.
+6. Simulations
+In this section, we demonstrate the performance of the gDC by performing simulations of particulate suspensions under both dynamic and equilibrium conditions. In Section 6.2, we investigate the accuracy of the gDC by examining the equilibrium distributions of the position and orientation of a boomerang-shaped particle in a gravitational field above a planar no-slip boundary. Owing to the small size of this system, we can integrate for long times and acquire
+12
+
+many realisations to quantify the temporal accuracy of the gDC. We compare these results with those obtained using the state-of-the-art integrators developed in Sprinkle et al. [44]. After this, we demonstrate the suitability of the gDC for large scale simulations of anisotropic Brownian particles. In Section 6.3, we study the equilibrium properties of confined suspensions of rodshaped particles, a model for a liquid crystal or stiff-polymer system. Finally, inspired by recent experimental work [58], in Section 6.4 we use the gDC to perform simulations to obtain the rheology of colloidal suspensions made from Czech hedgehog-shaped (CH) particles.
+
+6.1. Implementations
+The simulations that follow rely on two implementations: one using direct evaluations of the wall-corrected RPY tensor and the other using fluctuating FCM.
+· Python with RPY: for the single boomerang simulations we use the collaborative code, called "RigidMultiblobWall", that one of us co-developed [48] and used for large scale simulations of colloidal active particles [59, 47]. The code contains most of the time integration schemes recently developed for matrix-based approaches [60, 47, 44]. It relies on the pairwise evaluation of the wall-corrected RPY tensor. The mobility computations can be accelerated in different ways: using C++ routines, Numba or GPUs via the PyCUDA interface. We implemented the gDC in the code to compare its performance with the most accurate scheme developed by Sprinkle et al.: the Trapezoidal Slip scheme (T-S).
+· C++ with fluctuating FCM: for the confined liquid crystal and rheology simulations, we use an FFT-based fluid solver with fluctuating FCM in a periodic box. FFTs are parallelised with the scalable MPI library FFTW. MPI is also used to parallelise the spreading and averaging operations as well as the nearest neighbour search necessary to compute short-ranged, pairwise interactions between discrete degrees of freedom. At each grid point, the entries of the fluctuating stress are independent Gaussian random variables. Since the fluctuating stress W is symmetric, at each grid point we generate six random numbers based on a Gaussian distribution with zero mean and unit variance. We then multiply the off-diagonal entries by 2kBT /(x3)t-1/2 and the diagonal ones by 2 kBT /(x3)t-1/2. We truncate the Gaussian envelopes by setting i(x) = 0 for x - ri > 3a, and the length scale of the envelope, , is related to the grid size, x, through /x = 1.86. For more details, we refer the reader to our previous work [40].
+
+6.2. Convergence study: boomerang above no-slip boundary
+
+In this section we study the accuracy of the gDC scheme by examining the equilibrium dis-
+
+tributions of a boomerang particle in a gravitational field above a no-slip boundary. Micron-size
+
+boomerangs have been used extensively to study the diffusion of colloidal anisotropic particles
+
+in experiments [61] and simulations [60, 48]. Following Delong et al. [60] and as shown in fig. 3,
+
+we discretise the boomerang using 15 RPY-particles separated by distance a, the radius of the
+
+RPY-particle. The boomerang is subject to a gravitational force of magnitude mg = 0.18kBT /a
+
+and each RPY-particle interacts with the planar boundary through a short-ranged, repulsive
+
+potential,
+
+V
+
+(h)
+
+=
+
+V0a
+
+exp h
+
+-
+
+h-a b
+
+-a
+
+,
+
+(41)
+
+where h is the height of the RPY-particle's centre from the surface, V0 = 23kBT sets the potential strength, and b = 0.5a is the range of the potential.
+Simulations are performed using both the T-S and gDC schemes for three different time-step sizes t = 0.1, 0.2, 0.3D, where D = a2/D = 6a3/kBT is the typical diffusive timescale associated with an RPY-particle. The divergence term, , in Step 3 of the gDC algorithm (see
+section 3) is computed using both FD (24) and RFD (25). The solver tolerance for the GMRES and Lanczos algorithm is set to 10-4, and the finite difference parameter is  = 10-6.
+
+13
+
+In order to obtain sufficient statistics, we run 36 different simulations for each value of t. Each simulation is initialized using a Monte Carlo generated sample of the Gibbs-Boltzmann distribution and is run to a final time of 30000D, where the solution is recorded at every t = 0.3D.
+Figure 4 compares the height distributions from the T-S and gDC simulations with the true distribution obtained using Markov Chain Monte Carlo (MCMC). We see that, as expected, both schemes converge to the MCMC distribution as t decreases. The L2 errors for the distributions shown in the right panel indicate that the gDC achieves a similar accuracy and convergence rate as the T-S. However, the RFD computation of the  term in the gDC algorithm leads to larger errors than FD. This is particularly true for the largest time-step, t = 0.3D, for which gDCRFD exhibit numerical stability issues due to particle overlaps across the wall. Similar stability problems were also encountered with the T-S scheme, resulting in several simulations being discarded and restarted when t = 0.3D. We suspect that the loss of stability with gDC-RFD is due to overestimations of (x · V)n caused by the random sampling W , which leads to large values of the corrective term , therefore potentially moving the particle too far into the wall at the next time step.
+The orientation distribution, shown in fig. 5, displays a similar trend, though the gDC exhibits a smaller error which does not change considerably with the time-step size.
+
+g <latexit sha1_base64="vmPs/L4DTQ+031t4ylAOlX3U35Q=">AAAB8XicbVDLSsNAFL2pr1pfVZduBovgqiQi6LLoxmUF+8A2lMl00g6dTMLMjVBC/8KNC0Xc+jfu/BsnbRbaemDgcM69zLknSKQw6LrfTmltfWNzq7xd2dnd2z+oHh61TZxqxlsslrHuBtRwKRRvoUDJu4nmNAok7wST29zvPHFtRKwecJpwP6IjJULBKFrpsR9RHAdhNpoNqjW37s5BVolXkBoUaA6qX/1hzNKIK2SSGtPz3AT9jGoUTPJZpZ8anlA2oSPes1TRiBs/myeekTOrDEkYa/sUkrn6eyOjkTHTKLCTeUKz7OXif14vxfDaz4RKUuSKLT4KU0kwJvn5ZCg0ZyinllCmhc1K2JhqytCWVLEleMsnr5L2Rd1z6979Za1xU9RRhhM4hXPw4AoacAdNaAEDBc/wCm+OcV6cd+djMVpyip1j+APn8wfjZJEL</latexit>
+
+ <latexit sha1_base64="JqEnYvV6PtsKBJYmBVwEpjIMANw=">AAAB7XicbVDLSgNBEJyNrxhfUY9eBoPgKeyKoMegF48RzAOSJcxOOsmY2ZllplcIS/7BiwdFvPo/3vwbJ8keNLGgoajqprsrSqSw6PvfXmFtfWNzq7hd2tnd2z8oHx41rU4NhwbXUpt2xCxIoaCBAiW0EwMsjiS0ovHtzG89gbFCqwecJBDGbKjEQHCGTmp2cQTIeuWKX/XnoKskyEmF5Kj3yl/dvuZpDAq5ZNZ2Aj/BMGMGBZcwLXVTCwnjYzaEjqOKxWDDbH7tlJ45pU8H2rhSSOfq74mMxdZO4sh1xgxHdtmbif95nRQH12EmVJIiKL5YNEglRU1nr9O+MMBRThxh3Ah3K+UjZhhHF1DJhRAsv7xKmhfVwK8G95eV2k0eR5GckFNyTgJyRWrkjtRJg3DySJ7JK3nztPfivXsfi9aCl88ckz/wPn8Ao/ePKA==</latexit>
+
+p^
+
+<latexit sha1_base64="76F0Pe8KiS0nV5U10aD/xWNvPes=">AAACA3icdVDLSgMxFL1TX7W+qi7dBIvgqsyIoMuiG5cV7AM6pWTSTBuaZEKSEcowS3/Bre7diVs/xK1fYvoQWh8HLhzOuZdzOZHizFjf//AKK6tr6xvFzdLW9s7uXnn/oGmSVBPaIAlPdDvChnImacMyy2lbaYpFxGkrGl1P/NY91YYl8s6OFe0KPJAsZgRbJ4XhENssjESm8rxXrgRVfwrk/yLfVgXmqPfKn2E/Iamg0hKOjekEvrLdDGvLCKd5KUwNVZiM8IB2HJVYUNPNpj/n6MQpfRQn2o20aKouXmRYGDMWkdsU2A7NT28i/uV1UhtfdjMmVWqpJLOgOOXIJmhSAOozTYnlY0cw0cz9isgQa0ysq2kpJRJ5abGU/0nzrBr41eD2vFK7mtdThCM4hlMI4AJqcAN1aAABBY/wBM/eg/fivXpvs9WCN785hCV4718oA5i9</latexit>
+
+h <latexit sha1_base64="SsYKOOt1jTfiNkyHK7x6GFFEbxM=">AAAB6HicbVBNS8NAEJ3Ur1q/qh69LBbBU0lEqMeiF48t2A9oQ9lsJ+3azSbsboQS+gu8eFDEqz/Jm//GbZuDtj4YeLw3w8y8IBFcG9f9dgobm1vbO8Xd0t7+weFR+fikreNUMWyxWMSqG1CNgktsGW4EdhOFNAoEdoLJ3dzvPKHSPJYPZpqgH9GR5CFn1FipOR6UK27VXYCsEy8nFcjRGJS/+sOYpRFKwwTVuue5ifEzqgxnAmelfqoxoWxCR9izVNIItZ8tDp2RC6sMSRgrW9KQhfp7IqOR1tMosJ0RNWO96s3F/7xeasIbP+MySQ1KtlwUpoKYmMy/JkOukBkxtYQyxe2thI2poszYbEo2BG/15XXSvqp6btVrXlfqt3kcRTiDc7gED2pQh3toQAsYIDzDK7w5j86L8+58LFsLTj5zCn/gfP4AzfmM7A==</latexit>
+
+Figure 3: Colloidal boomerang made of 15 RPY-particles above a no-slip boundary. The height, h, is the distance between the centre of the boomerang-point RPY-particle and the no-slip surface. The angle  is that between the vertical axis and the unit vector, p, that is orthogonal to both boomerang arms.
+
+Figure 4: (left panel) Height distribution of the boomerang above a no-slip surface (right panel) L2-error between the simulated distributions and the true distribution generated using MCMC.
+14
+
+Figure 5: (left panel) Orientational distribution of the boomerang above a no-slip surface (right panel) L2-error between the simulated distributions and the true distribution generated using MCMC.
+
+6.3. Confined liquid crystal
+Inspired by the alignment of slender molecules in liquid crystals, this section examines the equilibrium distributions of confined suspensions of rod-shaped particles. In this set of simulations, each rod is constructed from 22 particles of radius a as illustrated in fig. 6. The simulations are performed using fluctuating FCM in periodic computational domains with dimensions [0, Lx] × [0, 2Ly] × [0, Lz]. Confinement is introduced by first including slip boundaries at y = 0 and y = Ly through boundary conditions u · ey = 0 and I - eyey u = 0 on the flow field. These conditions are enforced using an image system [40] for both the forces on the bodies, as well as the fluctuating stress, in the y > Ly half of the computational domain. Second, the rods are kept away from the channel walls by including a repulsive harmonic potential
+
+V (r) =
+
+K 2
+
+(r
+
+-
+
+b)2
+
+,
+
+r < b,
+
+0,
+
+r  b,
+
+(42)
+
+on each FCM-particle making up the rod. Here, r is the distance between an FCM-particle
+
+centre
+
+and
+
+the
+
+wall,
+
+b
+
+=
+
+2.2a
+
+is
+
+the
+
+cut-off
+
+distance,
+
+and
+
+K
+
+=
+
+40kB ab
+
+T
+
+.
+
+Along
+
+with
+
+this
+
+potential,
+
+overlap between FCM-particles is also discouraged using the soft potential
+
+U (r) =
+
+U0
+
+1
+
++
+
+2a-r b
+
+,
+
+U0 exp
+
+2a-r b
+
+,
+
+r < 2a, r  2a,
+
+(43)
+
+with r now denoting the centre-to-centre distance between 2 FCM-particles, U0 = 20kBT and b = 0.5a.
+
+Figure 6: A rod formed of 22 FCM-particles.
+In the following simulations, the domain length is set to Lx = Lz = L = 77.65a. We consider three different channel widths, namely Ly = L/8, Ly = L/4 and Ly = L/2, to explore how confinement impacts the rod distributions. The number of rods in these simulations is taken to be 64, 128 and 256 respectively to maintain a constant volume fraction of 10%. A representative simulation snapshot shown in fig. 7. Each simulation was run until a final time of 50D/3 and
+15
+
+Figure 7: A snapshot from a rod simulation with channel width Ly = L/2. Each rod has a randomlyselected greyscale colouring and the semi-transparent grey boundaries depict the locations of the slip boundaries.
+the time step size was set to t = D/600. Finally, the initial conditions for the gDC simulations were generated using samples from independent MCMC runs.
+To measure the distribution of the rods within the channel, we compute the distribution of the y-coordinates of geometric centre of the rods. Additionally, we compute the distribution of the angle  between the rod-axis and the xz-plane, such that  = 0 corresponds to the rod being parallel to the channel boundaries. Figure 8 compares the y-coordinate distributions from the gDC simulations with the Gibbs-Boltzmann distributions calculated using MCMC. For all channel widths that were considered, good agreement is observed between these distributions. Similarly close agreement is found for the -distributions in fig. 9; the shape of the distribution is well-preserved even when viewed on a logarithmic scale. All of the y-coordinate distributions exhibit the expected symmetry about the midpoint of the channel at y = Ly/2, and have peaks in probability density near the slip boundaries. The position of the peaks depends on the width of the slip channel because of the finite thickness of the rods. It is also clear that the narrower the channel, the higher the probability of the y-positions associated with these peaks. The distributions all decrease from a maximum value at   0, although for the narrowest channel, the distribution exhibits a second local maximum just below  = /8. The wider the channel, the more slowly the probability density decays, and hence the larger the range of likely orientations.
+For the narrowest channel, the channel width, Ly = L/8  9.7a, is slightly larger than twice the diameter of the rod cross-section (2 × 4a = 8a), but less than the rod length of 16.14a. As a result, the harmonic potential which keeps rods away from the slip surfaces will also induce a torque on the rods even for small deviations from  = 0. Thus, the rods are most likely to be found with an orientation   0 in one of the two layers displaced from the channel centre. The distance between these layers balances the repulsive potentials between different rods and
+16
+
+between particles and the walls. The smaller peak at the channel centre represents the small number of rods that get `jammed' between the two layers. Additionally, as there is insufficient space for all rods to have   0, they also tend to span the channel diagonally with their ends trapped between the channel walls, leading to the secondary peak in the -distribution below  = /8.
+As the channel width increases when we have Ly = L/4  19.4a, the central peak in the y-coordinate distribution becomes more pronounced, as shown in fig. 8. Additionally, we observe a wider range of possible -value for rods near the channel centre, although we note that a small, secondary peak in the  distribution remains as seen in the log-scale plot in fig. 9. Note that this peak occurs at a larger  value than for the narrowest channel due to the increased channel width. Rods in the outer layers between this central layer and the slip boundaries are still most likely to have   0. As a consequence, the rods in the middle layer are also likely to align with  = 0 with the two outer rod layers acting like the channel walls. Therefore, we see that the angle distribution retains its maximum at low .
+For the largest width, the  distribution still exhibits its peak value at   0 as the rods nearest the slip boundaries continue to align parallel to the boundaries. We again observe peaks in the y-coordinate distribution close to the channel boundaries, though their magnitude is now reduced as shown in fig. 8. The central peak observed in the two previous cases, however, has now spread out to form a series of peaks of decreasing magnitude in the interior of the channel. Note that this persistent pattern of density peaks which are largest near the walls and which decrease towards the channel centre is consistent with existing observations on the layering of colloidal particles near repulsive boundaries [62, 63, 64, 65, 66]. Rods appear to spend comparable amounts of time between and in these internal layers, seemingly making layers away from the slip surfaces more transient than those near the boundaries where rods tend to spend significant amounts of time. Finally, rods in the channel interior achieve a broader distribution of  values with no discernible secondary peak in the  distribution.
+
+6.4. Rheology of suspensions of Czech hedgehog colloids
+
+In this section, we use fluctuating FCM with the gDC to perform nonequilibrium simulations
+
+that examine the rheology of Brownian Czech hedgehog-shaped (CH) particles, depicted in
+
+fig. 10. This set of simulations is inspired by the recent experimental work of Bourrianne et
+
+al. [67], where suspensions of dendritic, silica particles, either hydrophobic or hydrophilic, were
+
+found to exhibit interesting rheological behaviour, including discontinuous shear thickening,
+
+depending on the particle interactions, as well as the relative strengths of shear and particle
+
+diffusion (Peclet number) and volume fraction.
+
+In our simulations, the CH particles are formed of 19 FCM-particles of radius a, as shown
+
+in fig. 10. This shape was chosen to reproduce, at some level, the complex structure and
+
+high specific surface area of the silica particles in the experiments. We consider two types of
+
+interactions between the CH particles. For the first type, the FCM-particles comprising the
+
+CH particles repel at short-range through a soft potential, while attracting at longer range.
+
+Specifically, defining
+
+rc (r) = A exp
+
+-
+
+r - rc 
+
+2
+
+(44)
+
+for A = 5kBT and  = 0.5a, the `repel-attract' potential is given by
+
+U1(r) = U (r) - 3a(r),
+
+(45)
+
+where U (r) is the soft-sphere potential defined in eq. (43). For the second type of interaction, we have the `repel-attract-repel' potential
+
+U2(r) = U (r) - 3a(r) + 7a/2(r),
+
+(46)
+
+17
+
+0.8
+
+0.3
+
+0.6
+
+0.25
+
+0.2 0.4
+0.15
+
+0.2
+
+0.1
+
+0.05
+
+0
+
+0
+
+0
+
+0.2 0.4 0.6 0.8
+
+1
+
+0
+
+0.2 0.4 0.6 0.8
+
+1
+
+0.12
+
+0.1
+
+0.08
+
+0.06
+
+0.04
+
+0.02
+
+0
+
+0
+
+0.2 0.4 0.6 0.8
+
+1
+
+Figure 8: The equilibrium distributions of rod positions across slip channels of widths Ly = L/8, Ly = L/4 and Ly = L/2.
+
+15
+
+101
+
+10
+
+100
+
+5
+
+10-1
+
+0
+
+10-2
+
+0
+
+/8
+
+/4
+
+3 /8
+
+/2
+
+0
+
+/8
+
+/4
+
+3 /8
+
+/2
+
+Figure 9: The equilibrium distributions of rod orientations in slip channels of various widths, shown in both (left) linear and (right) logarithmic scales.
+
+18
+
+20 15 10
+5 0 -5
+2 2.5 3 3.5 4 4.5 5
+
+Figure 10: An illustration of a CH particle formed of 19 FCM-particles of radius a (left), and the different interaction potentials for suspended CH particles (right).
+
+where a barrier is introduced in the potential just beyond the well. The resulting shapes of
+
+these potentials are shown in fig. 10. Note that strictly these definitions are only r  2a, with
+
+the potentials continuously extended by linear functions for r < 2a to ensure that the force is
+
+constant for blobs which overlap, just as for the original soft-sphere potential U (r).
+
+The simulations are performed in a triply-periodic computational domain with dimensions
+
+Lx = Ly = Lz = 77.65a. In order ensure that a strong rheological response is observed,
+
+a high volume fraction of 20% was used for all simulations. This corresponds to 1177 CH
+
+particles, yielding a mobility problem for the 1177×19 = 22363 FCM-particles in each simulation.
+
+Simulations were run with a time step length of t = D/600. The initial conditions for the
+
+full simulations were constructed by running simulations that ignore thermal fluctuations and
+
+hydrodynamic interactions, i.e. using a diagonal mobility matrix, but retain interactions due to
+
+the potentials. In practice, we find that by allowing the CH particles to settle in this way before
+
+the shear is applied, the `long-time' velocity profile is realised more quickly. The simulations
+
+were run to final times between 35D/3 and 50D and in all cases, a regular oscillatory velocity
+
+profile emerges long before the end of the simulation.
+
+To measure the suspension viscosity from this emergent velocity field, we adopt the approach
+
+described by V´azquez et al. [68]. Here, the background fluid is forced using the periodic force
+
+density
+
+f (x, y, z) = f0 sin (ky) ex
+
+(47)
+
+where f0 is the force magnitude and k = 2/Ly is the wavenumber. The x-component of the resulting velocity field of the suspension is averaged over time and in the x- and z-directions,
+
+resulting in a sinusoidal velocity profile in y with magnitude vx. The effective viscosity of the
+
+suspension can then be defined as
+
+ef f
+
+=
+
+f0 k2vx
+
+.
+
+(48)
+
+In fig. 11, the ratio of the effective viscosity eff to the underlying fluid viscosity  is compared to the shear rate  for suspensions with both types of particle interactions. In this
+
+work,  is taken as the maximum slope of the sinusoidal velocity profile. We find that both
+
+the `repel-attract' and `repel-attract-repel' exhibit rapid shear thinning at lower shear rates, as
+
+found in the original experiments of Bourrianne et al. We do not observe, however, any shear
+
+thickening for the `repel-attract-repel' CH particle suspensions whose interactions are meant to
+
+be similar to those of the hydrophilic particles in the experiments. Bourrianne et al. suggest
+
+19
+
+that solid friction is required for the onset of shear thickening and that hydrogen bonding is additionally required for DST to be observed. Both of these interactions are absent from our simulations.
+50
+repel-attract-repel repel-attract
+40
+
+30
+
+20
+
+10
+
+0
+
+10-1
+
+100
+
+101
+
+102
+
+1.2
+
+1
+
+0.8
+
+0.6
+
+0.4
+
+Increasing f0
+
+0.2
+
+0
+
+0
+
+10
+
+20
+
+30
+
+Figure 11: The effective viscosity of both types of suspension for different dimensionless shear rates (top), and the radial distribution functions for the different `repel-attract' simulations (bottom). The bottom right plot is displaying the same data as the bottom left plot but over a smaller r range. The colour of the curves fades from black to white as f0 decreases.
+Given that this is a non-equilibrium problem, it is of particular interest to examine distributions of the particle states since they cannot be sampled using equilibrium procedures such as MCMC. Figure 11 shows the radial distribution function g(r) where r is the centre-to-centre distance of r for the CH particles with `repel-attract' interactions; the distribution for `repelattract-repel' interactions is similar. Simulations with higher values of f0 correspond to darker curves in the figure. At the smallest f0, where the particle motion is dominated by the Brownian motion, g(r) increases from zero to a peak value at separations between r/a  8 and r/a  10. At larger separations, g(r) gradually decreases to approach values for a uniform distribution. As f0, and hence the shear rate, is increased, this peak diminishes and the distribution approaches a monotonically increasing function.
+7. Summary and conclusions
+In this paper, we developed the gDC scheme for the efficient time integration of hydrodynamically interacting rigid Brownian particles. The gDC automatically accounts for Brownian drift in advancing particle positions and orientations while retaining the need to perform only a
+
+20
+
+single, full mobility problem at each time step, while achieving accuracy comparable to the current state-of-the-art. The gDC has been designed to be used with fast methods for applying the mobility matrix and generating random increments with the correct covariance and is ideally suited for grid-based computations that take advantage of fluctuating hydrodynamics. Additionally, many of the additional computations that the gDC requires are local to each particle, enabling parallelisation and large-scale computation. Our simulations demonstrate each of these features, as well as the applicability of gDC to enable simulations that complement experiments in modern suspension mechanics and colloidal science.
+
+Acknowledgements
+EEK and TAW gratefully acknowledge support from EPSRC Grant EP/P013651/1. TAW is also thankful for funding through an EPSRC Studentship (Ref: 1832024). BD acknowledges support from the French National Research Agency (ANR), under award ANR-20-CE30-0006.
+
+Appendix A. Quaternions
+In order to describe the state of an arbitrarily shaped particle, its orientation must be provided along with its position in space. This requires providing the rotation mapping from some reference configuration to the current orientation of the particle and thus a parametrisation for three dimensional rotations must be chosen. Perhaps the most natural choice is the axisangle representation  = e, which describes the anti-clockwise rotation through an angle  about the axis e, but subsequent rotations cannot be easily combined under this representation. This problem is shared by the Euler angles, which further suffer from the need to specify a convention for their application as well as the gimbal lock phenomenon, wherein certain choices of one angle result in a loss of a degree of freedom. These issues are avoided when using rotation matrices, but they require significant amounts of redundant storage ­ storing nine variables to represent three degrees of freedom ­ and they must be projected back to the nearest orthonormal matrix in the event of accumulated numerical error. An alternative representation, and the one used in this work, is that of the unit quaternions.
+The unit quaternions can be identified with the unit sphere in R4, although they are often viewed as having separate scalar and vector parts and thus written as q = (q0, q), where q0  R and q  R3; the unit length constraint is then expressed as q02 + q 2 = 1. They form a group under the non-commuting, associative multiplication known as the Hamilton product,
+
+p · q = (p0, p) · (q0, q) = (p0q0 - p · q, p0q + q0p + p × q),
+
+(A.1)
+
+with inverses q-1 = (q0, -q) and identity Iq = (1, 0). It is through the Hamilton product and the polar form for unit quaternions,
+
+q=
+
+cos
+
+ 2
+
+, sin
+
+ 2
+
+e
+
+,
+
+(A.2)
+
+that the unit quaternions can be associated with the anti-clockwise rotation through an angle  about the axis e, with the image, x , of a vector x under this rotation satisfying
+
+(0, x ) = q · (0, x) · q-1.
+
+(A.3)
+
+Thus it is clear that the Hamilton product allows us to describe successive quaternion-represented rotations as another unit quaternion; rotating according to p · q is equivalent to first rotating according to q before rotating according to p. Consequently, the unit quaternions improve on the rotation matrix representation of rotations by reducing the storage cost from nine to four
+
+21
+
+variables, reducing the cost of correcting accumulated errors to normalising a vector and by providing an intuitive correspondence with the axis-angle description.
+If  denotes the angular velocity of the body, then the unit quaternion associated with the orientation of the body, viewed as an element of R4, satisfies
+
+dq dt
+
+=
+
+q  ,
+
+(A.4)
+
+where
+
+q
+
+=
+
+1 2
+
+-q q0I + [×q]
+
+ R4×3
+
+(A.5)
+
+satisfies
+
+q 
+
+=
+
+1 2
+
+(0,
+
+)
+
+·
+
+q.
+
+Given an initial orientation quaternion q0 at time t = 0, this ODE could be solved using
+
+standard linear techniques. However, this will produce a quaternion with non-unit norm in
+
+general. The resulting quaternion could be projected back to unit length, but this represents an
+
+unnecessary source of error. Instead, we utilise the Lie algebra associated with the group of unit
+
+quaternions to perform multiplicative updates which preserve the norm to machine precision.
+
+Following the general frameworks of Iserles et al. [69] and Faltinsen et al. [70], we observe that
+
+the solution of the ODE for the orientation quaternion,
+
+dq dt
+
+=
+
+q  ,
+
+q(0) = q0,
+
+(A.6)
+
+is given by
+
+q(t) = exp (u(t)) · q0,
+
+where u is the so-called Lie algebra element satisfying
+
+(A.7)
+
+du dt
+
+=
+
+Du-1,
+
+u(0) = 0.
+
+(A.8)
+
+The exponential function for this Lie algebra corresponds to the polar form of the unit qua-
+
+ternions, i.e.
+
+exp (u) = cos
+
+u 2
+
+, sin
+
+u 2
+
+u u
+
+,
+
+(A.9)
+
+and Du-1 is the `dexpinv' matrix defined by
+
+Du-1
+
+=I-
+
+1 2
+
+[u×]
+
+-
+
+2
+
+1 u
+
+2
+
+u cot
+
+u 2
+
+- 2 [u×]2 ;
+
+(A.10)
+
+the Lie algebra considered here is isomorphic to (R3, ×) and so u should simply be thought of as a 3-vector. It should also be noted that Du-1 is continuously extended by D0-1 = I.
+As discussed by Faltinsen et al. [70], the numerical properties of the solution are preserved
+by in fact using u to describe the rotation we apply to the current quaternion rather than the initial condition q0. That is, at a given discrete time n (i.e. t = tn = nt) we solve for un+1 assuming that un = 0 and define qn+1 = exp(un+1)·qn. The fact that the Lie algebra element is
+always expressed in a coordinate system such that it is zero at the start of the current time-step
+will allow us to make some useful simplifications in Appendix E.
+
+22
+
+Appendix B. Expressing torques in terms of the Lie algebra element
+
+Delong et al. [60] considered the change in energy due to an infinitesimal rotation to argue that if the quaternion q describes the orientation of a particle then the torque it experiences due to a potential U can be written
+
+T = -q qU,
+
+(B.1)
+
+where the matrix q is as defined in eq. (A.5). In this section, we employ a similar argument to show that the analogous result holds for the corresponding Lie algebra element.
+Consider the torque T = -U generated by the potential U , where  is the oriented angle. We want to express this torque directly in terms of the Lie algebra element u. Recalling eq. (A.8), we have
+
+du = Du-1d
+
+=
+
+d
+
+-
+
+1 2
+
+u
+
+×
+
+d
+
+-
+
+g
+
+(u)
+
+u
+
+×
+
+(u
+
+×
+
+d)
+
+,
+
+(B.2)
+
+where we have defined g(u) =
+
+u cot
+
+u 2
+
+- 2 / 2 u 2 for legibility. Hence, the change
+
+in energy dU due to an infinitesimal rotation d satisfies
+
+-T · d = dU = uU · du
+
+=
+
+uU
+
+·
+
+d
+
+-
+
+1 2
+
+(u
+
+×
+
+d)
+
+·
+
+uU
+
+-
+
+g
+
+(u)
+
+[u
+
+×
+
+(u
+
+×
+
+d)]
+
+·
+
+uU.
+
+(B.3)
+
+Since the scalar triple product is invariant under cyclic permutation of the vectors we observe that (u × d) · uU = (uU × u) · d and [u × (u × d)] · uU = [uU × u] · (u × d) = [(uU × u) × u] · d, giving us
+
+dU =
+
+uU
+
+-
+
+1 2
+
+(uU
+
+×
+
+u)
+
+-
+
+g
+
+(u)
+
+(uU
+
+×
+
+u)
+
+×
+
+u
+
+· d.
+
+(B.4)
+
+This permits the identification of the torque as
+
+T =-
+
+uU
+
+-
+
+1 2
+
+(uU
+
+×
+
+u)
+
+-
+
+g
+
+(u)
+
+(uU
+
+×
+
+u)
+
+×
+
+u
+
+=-
+
+I
+
+-
+
+1 2
+
+[×u]
+
+-
+
+g
+
+(u)
+
+[×u]2
+
+uU
+
+= -Du- uU.
+
+(B.5)
+
+Appendix C. Equivalence between the Lie algebra and quaternion SDEs
+Having shown that the torque on a body can be written in terms of the unit quaternion describing its orientation, q, according to eq. (B.1), Delong et al. [60] argue that q should satisfy the It^o Langevin SDE
+
+dq = kBT q · q NT q - q NT q q U dt + 2kBT q N1/T2dW ,
+
+(C.1)
+
+where NT is the rotational mobility matrix mapping the torque on the body, T = -q qU , to
+its angular velocity, , and N1/T2 satisfies N1/T2 N1/T2 = NT as required by the fluctuationdissipation theorem. In this work, we integrate unit quaternions in time using their associated Lie algebra elements rather than handle the quaternions directly. Thus, we seek an It^o SDE for the Lie algebra element such that the resulting quaternion, defined by eq. (A.7), satisfies
+
+23
+
+eq. (C.1) and hence that the rotational dynamics in our approach are equivalent to those in the
+work of Delong et al. [60]. Given our result in Appendix B, namely that the torque on the body can be expressed using the Lie algebra element as T = -Du- uU , we propose that the appropriate It^o SDE is
+
+du = kBT u · Du-1NT Du- - Du-1NT Du- uU dt + 2kBT Du-1N1/T2dW ,
+
+(C.2)
+
+the direct analogue of eq. (C.1). In the remainder of this section, we demonstrate that this does
+indeed result in the correct It^o SDE for the unit quaternion.
+Loosely speaking, the approach here is to convert the It^o SDE for u to the Stratonovich in-
+terpretation, for which many standard calculus results are recovered, then to mirror the deterministic result "du/dt = Du-1 = dq/dt = q" and finally to recover the It^o interpretation. To that end, recall that if y satisfies the It^o SDE
+
+dy = h (y) dt +  (y) dW ,
+
+(C.3)
+
+then the equivalent Stratonovich form of the SDE is
+
+dy =
+
+h
+
+(y)
+
+-
+
+1 2
+
+c
+
+(y)
+
+dt +  (y)  dW ,
+
+(C.4)
+
+where ci = jkik/yj and  denotes the Stratonovitch product. Writing D-1 = Du-1 and
+
+N= 
+2kB
+
+NT (and T Di-k1Nk1j/2
+
+hence N1/2 = by comparing
+
+N1/T2) to simplify notation, eq. (C.2) to eq. (C.3) for y =
+
+we make the u and hence
+
+identification obtain
+
+ij
+
+=
+
+1 2
+
+ci
+
+=
+
+kB T
+
+Dj-b1Nb1k/2
+
+
+
+Di-a1Na1k/2 uj
+
+ = kBT 
+
+Di-a1Na1k/2Nk1b/2Dj-b1 uj
+
+ - Di-a1Na1k/2
+
+Dj-b1Nb1k/2 
+
+uj
+
+
+
+(C.5)
+
+
+
+= kBT
+
+Nij  uj
+
+ - Di-a1Na1k/2
+
+Dj-b1Nb1k/2 uj
+
+ .
+
+Now we claim that Dj-b1/uj = 0 and hence that  Dj-b1Nb1k/2 /uj = Dj-b1Nb1k/2/uj. For
+
+u = 0, we can simply differentiate eq. (4) and observe that Dj-b1/uj 
+
+[u×]2 u = 0. The
+b
+
+case u = 0 can be shown easily using the limit definition of the partial derivative. Thus
+
+1 2
+
+ci
+
+=
+
+kB T
+
+Nij uj
+
+-
+
+Di-a1
+
+Na1k/2Dj-b1
+
+Nb1k/2 uj
+
+,
+
+(C.6)
+
+which allows us to cast eq. (C.2) in Stratonovich form as
+
+dui =
+
+kB
+
+T
+
+Di-a1Na1k/2Dj-b1
+
+Nb1k/2 uj
+
+-
+
+Nij
+
+U uj
+
+dt +
+
+2kBT Di-a1Na1j/2  dWj
+
+= Di-a1
+
+kB
+
+T
+
+Na1k/2Dj-b1
+
+Nb1k/2 uj
+
+-
+
+NabDj-b1
+
+U uj
+
+dt +
+
+2kBT Na1j/2  dWj .
+
+(C.7)
+
+Applying Theorem 5.1 of Malham and Wiese [71] (recognizing the  as the columns of N1/2) we find that the corresponding orientation quaternion satisfies the Stratonovich equation
+
+dqi = ia
+
+kB
+
+T
+
+Na1k/2
+
+Dj-b1
+
+Nb1k/2 uj
+
+-
+
+Nab
+
+Dj-b1
+
+U uj
+
+dt +
+
+2kBT Na1j/2  dWj ,
+
+(C.8)
+
+24
+
+where we have dropped the q subscript from q for legibility. Recalling Appendix B, we make the identification Dj-b1/uj = jb/qj and thus the above becomes
+
+dqi = ia
+
+kB
+
+T
+
+Na1k/2jb
+
+Nb1k/2 qj
+
+-
+
+Nabjb
+
+U qj
+
+dt +
+
+2kBT Na1j/2  dWj .
+
+(C.9)
+
+Observing that the form of this equation is analogous to eq. (C.7) and noting that jb/qj = 0 since the jth row of  doesn't depend on qj, we simply perform the above procedure in reverse to obtain eq. (C.1).
+Having established the appropriate It^o SDE for the Lie algebra element, it is simple to couple this to the corresponding equation for the position of the body to produce the complete It^o SDE for the state of the body we presented in eq. (8).
+
+Appendix D. Algorithm for Euler-Maruyama scheme
+
+For each time-step n = 0, 1, 2, ...
+
+1. Generate a vector W (or tensor W if using fluctuating hydrodynamics) of N (0, 1) random variables.
+
+2. Solve the full problem
+
+Mn -Kn -K n 0
+
+n Vn
+
+=
+
+-vn = -
+
+2kB T t
+
+M1/2 n W
+
+-F n
+
+(D.1)
+
+for
+
+V n = Nn F n + K n M-1 n vn = NnF n + V n,
+
+(D.2)
+
+3. Move the rigid bodies to the next time-step according to
+xn+1 = xn + tV n, qpn+1 = exp unp+1 · qpn for 1  p  N.
+
+(D.3) (D.4)
+
+Appendix E. Proof of consistency for GDC
+
+In this section we offer a proof of the consistency of the gDC algorithm (section 3); i.e. that the increment xn = xn+1 - xn = tV m produces the correct first and second moments for
+freely-diffusing rigid bodies,
+
+xn
+
+= kBT t
+
+x · N
+
+n
+,
+
+(E.1)
+
+xn (xn) = 2kBT tNn,
+
+(E.2)
+
+to first-order in time. We begin by observing that D0-1 = I = n = I (recall Appendix A) and hence that eq. (E.2) reduces to
+
+xn (xn) = 2kBT tNn.
+
+(E.3)
+
+To similarly simplify eq. (E.1) we introduce the shorthand i  (x)i = /xi and, summing over repeated indices, expand
+
+j Nij n = (j (iaNabjb))n
+= niaNanb (j jb)n + nianjb (j Nab)n + Nanbnjb (j ia)n = Ninb (j jb)n + (j Nij )n + Nanj (j ia)n ,
+
+(E.4)
+
+25
+
+since nkl = kl. In Appendix C we show that j Du-1 jb = 0 and hence the first term vanishes.
+
+Furthermore, applying the definition of partial differentiation yields
+
+j
+
+Du-1
+
+ia
+
+n
+
+=
+
+-
+
+1 2
+
+ija,
+
+and hence the components of the third term which don't vanish in the differentiation vanish
+
+as the inner product of a symmetric and skew-symmetric matrix. Thus we obtain the simpler
+
+expression
+
+xn = kBT t (x · N)n
+
+(E.5)
+
+for the first moment in expectation.
+To simplify notation, for the remainder of this section all quantities are evaluated at time n unless explicitly indicated otherwise. We start by expanding V m about time tn to obtain
+
+Vim
+
+=
+
+Vi
+
++
+
+t 2
+
+Vj
+
+j
+
+Vi
+
++
+
+t2 8
+
+VkVj kj Vi
+
++
+
+O(t).
+
+(E.6)
+
+Recalling
+
+that
+
+
+
+=
+
+1
+
++
+
+t 2
+
+j
+
+Vj
+
+we
+
+obtain
+
+ Vim
+
+=
+
+Vi
+
++
+
+t 2
+
+Vj
+
+j
+
+Vi
+
++
+
+t2 8
+
+Vk
+
+Vj
+
+k
+
+j
+
+Vi
+
++
+
+t 2
+
+Vij
+
+Vj
+
++
+
+t2 4
+
+Vj j
+
+(Vi)
+
+k
+
+(Vk)
+
++
+
+O(t).
+
+(E.7)
+
+We recognize the second and fourth terms on the right hand side as a product rule expansion and re-write the above as
+
+ Vim
+
+=
+
+Vi
+
++
+
+t 2
+
+j
+
+(Vj Vi )
+
++
+
+t2 8
+
+Vk
+
+Vj
+
+k
+
+j
+
+Vi
+
++
+
+t2 4
+
+Vj j
+
+(Vi)
+
+k
+
+(Vk)
+
++
+
+O(t).
+
+(E.8)
+
+All but the second term vanish in expectation, leaving us with
+
+ Vim
+
+=
+
+t 2
+
+j
+
+Vj Vi
+
++ O(t).
+
+(E.9)
+
+Note that if we are calculating the divergence using RFD instead, eqs. (E.7) and (E.8) only hold
+in expectation and are obtained by exploiting the independence of W and W to separate terms. Nevertheless, we obtain eq. (E.9).
+Now, recalling the definitions of V and V we have
+
+Vj Vi
+
+=
+
+2kB T t
+
+Nik Kkl Ml-m1 Mm1/n2
+
+K
+
+K
+
+-1 jq
+
+Kqr
+
+Mr1s/2
+
+WnWs
+
+.
+
+(E.10)
+
+Using WnWs = ns it is easy to verify that
+
+Vj Vi
+
+=
+
+2kB T t
+
+Nij .
+
+(E.11)
+
+Substituting this into eq. (E.9) and multiplying through by t reveals that eq. (E.5) is satisfied to first-order. To show the same for eq. (E.3), recall eq. (E.8) and observe that
+
+xixa = t22VimVam
+
+=
+
+t2ViVa
+
++
+
+t3 2
+
+[j
+
+(Vi Vj Va )
+
++
+
+Vi Va j Vj ]
+
++
+
+O(t2).
+
+The second term vanishes in expectation and we have
+
+(E.12)
+
+xixa = t2 ViVa + O(t2).
+
+(E.13)
+
+26
+
+If we are using RFD to calculate the divergence, then the expansion in eq. (E.12) only holds in expectation but we obtain eq. (E.13) nonetheless.
+Again recalling the definition of V from section 3 we find that
+
+t2 ViVa = 2kBT tNikKklMl-m1Mm1/n2NabKbcMc-d1Md1e/2 WnWe .
+
+(E.14)
+
+In a similar way to before, substituting WnWe = ne and summing over repeated indices yields
+
+t2 ViVa = 2kBT tNia,
+
+(E.15)
+
+giving us the desired result.
+
+27
+
+References
+[1] W. B. Russel, Brownian motion of small particles suspended in liquids, Annual Review of Fluid Mechanics 13 (1) (1981) 425­455. doi:10.1146/annurev.fl.13.010181.002233.
+[2] W. B. Russel, W. Russel, D. A. Saville, W. R. Schowalter, Colloidal dispersions, Cambridge university press, 1991.
+[3] M. D. Graham, Microhydrodynamics, Brownian motion, and complex fluids, Vol. 58, Cambridge University Press, 2018.
+[4] M. Doi, S. F. Edwards, The Theory of Polymer Dynamics, International Series of Monographs on Physics, Oxford Science Publications, 1986.
+[5] R. G. Larson, The structure and rheology of complex fluids, Vol. 150, Oxford university press New York, 1999.
+[6] G. K. Batchelor, The effect of Brownian motion on the bulk stress in a suspension of spherical particles, Journal of Fluid Mechanics 83 (1977) 97­117. doi:10.1017/ S0022112077001062.
+[7] G. Bossis, J. F. Brady, The rheology of brownian suspensions, The Journal of chemical physics 91 (3) (1989) 1866­1874.
+[8] D. R. Foss, J. F. Brady, Structure, diffusion and rheology of Brownian suspensions by Stokesian dynamics simulation, Journal of Fluid Mechanics 407 (2000) 167­200. doi: 10.1017/S0022112099007557.
+[9] P. C. Bressloff, J. M. Newby, Stochastic models of intracellular transport, Reviews of Modern Physics 85 (1) (2013) 135.
+[10] D. L. Ermak, J. A. McCammon, Brownian dynamics with hydrodynamic interactions, The Journal of Chemical Physics 69 (4) (1978) 1352­1360. doi:10.1063/1.436761. URL https://aip.scitation.org/doi/10.1063/1.436761
+[11] G. A. Pavliotis, Stochastic processes and applications: diffusion processes, the FokkerPlanck and Langevin equations, Vol. 60, Springer, 2014.
+[12] S. Kim, S. J. Karrila, Microhydrodynamics: principles and selected applications, Courier Dover Publications, 1991.
+[13] J. Happel, H. Brenner, Low Reynolds number hydrodynamics: with special applications to particulate media, Vol. 1, Springer Science & Business Media, 2012.
+[14] R. Kubo, The fluctuation-dissipation theorem, Reports on Progress in Physics 29 (1) (1966) 255­284. doi:10.1088/0034-4885/29/1/306. URL https://doi.org/10.1088%2F0034-4885%2F29%2F1%2F306
+[15] J. F. Brady, G. Bossis, Stokesian dynamics, Annual Review of Fluid Mechanics 20 (1) (1988) 111­157. doi:10.1146/annurev.fl.20.010188.000551.
+[16] A. Sierou, J. F. Brady, Accelerated stokesian dynamics simulations, Journal of fluid mechanics 448 (2001) 115­146.
+[17] A. J. Banchio, J. F. Brady, Accelerated stokesian dynamics: Brownian motion, The Journal of Chemical Physics 118 (22) (2003) 10323­10332. doi:10.1063/1.1571819.
+28
+
+[18] L. Greengard, V. Rokhlin, A fast algorithm for particle simulations, Journal of computational physics 73 (2) (1987) 325­348.
+[19] A.-K. Tornberg, L. Greengard, A fast multipole method for the three-dimensional stokes equations, Journal of Computational Physics 227 (3) (2008) 1613­1619.
+[20] L. Ying, G. Biros, D. Zorin, A kernel-independent adaptive fast multipole algorithm in two and three dimensions, Journal of Computational Physics 196 (2) (2004) 591­626.
+[21] D. Lindbo, A.-K. Tornberg, Spectral accuracy in fast ewald-based methods for particle simulations, Journal of Computational Physics 230 (24) (2011) 8744­8761.
+[22] A. M. Fiore, F. Balboa Usabiaga, A. Donev, J. W. Swan, Rapid sampling of stochastic displacements in brownian dynamics simulations, The Journal of chemical physics 146 (12) (2017) 124116.
+[23] A. M. Fiore, J. W. Swan, Rapid sampling of stochastic displacements in brownian dynamics simulations with stresslet constraints, The Journal of chemical physics 148 (4) (2018) 044114.
+[24] M. Wang, J. F. Brady, Spectral ewald acceleration of stokesian dynamics for polydisperse suspensions, Journal of Computational Physics 306 (2016) 443­477.
+[25] A. M. Fiore, J. W. Swan, Fast stokesian dynamics, Journal of Fluid Mechanics 878 (2019) 544­597.
+[26] C. Peskin, The immersed boundary method, Acta Numerica 11 (2002) 479­517.
+[27] M. R. Maxey, B. K. Patel, Localized force representations for particles sedimenting in Stokes ow, International Journal of Multiphase Flow (2001) 24.
+[28] S. Lomholt, M. R. Maxey, Force-coupling method for particulate two-phase flow: Stokes flow, Journal of Computational Physics 184 (2) (2003) 381­405. doi:10.1016/ S0021-9991(02)00021-9. URL http://linkinghub.elsevier.com/retrieve/pii/S0021999102000219
+[29] M. Fixman, Construction of Langevin forces in the simulation of hydrodynamic interaction, Macromolecules 19 (4) (1986) 1204­1207. doi:10.1021/ma00158a043.
+[30] R. M. Jendrejack, M. D. Graham, J. J. de Pablo, Hydrodynamic interactions in long chain polymers: Application of the chebyshev polynomial approximation in stochastic simulations, The Journal of Chemical Physics 113 (7) (2000) 2894­2900.
+[31] E. Chow, Y. Saad, Preconditioned Krylov Subspace Methods for Sampling Multivariate Gaussian Distributions, SIAM Journal on Scientific Computing 36 (2) (2014) A588­A608. doi:10.1137/130920587. URL http://epubs.siam.org/doi/10.1137/130920587
+[32] L. Landau, E. Lifshitz, Fluid Mechanics, Pergamon Press, 1959.
+[33] A. J. C. Ladd, Short-time motion of colloidal particles: Numerical simulation via a fluctuating lattice-Boltzmann equation, Phys. Rev. Lett. 70 (1993) 1339­1342. doi: 10.1103/PhysRevLett.70.1339.
+[34] N. Sharma, N. A. Patankar, Direct numerical simulation of the Brownian motion of particles by using fluctuating hydrodynamic equations, Journal of Computational Physics 201 (2) (2004) 466 ­ 486. doi:10.1016/j.jcp.2004.06.002.
+29
+
+[35] M. De Corato, J. Slot, M. Hu¨tter, G. D'Avino, P. L. Maffettone, M. A. Hulsen, Finite element formulation of fluctuating hydrodynamics for fluids filled with rigid particles using boundary fitted meshes, Journal of Computational Physics 316 (2016) 632­651.
+[36] S. Delong, F. B. Usabiaga, R. Delgado-Buscalioni, B. E. Griffith, A. Donev, Brownian dynamics without green's functions, The Journal of chemical physics 140 (13) (2014) 134110.
+[37] P. J. Atzberger, P. R. Kramer, C. S. Peskin, A stochastic immersed boundary method for fluid-structure dynamics at microscopic length scales, Journal of Computational Physics 224 (2) (2007) 1255­1292.
+[38] P. R. Kramer, C. S. Peskin, P. J. Atzberger, On the foundations of the stochastic immersed boundary method, Computer Methods in Applied Mechanics and Engineering 197 (25-28) (2008) 2232­2249.
+[39] E. E. Keaveny, Fluctuating force-coupling method for simulations of colloidal suspensions, Journal of Computational Physics 269 (2014) 61­79. doi:10.1016/j.jcp.2014.03.013. URL http://www.sciencedirect.com/science/article/pii/S0021999114001867
+[40] B. Delmotte, E. E. Keaveny, Simulating Brownian suspensions with fluctuating hydrodynamics, The Journal of Chemical Physics 143 (24) (2015) 244109. doi:10.1063/1. 4938173. URL http://aip.scitation.org/doi/10.1063/1.4938173
+[41] Y. Bao, M. Rachh, E. E. Keaveny, L. Greengard, A. Donev, A fluctuating boundary integral method for brownian suspensions, Journal of Computational Physics 374 (2018) 1094­1119.
+[42] M. Fixman, Simulation of polymer dynamics. I. General theory, The Journal of Chemical Physics 69 (4) (1978) 1527­1537. doi:10.1063/1.436725.
+[43] P. S. Grassia, E. J. Hinch, L. C. Nitsche, Computer simulations of Brownian motion of complex systems, Journal of Fluid Mechanics 282 (1995) 373­403. doi:10.1017/ S0022112095000176.
+[44] B. Sprinkle, F. B. Usabiaga, N. A. Patankar, A. Donev, Large Scale Brownian Dynamics of Confined Suspensions of Rigid Particles, The Journal of Chemical Physics 147 (24) (2017) 244103, arXiv: 1709.02410. doi:10.1063/1.5003833. URL http://arxiv.org/abs/1709.02410
+[45] B. Sprinkle, A. Donev, A. P. S. Bhalla, N. Patankar, Brownian dynamics of fully confined suspensions of rigid particles without greens functions, The Journal of chemical physics 150 (16) (2019) 164116.
+[46] C. Pozrikidis, Boundary integral and singularity methods for linearized viscous flow, Cambridge University Press, 1992.
+[47] F. Balboa Usabiaga, B. Delmotte, A. Donev, Brownian dynamics of confined suspensions of active microrollers, The Journal of chemical physics 146 (13) (2017) 134104.
+[48] F. B. Usabiaga, B. Kallemov, B. Delmotte, A. P. S. Bhalla, B. E. Griffith, A. Donev, Hydrodynamics of Suspensions of Passive and Active Rigid Particles: A Rigid Multiblob Approach, Communications in Applied Mathematics and Computational Science 11 (2) (2016) 217­296, arXiv: 1602.02170. doi:10.2140/camcos.2016.11.217. URL http://arxiv.org/abs/1602.02170
+30
+
+[49] E. Wajnryb, K. A. Mizerski, P. J. Zuk, P. Szymczak, Generalization of the Rotne-PragerYamakawa mobility and shear disturbance tensors, Journal of Fluid Mechanics 731, arXiv: 1307.7312. doi:10.1017/jfm.2013.402. URL http://arxiv.org/abs/1307.7312
+[50] P. J. Zuk, E. Wajnryb, K. A. Mizerski, P. Szymczak, RotnePragerYamakawa approximation for different-sized particles in application to macromolecular bead models, Journal of Fluid Mechanics 741. doi:10.1017/jfm.2013.668. URL http://www.journals.cambridge.org/abstract_S002211201300668X
+[51] J. W. Swan, J. F. Brady, Simulation of hydrodynamically interacting particles near a noslip boundary, Physics of Fluids 19 (11) (2007) 113306. doi:10.1063/1.2803837. URL http://aip.scitation.org/doi/10.1063/1.2803837
+[52] Z. Liang, Z. Gimbutas, L. Greengard, J. Huang, S. Jiang, A fast multipole method for the rotne­prager­yamakawa tensor and its applications, Journal of Computational Physics 234 (2013) 133­139.
+[53] E. E. Keaveny, Fluctuating force-coupling method for simulations of colloidal suspensions, Journal of Computational Physics 269 (2014) 61­79. doi:10.1016/j.jcp.2014.03.013. URL http://linkinghub.elsevier.com/retrieve/pii/S0021999114001867
+[54] M. R. Maxey, B. K. Patel, Localized force representations for particles sedimenting in Stokes fow, Int. J. Multiphase Flow 27 (2001) 1603­1626.
+[55] B. Delmotte, E. Climent, F. Plourabou, A general formulation of Bead Models applied to flexible fibers and active filaments at low Reynolds number, J. Comput. Phys. 286 (2015) 14­37. doi:10.1016/j.jcp.2015.01.026. URL http://dx.doi.org/10.1016/j.jcp.2015.01.026
+[56] P. J. Atzberger, P. R. Kramer, C. S. Peskin, A stochastic immersed boundary method for fluid-structure dynamics at microscopic length scales, Journal of Computational Physics 224 (2) (2007) 1255 ­ 1292. doi:10.1016/j.jcp.2006.11.015.
+[57] P. J. Atzberger, Stochastic eulerian lagrangian methods for fluidstructure interactions with thermal fluctuations, Journal of Computational Physics 230 (8) (2011) 2821 ­ 2837. doi: 10.1016/j.jcp.2010.12.028.
+[58] P. Bourrianne, V. Niggel, G. Polly, T. Divoux, G. H. McKinley, Unifying disparate experimental views on shear-thickening suspensions (2020). arXiv:2001.02290.
+[59] M. Driscoll, B. Delmotte, M. Youssef, S. Sacanna, A. Donev, P. Chaikin, Unstable fronts and stable "critters" formed by microrollers, Nature Physics 13 (4) (2017) 375­379, arXiv: 1609.08673. doi:10.1038/nphys3970. URL http://arxiv.org/abs/1609.08673
+[60] S. Delong, F. Balboa Usabiaga, A. Donev, Brownian dynamics of confined rigid bodies, The Journal of Chemical Physics 143 (14) (2015) 144107. doi:10.1063/1.4932062. URL http://aip.scitation.org/doi/10.1063/1.4932062
+[61] A. Chakrabarty, A. Konya, F. Wang, J. V. Selinger, K. Sun, Q.-H. Wei, Brownian motion of boomerang colloidal particles, Physical review letters 111 (16) (2013) 160603.
+[62] M. Eshraghi, J. Horbach, Molecular dynamics simulation of charged colloids confined between hard walls: pre-melting and pre-freezing across the BCCfluid coexistence, Soft Matter 14 (20) (2018) 4141­4149. doi:10.1039/C8SM00398J. URL https://pubs.rsc.org/en/content/articlelanding/2018/sm/c8sm00398j
+31
+
+[63] I. K. Snook, D. Henderson, Monte Carlo study of a hardsphere fluid near a hard wall, The Journal of Chemical Physics 68 (5) (1978) 2134­2139. doi:10.1063/1.436036. URL https://aip.scitation.org/doi/10.1063/1.436036
+
+[64] J. Mittal, J. R. Errington, T. M. Truskett, Does confining the hard-sphere fluid between hard walls change its average properties?, The Journal of Chemical Physics 126 (24) (2007) 244708. doi:10.1063/1.2748045. URL https://aip-scitation-org.iclibezp1.cc.ic.ac.uk/doi/10.1063/1.2748045
+
+[65] D. Deb, A. Winkler, M. H. Yamani, M. Oettel, P. Virnau, K. Binder, Hard sphere fluids at a soft repulsive wall: A comparative study using Monte Carlo and density functional methods, The Journal of Chemical Physics 134 (21) (2011) 214706. doi:10.1063/1.3593197. URL https://aip-scitation-org.iclibezp1.cc.ic.ac.uk/doi/10.1063/1.3593197
+
+[66] D. H. Van Winkle, C. A. Murray, Layering in colloidal fluids near a smooth repulsive wall, The Journal of Chemical Physics 89 (6) (1988) 3885­3891. doi:10.1063/1.454864. URL https://aip-scitation-org.iclibezp1.cc.ic.ac.uk/doi/10.1063/1.454864
+
+[67] P. Bourrianne, V. Niggel, G. Polly, T. Divoux, G. H. McKinley, Unifying disparate experimental views on shear-thickening suspensions, arXiv:2001.02290 [cond-mat, physics:physics]ArXiv: 2001.02290. URL http://arxiv.org/abs/2001.02290
+
+[68] A. Vzquez-Quesada, F. Balboa Usabiaga, R. Delgado-Buscalioni, A multiblob approach to colloidal hydrodynamics with inherent lubrication, The Journal of Chemical Physics 141 (20) (2014) 204102. doi:10.1063/1.4901889. URL https://aip.scitation.org/doi/10.1063/1.4901889
+
+[69] A. Iserles, H. Z. Munthe-Kaas, S. P. Nrsett, A. Zanna, Lie-group methods, Acta Numerica
+
+9 (2000) 215­365.
+
+URL
+
+https://www.cambridge.org/core/journals/acta-numerica/article/
+
+liegroup-methods/856125FF1EAF7762DEF6E37EEBA9CA5F
+
+[70] S. Faltinsen, A. Marthinsen, H. Z. Munthe-Kaas, Multistep methods integrating ordinary differential equations on manifolds, Applied Numerical Mathematics 39 (3) (2001) 349­365. doi:10.1016/S0168-9274(01)00103-9. URL http://www.sciencedirect.com/science/article/pii/S0168927401001039
+
+[71] S. J. A. Malham, A. Wiese, Stochastic lie group integrators, SIAM Journal on Scientific Computing 30 (2) (2008) 597617. doi:10.1137/060666743. URL http://dx.doi.org/10.1137/060666743
+
+32
+
+

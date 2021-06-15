@@ -1,0 +1,1936 @@
+An Empirical Comparison of Off-policy Prediction Learning Algorithms on the Collision Task
+
+arXiv:2106.00922v1 [cs.LG] 2 Jun 2021
+
+Sina Ghiassian University of Alberta ghiassia@ualberta.ca
+
+Richard S. Sutton University of Alberta and DeepMind
+rsutton@ualberta.ca
+
+Abstract
+Off-policy prediction--learning the value function for one policy from data generated while following another policy--is one of the most challenging subproblems in reinforcement learning. This paper presents empirical results with eleven prominent off-policy learning algorithms that use linear function approximation: five Gradient-TD methods, two Emphatic-TD methods, Off-policy TD(), Vtrace, and versions of Tree Backup and ABQ modified to apply to a prediction setting. Our experiments used the Collision task, a small idealized off-policy problem analogous to that of an autonomous car trying to predict whether it will collide with an obstacle. We assessed the performance of the algorithms according to their learning rate, asymptotic error level, and sensitivity to step-size and bootstrapping parameters. By these measures, the eleven algorithms can be partially ordered on the Collision task. In the top tier, the two Emphatic-TD algorithms learned the fastest, reached the lowest errors, and were robust to parameter settings. In the middle tier, the five Gradient-TD algorithms and Off-policy TD() were more sensitive to the bootstrapping parameter. The bottom tier comprised Vtrace, Tree Backup, and ABQ; these algorithms were no faster and had higher asymptotic error than the others. Our results are definitive for this task, though of course experiments with more tasks are needed before an overall assessment of the algorithms' merits can be made.
+1 The Problem of Off-policy Learning
+In reinforcement learning, it is not uncommon to learn the value function for one policy while following another policy. For example, the Q-learning algorithm (Watkins, 1989; Watkins & Dayan, 1992) learns the value of the greedy policy while the agent may select its actions according to a different, more exploratory, policy. The first policy, the one whose value function is being learned, is called the target policy while the more exploratory policy generating the data is called the behavior policy. When these two policies are different, as they are in Q-learning, the problem is said to be one of off-policy learning, whereas if they are the same, the problem is said to be one of on-policy learning. The former is `off' in the sense that the data is from a different source than the target policy, whereas the latter is from data that is `on' the policy. Off-policy learning is more difficult than on-policy learning and subsumes it as a special case.
+One reason for interest in off-policy learning is that it provides a clear way of intermixing exploration and exploitation. The classic dilemma is that an agent should always exploit what it has learned so far--it should take the best actions according to what it has learned--but it should also always explore to find actions that might be superior. No agent can simultaneously behave in both ways. However, an off-policy algorithm like Q-learning can, in a sense, pursue both goals at the same time. The behavior policy can explore freely while the target policy can converge to the fully exploitative, optimal policy independent of the behavior policy's explorations.
+Preprint. Under review.
+
+Another appealing aspect of off-policy learning is that it enables learning about many policies in parallel. Once the target policy is freed from behavior, there is no reason to have a single target policy. With off-policy learning, an agent could simultaneously learn how to optimally perform many different tasks (as suggested by Jaderberg et al. (2016) and Rafiee et al. (2019)). Parallel off-policy learning of value functions has even been proposed as a way of learning general, policy-dependent, world knowledge (e.g., Sutton et al., 2011; White, 2015; Ring, in prep).
+Finally, note that numerous ideas in the machine learning literature rely on effective off-policy learning, including the learning of temporally-abstract world models (Sutton, Precup, & Singh, 1999), predictive representations of state (Littman, Sutton, & Singh, 2002; Tanner & Sutton, 2005), auxiliary tasks (Jaderberg et al., 2016), life-long learning (White, 2015), and learning from historical data (Thomas, 2015).
+Many off-policy learning algorithms have been explored in the history of reinforcement learning. Q-learning (Watkins, 1989; Watkins & Dayan, 1992) is perhaps the oldest. In the 1990s it was realized that combining off-policy learning, function approximation, and temporal-difference (TD) learning risked instability (Baird, 1995). Precup, Sutton, and Singh (2000) introduced off-policy algorithms with importance sampling and eligibility traces, as well as tree backup algorithms, but did not provide a practical solution to the risk of instability. Gradient-TD methods (see Maei, 2011; Sutton et al., 2009) assured stability by following the gradient of an objective function, as suggested by Baird (1999). Emphatic-TD methods (Sutton, Mahmood, & White, 2016) reweighted updates in such a way as to regain the convergence assurances of the original on-policy TD algorithms. These methods had convergence guarantees, but no assurances that they would be efficient in practice. Other off-policy algorithms, including Retrace (Munos et al., 2016), Vtrace (Espeholt et al., 2018), and ABQ (Mahmood, Yu, & Sutton, 2017) were developed recently to overcome difficulties encountered in practice.
+As more off-policy learning methods were developed, there was a need to compare them systematically. The earliest systematic study was that by Geist and Scherrer (2014). Their experiments were on random MDPs and compared eight major off-policy algorithms. A few months later, Dann, Neumann, and Peters (2014) published a more in-depth study with one additional algorithm (an early Gradient-TD algorithm) and six test problems including random MDPs. Both studies considered off-policy problems in which the target and behavior policies were given and stationary. Such prediction problems allow for relatively simple experiments and are still challenging (e.g., they involve the same risk of instability). Both studies also used linear function approximation with a given feature representation. The algorithms studied by Geist and Scherrer (2014), and by Dann, Neumann, and Peters (2014) can be divided into those whose per-step complexity is linear in the number of parameters, like TD(), and methods whose complexity is quadratic in the number of parameters (proportional to the square of the number of parameters), like Least Squares TD() (Bradtke & Barto, 1996; Boyan, 1999). Quadratic-complexity methods avoid the risk of instability, but cannot be used in learning systems with large numbers (e.g., millions) of weights. A third systematic study, by White and White (2016), excluded quadratic-complexity algorithms, but added four additional linear-complexity algorithms.
+The current paper is similar to previous studies in that it treats prediction with linear function approximation, and similar to the study by White and White (2016) in restricting attention to linear complexity algorithms. Our study differs from earlier studies in that it treats more algorithms and does a deeper empirical analysis on a single problem, the Collision task. The additional algorithms are the prediction variants of Tree Backup() (Precup, Sutton, & Singh, 2000), Retrace() (Munos et al., 2016), ABQ() (Mahmood, Yu, & Sutton, 2017), and TDRC() (Ghiassian et al., 2020). Our empirical analysis is deeper primarily in that we examine and report the dependency of all eleven algorithms' performance on all of their parameters. This level of detail is needed to expose our main result, an overall ordering of the performance of off-policy algorithms on the Collision task. Our results, though limited to this task, are a significant addition to what is known about the comparative performance of off-policy learning algorithms.
+2 Formal Framework
+In this section, we formally explain the framework of off-policy prediction learning with linear function approximation. An agent and environment interact at discrete time steps, t = 0, 1, 2, . . .. The
+2
+
+environment is a Markov Decision Process (MDP) with state St  S at time step t. At each time step, the agent chooses an action At  A with probability b(a|s), where the function b : A × S  [0, 1] with aA b(a|s) = 1, s  S, is called the behavior policy because it determines the agent's behavior. After taking action At in state St, the agent receives from the environment a numerical reward Rt+1  R  R and the next state St+1. In general the reward and next state are stochastically jointly determined by the current state and action.
+In prediction learning, we estimate for each state the expected discounted sum of future rewards, given that actions are taken according to a different policy , called the target policy (because learning its values is the target of our learning). For simplicity, both target and behavior policies are assumed here to be known and static, although of course in many applications of interest one or the other may be changing. The discounted sum of future rewards at time t is called the return and denoted Gt:
+Gt =def Rt+1 + Rt+2 + 2Rt+3 + · · ·
+
+The expected return when starting from a state and following a specific policy thereafter is called the value of the state under the policy. The value function v : S  R for a policy  takes a state as input and returns the value of that state:
+
+v(s) =def E[Gt | St = s, At:  ] .
+
+(1)
+
+Prediction learning algorithms seek to learn an estimate v^ : S  R that approximates the true value function v. In many problems S is large and an exact approximation is not possible even in the limit of infinite time and data. Many parametric forms are possible, including deep artificial neural
+networks, but of particular interest, and our exclusive focus here, is the linear form:
+
+v^(s, w) =def w x(s),
+
+(2)
+
+where w  Rd is a learned weight vector and x(s)  Rd, s  S is a set of given feature vectors, one per state, where d |S|.
+
+3 Algorithms
+In this section, we briefly introduce the eleven algorithms used in our empirical study. These eleven are intended to include all the best candidate algorithms for off-policy prediction learning with linear function approximation. The complete update rules of all algorithms and additional technical discussion can be found in Appendix A and Appendix C respectively.
+Off-policy TD() (Precup, Sutton, & Dasgupta, 2001) is the off-policy variant of the original TD() algorithm (Sutton, 1988) that uses importance sampling to reweight the returns and account for the differences between the behavior and target policies. This algorithm has just one set of weights and one step size parameter.
+Our study includes five algorithms from the Gradient-TD family. GTD() and GTD2() are based on algorithmic ideas introduced by Sutton et al., (2009), then extended to eligibility traces by Maei (2011). Proximal GTD2() (Mahadevan et al., 2014; Liu et al., 2015; Liu et al., 2016) is a "mirror descent" version of GTD2 using a saddle-point objective function. These algorithms approximate stochastic gradient descent (SGD) on an alternative objective function, the mean squared projected Bellman error. HTD() (Hackman, 2012; White & White, 2016) is a "hybrid" of GTD() and TD() which becomes equivalent to classic TD() where the behavior policy coincides with the target policy. TDRC() is a promising recent variant of GTD() that adds regularization. All these methods involve an additional set of learned weights (beyond that used in v^) and a second step-size parameter, which can complicate their use in practice. TDRC() offers a standard way of setting the second step-size parameter, which makes this less of an issue. All of these methods are guaranteed to converge with an appropriate setting of their two step-size parameters.
+Our study includes two algorithms from the Emphatic-TD family. Emphatic-TD algorithms attain stability by up- or down-weighting the updates made on each time step by Off-policy TD(). If this variation in the emphasis of updates is done in just the right way, stability can be guaranteed with a single set of weights and a single step-size parameter. The original emphatic algorithm, Emphatic TD(), was introduced by Sutton, Mahmood, and White (2016). The variant Emphatic TD(, ),
+
+3
+
+introduced by Hallak et al., (2016), has an additional parameter,   [0, 1], intended to reduce variance.
+The final three algorithms in our study can be viewed as different attempts to address the problem of large variations in the product of importance sampling ratios. If this product might become large, then the step-size parameter must be set small to ensure there is no overshoot--and then learning may be slow. All these methods attempt to control the importance sampling product by changing the bootstrapping parameter from step to step. Munos et al., (2016) proposed simply putting a cap on the importance sampling ratio at each time step; they explored the theory and practical consequences of this modification in a control context with their Retrace algorithm. Vtrace() (Espeholt et al., 2018) is a modification of Retrace to make it suitable for prediction rather than control. Mahmood et al., (2017) developed a more flexible algorithm that achieves a similar effect. Their algorithm was also developed for control; to apply the idea to prediction learning we had to develop a nominally new algorithm, ABTD(), that naturally extends ABQ() from control to prediction. A full development of ABTD() can be found in Appendix D. Finally, Tree Backup() (Precup, Sutton, & Singh, 2000) reduces the effective  by the probability of the action taken on each time step. Each of these algorithms (or their control predecessors) have been shown to be very effective on specific problems.
+4 Collision Task
+The Collision task is an idealized off-policy prediction-learning task. A vehicle moves along an eight-state track towards an obstacle with which it will collide if it keeps moving forward. In this episodic task, each episode begins with the vehicle in one of the first four states (selected at random with equal probability). In these four states, forward is the only possible action whereas, in the last four states, two actions are possible: forward and turnaway (see Figure 1). The forward action always moves the vehicle one state further along the track; if it is taken in the last state, then a collision is said to occur, the reward is 1, and the episode ends. The turnaway action causes the vehicle to "turn away" from the wall, which also ends the episode, except with a reward of zero. The reward is also zero on all earlier, non-terminating transitions. In an episodic task like this the return is accumulated only up to the end of the episode. After termination, the next state is the first state of the next episode, selected randomly from the first four as specified above.
+
+forward
+
+Start States
+
+turnaway
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
++1
+
+Figure 1: The Collision task. Episodes start in one of the first four states and end when the forward action is taken from the eighth state, causing a crash and a reward of 1, or when the turnaway action is taken in one of the last four states.
+
+The target policy on this task is to always take the forward action, (forward|s) = 1, s  S, whereas the behavior policy is to take the two actions (where available) with equal probability, b(forward|s) = b(turnaway|s) = 0.5, s  {5, 6, 7, 8}. The problem is discounted with a discount rate of  = 0.9. As always, we are seeking to learn the value function for the target policy, which in this case is v(s) = 8-s. This function is shown as a dotted black line in Figure 2. The thin red lines show approximate value functions v^  v, using various feature representations, as we discuss shortly below.
+This idealized task is roughly analogous to and involves some similar issues as real-world autonomous driving problems, such as exiting a parallel parking spot without hitting the car in front of you, or learning how close you can get to other cars without risking collisions. In particular, if these problems can be treated as off-policy learning problems, then solutions can potentially be learned with fewer collisions. In this paper, we are testing the efficiency of various off-policy prediction-learning algorithms at maximizing how much they learn from the same number of collisions.
+Similar problems have been studied using mobile robots. For example, White (2015) used off-policy learning algorithms running on an iRobot Create to predict collisions as signaled by activation of the robot's front bumper sensor. Rafiee et al. (2019) used a Kobuki robot to not only anticipate collisions,
+
+4
+
+but to turn away from anticipated collisions before they occurred. Modayil and Sutton (2014) trained a custom robot to predict motor stalls and turn off the motor when a stall was predicted.
+
+We artificially introduce function approximation into the Collision task. Although a tabular approach
+
+is entirely feasible on this small problem, it would not be on the large problems of interest. In real
+
+applications, the agent would have sensor readings, or more generally a state representation, which
+
+would help it distinguish between states. We simulate such sensor readings in the Collision task by randomly assigning to each of the eight states a binary feature vector x(s)  {0, 1}d, s  {1..8}.
+
+We chose d = 6, so that is was not possible for all eight of the
+
+feature vectors (one per state) to be linearly independent. In particular, we chose all eight feature vectors to have exactly three 1s and three 0s, with the location of the 1s for each state being chosen randomly.
+
+1.0 0.8
+Value 0.6 0.4
+0.2
+
+v
+v^(., w)
+
+Because the feature vectors are linearly dependent, it is not possible in general for a linear approximation, v^(s, w) = w x,
+
+0 12 34 5 67 8 State
+
+to equal to v(s) at all eight states of the Collision task. This,
+
+in fact, is the sole reason the red approximate value functions in Figure 2 do not exactly match v. Given a feature representation x : S  Rd, a linear approximate value function is completely determined by its weight vector w  Rd. The quality of that
+
+Figure 2: The ideal value function, v, and the best approximate value functions, v^, for 50 different feature
+representations.
+
+approximation is assessed by its squared error at each state,
+
+weighted by how often each state occurs:
+
+VE(w) = µb(s) v^(s, w) - v(s) 2,
+
+(3)
+
+sS
+
+where µb(s) is the state distribution, the fraction of time steps in which St = s, under the behavior policy (here µb was approximated from visitation counts from one million sample time steps). The value functions shown by red lines in Figure 2 are for w, the weight vector that minimizes VE(w),
+with each line corresponding to a different randomly selected feature representation as described earlier. For these value functions, VE(w)  0.05. All the code for the Collision task and these
+experiments is available at: https://github.com/sinaghiassian/OffpolicyAlgorithms.
+
+5 Experiment
+
+The Collision task, in conjunction with its behavior policy, was used to generate 20,000 time steps,
+
+comprising one run, and then this was repeated for a total of 50 independent runs. Each run also
+
+used a different feature representation randomly generated as described in the previous section.
+
+The eleven learning algorithms were then applied to the 50 runs, each with a range of parameter
+
+values; each combination of algorithm and parameter settings is termed an algorithm instance.
+
+A list of all parameter settings used can be found in Table 1 of Appendix B. They included 12
+
+values of , 19 values of , 15 values of  (for the Gradient-TD family), six values of  (for
+
+ETD(, )), and 19 values of  (for ABTD()), for approximately 20,000 algorithm instances in total.
+
+In each run, the weight vector was initialized to w0 = 0
+
+and then updated at each step by the algorithm instance to
+
+produce a sequence of wt. At each step we also computed and recorded VE(wt).
+With a successful learning procedure, we expect the value function to evolve over time as in Figure 3. The approximate value function starts at v^(s, 0) = 0, as shown by the pink line, then moves toward positive values, as shown
+
+1.0
+
+0.8
+
+v^(s,
+
+wt)
+
+0.6 0.4
+
+0.2
+
+0 1
+
+v
+
+t=20,000
+
+t=200
+
+t=2,000
+
+t=0
+
+234 5 678 State
+
+by the blue and orange lines. Finally, the learned value Figure 3: An example of the approxifunction slants and comes to closely approximate the true mate value function, v^, being learned value function, though always with some residual error over time. due to the limited feature representation, as shown by the
+
+green line (and also by all the red lines in Figure 2).
+
+5
+
+Figure 4 shows learning curves illustrating the range of things that happened in the experiment. Normally, we expect VE to decrease over the course of the experiment, starting at VE(0)  0.7 and falling to some minimum value, as in the red and black lines in Figure 4 (these and all other data are averaged over the fifty runs). If the primary step-size parameter, , is small, then the learning may be slow and incomplete by the end of the runs, as in the orange line. A larger step-size parameter may be faster, but, if it is too large, then divergence can occur, as in the blue line. For one algorithm, Proximal GTD2(), we found that the error dipped low and then leveled off at a higher level, as in the olive line.
+
+0.7
+VE 0.5
+(averaged
+over 0.3
+50 runs)
+0.1
+0
+
+5,000
+
+10,000 15,000 20,000
+Steps
+
+Figure 4: Learning curves illustrating the range of things that can happen during a run. The average error over the 20,000 steps is a good combined measure of learning rate and asymptotic error.
+
+6 Main Results: A Partial Order over Algorithms
+As an overall measure of the performance of an algorithm instance, we take its learning curve over 50 runs, as in Figure 4, and then average it across the 20,000 steps. In this way, we reduce all the data for an algorithm instance to a single number that summarizes its performance. These numbers appear as points in our main results figure, Figure 5. Each panel of the figure is devoted to a single algorithm.
+For example, performance numbers for instances of Off-policy TD() are shown as points in the left panel of the second row of Figure 5. This algorithm has two parameters, the step-size parameter, , and the bootstrapping parameter, . The points are plotted as a function of , and points with the same  value are connected by lines. The blue line shows the performances of the instances of Off-policy TD() with  = 1, the red line shows the performances with  = 0, and the gray lines show the performances with intermediate s. Note that all the lines are U-shaped functions of , as is to be expected; at small  learning is too slow to make much progress, and at large  there is overshoot and divergence, as in the blue line in Figure 4. For each point, the standard error over the 50 runs is also given as an error bar, though these are too small to be seen in all except the rightmost points of each line where the step size was highest and divergence was common. Except for these rightmost points, almost all visible differences are statistically significant.
+First focus on the blue line (of the left panel on the second row of Figure 5), representing the performances of Off-policy TD() with  = 1. There is a wide sweet spot, that is, there are many intermediate values of  at which good performance (low average error) is achieved. Note that the step-size parameter  is varied over a wide range, with logarithmic steps. The minimal error level of about 0.1 was achieved over four or five powers of two for . This is the primary measure of good performance that we look for in these data: low error over a wide range of parameter values.
+Now contrast the blue line with the red and gray lines (for Off-policy TD() in the left panel of the second row of Figure 5). Recall that the blue line is for  = 1, the red line is for  = 0, and the gray lines are for intermediate values of . First note that the red line shows generally worse performance; the error level at  = 0 was higher, and its range of good  values was slightly smaller (on a logarithmic scale). The intermediate values of  all had performances that were between the two extremes. Second, the sweet spot (the best  value) consistently shifted right, toward higher , as  was decreased from 1 toward 0.
+Now, armed with a thorough understanding of the Off-policy TD() panel, consider the other panels of Figure 5. Overall, there are a lot of similarities between the algorithms and how their performances varied with  and . For all algorithms, error was lower for  = 1 (the blue line) than for  = 0 (the red line). Bootstrapping apparently confers no advantage in the Collision task for any algorithm.
+The most obvious difference between algorithms is that the performance of the two Emphatic-TD algorithms varied relatively little as a function of ; their blue and red lines are almost on top of one another, whereas those of all the other algorithms are qualitatively different. Moreover, the emphatic algorithms generally performed as well as or better than the other algorithms. At  = 1, the emphatic algorithms reached the minimal error level of all algorithms (0.1), and their ranges of good  values
+
+6
+
+0.7 0.5 0.3 0.1
+
+0.7
+
+0.5
+
+VE 0.3
+
+(averaged 0.1 over
+
+time steps 0.7
+
+and 50 runs)
+
+0.5
+
+0.3
+
+0.1
+
+0.7 0.5 0.3 0.1
+2-18
+
+Emphatic TD
+Off-policy TD 0
+
+1 HTD
+
+Emphatic TD(, )
+GTD
+Proximal GTD2
+
+Tree Backup
+
+Vtrace
+
+2-10
+
+2-2 2-18
+
+2-10
+
+2-2 2-18
+
+Step-size parameter, (log scale)
+
+GTD2
+0.32 0.1 TDRC
+
+ABTD
+
+2-10
+
+2-2
+
+Figure 5: Main results: Performance of all algorithms on the Collision task as a function of their parameters  and . The top tier algorithms (top row) attained a low error (0.1) at all  values. The middle tier of six algorithms attained a low error for  = 1, but not for  = 0. And the bottom-tier of three algorithms were unable to reach an error of 0.1 at any  value.
+
+was just as wide as that of the other algorithms. While at  = 0, the best errors of the emphatic algorithms were qualitatively better than those of the other algorithms. The minimal  = 0 error level of the emphatic algorithms was about 0.15, as compared to approximately 0.32 (shown as a second thin gray line) for all the other algorithms (except Proximal GTD2, a special case that we consider later). Moreover, for the emphatic algorithms the sweet spot for  shifted little as  varied. The shift was markedly less than for the six algorithms in the middle two rows of Figure 5. The lack of an interaction between the two parameter values is another potential advantage of the emphatic algorithms.
+The lowest error level for eight of the algorithms was 0.1 (shown as a thin gray line), and for the other three algorithms the best error was higher, 0.16. The differences between the eight and the three were highly statistically significant, whereas the differences within the two groups were negligible. The three algorithms that performed worse than the others were Tree Backup(), Vtrace(), and ABTD()--shown in the bottom row of Figure 5. The difference was only for large s; at  = 0 these three algorithms reached the same error level (0.32) as the other non-emphatic algorithms. The three worse algorithms' range of good  values was also slightly smaller than for the other algorithms (with the partial exception, again, of Proximal GTD2()). A mild strength of the three is that the best  value shifted less as a function of  than for the other six non-emphatic algorithms. Generally, the performances of these three algorithms in Figure 5 look very similar as a function of parameters. An interesting difference is that for ABTD(), we only see three gray curves, whereas for the other two algorithms we see seven. For ABTD() there is no  parameter, but the parameter  plays the same role. In our experiment, ABTD() performed identically for all  values greater than 0.5; four gray lines with different  values are hidden behind ABTD's blue curve.
+In summary, our main result is that on the Collision task the performances of the eleven algorithms fell into three groups, or tiers. In the top tier are the two Emphatic-TD algorithms, which performed well and almost identically at all values of  and significantly better than the other algorithms at low . Although this difference did not affect best performance here (where  = 1 is best), the ability to perform well with bootstrapping is expected to be important on other tasks. In the middle tier are Off-policy TD() and all the Gradient-TD algorithms including HTD(), all of which performed well at  = 1 but less well at  = 0. Finally, in the bottom tier are Tree Backup(), Vtrace(), and ABTD(), which performed very similarly and not as well as the other algorithms at their best parameter values. All of these differences are statistically significant, albeit specific to this one task. In Figure 5 the three tiers are the top row, the two middle rows, and the bottom row.
+7
+
+In the next two sections we take a closer look at two of the tiers to find differences within them.
+
+7 Emphatic TD() vs. Emphatic TD(, )
+
+In this section, the effect of the  parameter of Emphatic TD(, ) on the algorithm's performance in the full bootstrapping case is analyzed. We focus on the full bootstrapping case ( = 0) because this
+is where the largest differences were observed in the previous section. The results in Figure 5 for Emphatic TD(, ) are with its best values of . The curves shown in Figure 5, are for the best values of ; meaning that, for each , we found the combination of  and  that resulted in the minimum average error, fixed , and plotted the sensitivity for that fixed  over the step-size parameter. Here, we show how varying  affects performance.
+
+The error of Emphatic TD(0), and Emphatic
+
+TD(0,) for various values of  and  are shown
+
+in Figure 6. We see that both algorithms per-
+formed similarly well on the Collision task,
+meaning that they both had a wide sensitivity curve and reached the same (0.1) error level. Notice that, as  increased, the sensitivity curve for Emphatic TD(0,) shifted to left and the bot-
+tom of the sensitivity curve shifted down. With  = 0, Emphatic TD(, ), reduces to TD(). With  = 0.8, and  = 1, Emphatic TD(, )
+
+0.7 Emphatic TD(0, )
+
+VE 0.5
+(averaged
+over
+time steps 0.3
+and
+50 runs) 0.1
+
+=0
+.2 .4 1 .8 .6 Emphatic TD(0)
+
+0  1
+
+2-18
+
+2-10
+
+2-2
+
+Step-size parameter,(log scale)
+
+reached the same error level as Emphatic TD(). With  = , Emphatic TD(, ) reduces to Emphatic TD(). This explains why the red curve is between the  = 0.8 and  = 1 curves.
+
+Figure 6: Detail on the performance of Emphatic TD(, ) at  = 0. Note that Emphatic TD() is equivalent to Emphatic TD(, ), and here  = 0.9. The flexibility provided by  does not help on the
+
+The results make it clear that the superior perfor- Collision task.
+
+mance of emphatic methods are almost entirely
+
+due to the basic idea of emphasis; the additional
+
+flexibility provided by  of the Emphatic TD(, ) was not important on the Collision problem.
+
+8 Assessment of Gradient-TD Algorithms
+We study how the  parameter of Gradient-TD algorithms affects performance in the case of full bootstrapping (the second step size, v, is equal to  × ). Previously, in Figure 5 we looked at the results with the best values of  for each ; meaning that for each , first the combination of  and  that resulted in the lowest average VE was found and then sensitivity to step size was plotted for that specific value of  that minimized average VE. Sensitivity to step size for various values of  for  = 0 are shown in Figure 7. First focus on the upper left panel. Each panel shows the result of two Gradient-TD algorithms for various . One main algorithm, shown with solid lines, and another additional algorithm shown with dashed lines for comparison. The upper left panel shows the parameter sensitivity for GTD2(0), for four values of , and additionally it shows GTD(0) results as dashed lines for comparison (for results with more values of  see Appendix F). The color for each value of  is consistent within and across the four panels, meaning that for example,  = 256 is shown in green in all panels, either as dashed or solid lines. For all parameter combinations, GTD errors were lower than (or similar to) GTD2 errors. With two smaller values of  (1 and 0.0625) GTD had a wider and lower sensitivity curve than GTD2, which means GTD was easier to use than GTD2.
+Let us now move on to the upper right panel of Figure 7. Proximal GTD2 had the most distinctive behavior among Gradient-TD algorithms. As we previously observed in Figure 4, it is the only algorithm that in some cases had a "bounce"; its error dipped down at first and then moved back up. With  = 0, it sometimes converged to an error that was lower than all other Gradient-TD algorithms. Proximal GTD2 was more sensitive to the choice of step size than all Gradient-TD algorithms except GTD2. Proximal GTD2 had a lower error and a wider sensitivity curve than GTD2. To see this, compare the dotted and solid lines in the upper right panel of Figure 7.
+8
+
+0.7  = 256
+
+0.5
+
+VE
+
+0.3
+GTD2
+
+GTD
+
+(averaged 0.1
+
+over time steps
+
+0.7
+
+ = 256
+
+and 50 runs)
+
+0.5
+
+0.3
+
+0.1 GTD HTD
+
+2-18
+
+2-10
+
+16 1
+
+ = 256
+
+16
+
+0.0625 16 1
+
+Proximal
+GTD2 GTD2
+ = 256
+16 0.0625
+
+0.0625
+
+HTD
+
+2-2 2-18
+
+2-10
+
+Step-size parameter,  (log scale)
+
+1
+0.0625 1
+TDRC 2-2
+
+Figure 7: Detail on the performance of Gradient-TD algorithms at  = 0. Each algorithm has a second step-size parameter, scaled by . A second algorithm's performance is also shown in each
+panel, with dashed lines, for comparison.
+
+Moving on to the lower left panel, we see that GTD and HTD performed similarly. Their sensitivity curves were similarly wide but HTD reached a lower error in some cases. We see this by comparing the dotted pink curve with the solid pink curve in the lower left panel.
+The fourth panel shows sensitivity to the step-size parameter for HTD and TDRC. Notice that compared to other Gradient-TD algorithms, TDRC has one sensitivity curve, shown in dashed blue. This is because  is set to one (also its regularization parameter was set to one) as proposed in the original paper. HTD's widest curve was with  = 0.0625 which was as wide as TDRC's curve. For a more in-depth study of TDRC's extra parameters see Appendix F.1.
+Among the Gradient-TD algorithms, TDRC was the easiest to use. On the other hand, in the case of full bootstrapping, Proximal GTD2 reached the lowest error level among all Gradient-TD algorithms. The fact that proximal GTD2 converged to a lower error level might be due to a few different reasons. One possible reason is that it did not converge to the minimum of the mean squared projected Bellman error like other Gradient-TD methods. Another reason might be that it converged to a minimum of the projected Bellman error that was different from the minimum the other algorithms converged to. Further analyses is required to investigate this. Overall, TDRC seems to be the easiest to use, but Proximal GTD2 achieves the lowest error on the Collision task. It remains to be seen how these algorithms compare on future problems.
+9 Limitations and Future Work
+The present study is based on a single task, and this limits the conclusions that can be fairly drawn from it. For example, we have found that Emphatic-TD methods perform well over a wider range of parameters than Gradient-TD methods on the collision task, but it is entirely possible that the reverse would be true on a different task. Many more tasks must be explored before it is even possible for a consistent pattern to emerge that favors one class of algorithm over another.
+On the other hand, a pattern over empirical results must begin somewhere. We would stress the need for extensive empirical results even for a single task. Ours is the first systematic study of off-policy learning to describe the effects of all algorithm parameters (rather than, for example, simply taking the best performing parameters). Such a thorough examination is necessary to obtain the understanding that is critical to using off-policy algorithms successfully and with confidence. There is a need for thorough empirical studies, but they take time, and a proper presentation of them takes space. While our study is not the last word, it does contribute to the growing database of reliable results comparing modern off-policy learning algorithms.
+Conducting additional experiments with other off-policy learning problems is a valuable direction for future work. In looking for the next problem, one might seek a task with greater challenges due to variance of the importance sampling ratios. In the Collision task, the product of ratios can grow nearly as large as 24 = 16. This could be made more extreme simply by increasing the number of states, or by changing the behavior policy. Also valuable would be exploring unrelated tasks with a different rationale for relevance to the real world. One possibility is to use a task related to parallel learning about multiple alternative ways of behaving, such as learning how to exit each room in a four-rooms gridworld (Sutton, Precup & Singh, 1999).
+9
+
+Acknowledgments and Disclosure of Funding
+This work was funded by DeepMind, the Alberta Machine Intelligence Institute, NSERC, and CIFAR. We would like to thank Ali Khlili Yegane for help in preparing the source code. We thank Martha White, Adam White and Banafsheh Rafiee for useful feedback throughout the course of this project. The computational resources of Compute Canada were essential to conducting this research.
+References
+Baird, L. C. (1995). Residual algorithms: Reinforcement learning with function approximation. In Proceedings of the 12th International Conference on Machine Learning, pp. 30­37.
+Baird, L. C. (1999). Reinforcement Learning through Gradient Descent. PhD thesis, Carnegie Mellon University.
+Boyan, J. A. (1999). Least-squares temporal difference learning. In Proceedings of the 16th International Conference on Machine Learning, pp. 49­56.
+Bradtke, S. J., Barto, A. G. (1996). Linear least-squares algorithms for temporal difference learning. Machine Learning, 22 pp. 33­57.
+Dann, C., Neumann, G., Peters, J. (2014). Policy evaluation with temporal-differences: A survey and comparison. Journal of Machine Learning Research, 15 pp. 809­883.
+Espeholt, L., Soyer, H., Munos, R., Simonyan, K., Mnih, V., Ward, T., Doron, Y., Firoiu, V., Harley, T., Dunning, I. and Legg, S. (2018) IMPALA: Scalable distributed Deep-RL with importance weighted actor-learner architectures. In Proceedings of the 35th International Conference on Machine Learning. pp. 1407­1416.
+Geist, M., Scherrer, B. (2014). Off-policy learning with eligibility traces: A survey. Journal of Machine Learning Research 15 pp, 289­333.
+Ghiassian, S., Rafiee, B., Sutton, R. S. (2016). A first empirical study of emphatic temporal difference learning. In Workshop on Continual Learning and Deep Learning at the Conference on Neural Information Processing Systems. ArXiv: 1705.04185.
+Ghiassian, S., Patterson, A., Garg, S., Gupta, D., White, A., White, M. (2020). Gradient temporal-difference learning with regularized corrections. In Proceedings of the 37th International Conference on Machine Learning, pp. 3524­3534.
+Hackman, L. (2012). Faster Gradient-TD Algorithms. MSc thesis, University of Alberta.
+Hallak, A., Tamar, A., Munos, R., Mannor, S. (2016). Generalized emphatic temporal-difference learning: Biasvariance analysis. In Proceedings of the Thirtieth AAAI Conference on Artificial Intelligence, pp. 1631­1637.
+Jaderberg, M., Mnih, V., Czarnecki, W. M., Schaul, T., Leibo, J. Z., Silver, D., Kavukcuoglu, K. (2016). Reinforcement learning with unsupervised auxiliary tasks. ArXiv: 1611.05397.
+Juditsky, A., Nemirovski, A., Tauvel, C. (2011). Solving variational inequalities with stochastic mirror-prox algorithm. Stochastic Systems 1, pp. 17­58.
+Liu B, Liu J, Ghavamzadeh M, Mahadevan S, Petrik M (2015). Finite-Sample Analysis of Proximal Gradient TD Algorithms. In Proceedings of the 31st International Conference on Uncertainty in Artificial Intelligence, pp. 504­513.
+Liu B, Liu J, Ghavamzadeh M, Mahadevan S, Petrik M (2016). Proximal Gradient TemporalDifference Learning Algorithms. In Proceedings of the 25th International Conference on Artificial Intelligence (IJCAI-16), pp. 4195­4199.
+Littman, M. L., Sutton, R. S., Singh, S. (2002). Predictive representations of state. In Advances in Neural Information Processing Systems 14, pp. 1555­1561.
+Mahadevan, S., Liu, B., Thomas, P., Dabney, W., Giguere, S., Jacek, N., Gemp, I., Liu, J. (2014). Proximal reinforcement learning: A new theory of sequential decision making in primal­dual spaces. ArXiv: 1405.6757.
+Mahmood, A. R., Yu, H., Sutton, R. S. (2017). Multi-step off-policy learning without importance sampling ratios. ArXiv: 1702.03006.
+10
+
+Maei, H. R. (2011). Gradient temporal-difference learning algorithms. PhD thesis, University of Alberta.
+Modayil, J., Sutton, R. S. (2014). Prediction driven behavior: Learning predictions that drive fixed responses. In AAAI-14 Workshop on Artificial Intelligence and Robotics.
+Munos, R., Stepleton, T., Harutyunyan, A., Bellemare, M. (2016). Safe and efficient off-policy reinforcement learning. In Advances in Neural Information Processing Systems 29, pp. 1046­ 1054.
+Precup, D., Sutton, R. S., Dasgupta, S. (2001). Off-policy temporal-difference learning with function approximation. In Proceedings of the 18th International Conference on Machine Learning, pp. 417­424.
+Precup, D., Sutton, R. S., Singh, S. (2000). Eligibility traces for off-policy policy evaluation. In Proceedings of the 17th International Conference on Machine Learning, pp. 759­766.
+Rafiee, B., Ghiassian, S., White, A., Sutton, R. S. (2019). Prediction in Intelligence: An Empirical Comparison of Off-policy Algorithms on Robots. In Proceedings of the 18th International Conference on Autonomous Agents and MultiAgent Systems, pp. 332­340.
+Ring, M. B. (in preparation). Representing knowledge as forecasts (and state as knowledge).
+Sutton, R. S. (1988). Learning to predict by the algorithms of temporal-differences. Machine Learning, 3 pp. 9­44.
+Sutton, R. S., Barto, A. G. (2018). Reinforcement Learning: An Introduction, second edition. MIT press.
+Sutton, R. S., Maei, H. R., Precup, D., Bhatnagar, S., Silver, D., Szepesvári, Cs., Wiewiora, E. (2009). Fast gradient-descent algorithms for temporal-difference learning with linear function approximation. In Proceedings of the 26th International Conference on Machine Learning, pp. 993­1000.
+Sutton, R. S., Maei, H. R., Szepesvári, C. (2008). A convergent O(n) algorithm for off-policy temporaldifference learning with linear function approximation. In Advances in neural information processing systems 21, pp. 1609­1616.
+Sutton, R. S., Mahmood, A. R., White, M. (2016). An emphatic approach to the problem of off-policy temporal- difference learning. Journal of Machine Learning Research, 17 pp. 1­29.
+Sutton, R. S., Modayil, J., Delp, M., Degris, T., Pilarski, P. M., White, A., Precup, D. (2011). Horde: A scalable real-time architecture for learning knowledge from unsupervised sensorimotor interaction. In Proceedings of the 10th International Conference on Autonomous Agents and Multiagent Systems, pp. 761­768.
+Sutton, R. S., Precup, D., Singh, S. (1999). Between MDPs and semi-MDPs: A framework for temporal abstraction in reinforcement learning. Artificial Intelligence, 112 pp. 181­211.
+Tanner, B., Sutton, R. S., (2005). TD() networks: temporal-difference networks with eligibility traces. In Proceedings of the 22nd international conference on Machine learning, pp. 888­895.
+Thomas, P. S. (2015). Safe reinforcement learning. PhD thesis, University of Massachusetts Amherst.
+Touati, A., Bacon, P. L., Precup, D., Vincent, P. (2017). Convergent tree-backup and retrace with function approximation. ArXiv: 1705.09322.
+Watkins, C. J. C. H. (1989). Learning from delayed rewards. PhD thesis, University of Cambridge.
+Watkins, C. J. C. H., Dayan, P. (1992). Q-learning. Machine Learning, 8 pp. 279­292.
+White, A. (2015). Developing a predictive approach to knowledge. PhD thesis, University of Alberta.
+White, M. (2017). Unifying Task Specification in Reinforcement Learning. In Proceedings of the 34th International Conference on Machine Learning, pp. 3742­3750.
+11
+
+White, A., White, M. (2016). Investigating practical linear temporal difference learning. In Proceedings of the 2016 International Conference on Autonomous Agents and Multiagent Systems, pp. 494­502.
+12
+
+A Update Rules
+
+In this section we list the update rules for all algorithms empirically studied in the text. This list provides a concise reference for the update rules for each algorithm. We include this list as a single point of reference for each algorithm.
+TD():
+t =def Rt+1 + t+1wt xt+1 - wt xt zt  t(ttzt-1 + xt) with z-1 = 0 wt+1  wt + tzt
+
+GTD():
+t =def Rt+1 + t+1wt xt+1 - wt xt zt  t(ttzt-1 + xt) with z-1 = 0 vt+1  vt + v tzt - (vt xt)xt wt+1  wt + tzt - t+1(1 - t+1)(vt zt)xt+1
+
+TDRC():
+t =def Rt+1 + t+1wt xt+1 - wt xt zt  t(ttzt-1 + xt) with z-1 = 0 vt+1  vt +  tzt - (vt xt)xt - vt wt+1  wt + tzt - t+1(1 - t+1)(vt zt)xt+1
+
+GTD2():
+t =def Rt+1 + t+1wt xt+1 - wt xt zt  t(ttzt-1 + xt) with z-1 = 0 vt+1  vt + v tzt - (vt xt)xt wt+1  wt + (vt xt)xt - t+1(1 - t+1)(vt zt)xt+1
+
+HTD():
+
+t =def Rt+1 + t+1wt xt+1 - wt xt
+
+zt  t(zt-1 + xt)
+
+with z-1 = 0
+
+zt  zt-1 + xt
+
+vt+1  vt + v tzt - (xt - t+1xt+1)(vt zt)
+
+wt+1  wt +  tzt + (xt - t+1xt+1)(zt - zt) vt
+
+13
+
+Proximal GTD2():
+t =def Rt+1 + t+1wt xt+1 - wt xt zt  t(ttzt-1 + xt) with z-1 = 0
+
+vt+
+
+1 2
+
+ vt + v
+
+tzt - (vt xt)xt
+
+wt+
+
+1 2
+
+ wt + (vt xt)xt - t+1(1 - t+1)(vt zt )xt+1
+
+t+
+
+1 2
+
+=def
+
+Rt+1
+
++
+
+t+1wt+
+
+1 2
+
+xt+1
+
+-
+
+wt+
+
+1 2
+
+xt
+
+vt+1  vt + v
+
+t+
+
+1 2
+
+zt
+
+-
+
+(vt+
+
+1 2
+
+xt)xt
+
+wt+1
+
+
+
+wt
+
++
+
+(vt+
+
+1 2
+
+xt)xt
+
+-
+
+t+1(1
+
+-
+
+t+1
+
+)(vt+
+
+1 2
+
+zt )xt+1
+
+Emphatic TD():
+
+t =def Rt+1 + t+1wt xt+1 - wt xt Ft  t-1tFt-1 + It with F0 = I0
+
+Mt =def tIt + (1 - t)Ft zt  t (tzt-1 + Mtxt) wt+1  wt + tzt
+
+with z-1 = 0
+
+Emphatic TD( , ):
+
+t =def Rt+1 + t+1wt xt+1 - wt xt Ft  t-1Ft-1 + It with F0 = I0
+
+Mt =def tIt + (1 - t)Ft zt  t tzt-1 + Mtxt wt+1  wt + tzt
+
+with z-1 = 0
+
+Tree Backup() for prediction:
+
+t =def t Rt+1 + t+1wt xt+1 - wt xt
+zt  ttt-1zt-1 + xt with z-1 = 0 wt+1  wt + tzt
+
+Vtrace():
+t =def Rt+1 + t+1wt xt+1 - wt xt zt  max(t, 1) (tzt-1 + xt) with z-1 = 0 wt+1  wt + tzt
+
+ABTD( ):
+
+t =def t Rt+1 + t+1wt xt+1 - wt xt
+zt  tt-1t-1zt-1 + xt with z-1 = 0 wt+1  wt + tzt
+
+14
+
+B Parameter Settings
+Parameter settings for all algorithms are listed in Table 1. All algorithms used the same set of primary step sizes and the same set of bootstrapping parameters. For algorithms that had an extra parameter, such as GTD(), we tried all combinations of the first step size, bootstrapping parameter, and the extra parameter as listed in the table.
+
+Table 1: List of all parameters used in the experiment.
+
+Algorithms
+
+ or 
+
+ or 
+
+
+
+Off-policy TD()
+
+Gradient-TD Algorithms
+
+GTD() GTD2()
+
+HTD()
+
+--
+2x where x  {-6, -5, · · · , 7, 8}
+
+0, 0.1, 0.2,
+0.3, 0.5, 0.9, 1
+and 1 - 2-x where x{ 2, 3, 4, 5, 6}
+
+ = 2-x
+where x{ 0, 1, 2, · · · , 17, 18}
+
+Proximal GTD2()
+
+TDRC()
+
+--
+
+Emphatic-TD Algorithms
+
+Emphatic TD()
+Emphatic TD(, )
+
+--
+ {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}
+
+Variable- Algorithms
+
+Tree Backup()
+
+--
+
+Vtrace()
+
+ABTD( )
+
+15
+
+C Off-policy Temporal-Difference Algorithms for Prediction Learning
+
+In this section, we explain the algorithms we used in the experiments in more detail. We start with the Off-policy TD() algorithm. By showing how TD() (Sutton, 1988) diverges on a simple problem with two states, we motivate the rest of the algorithms that are guaranteed convergent under off-policy training, including gradient and emphatic families of algorithms.
+
+C.1 The Off-policy TD() Algorithm
+
+The value of a state St = s can be written recursively, using the value of the next state St+1. To show this, we use the following identity:
+
+E[X] = E[E[X | Y ]] ,
+
+(4)
+
+which in statistics, is known as the law of total expectation or the tower rule. We also know that:
+
+v(s) =def E[Gt | St = s] ,
+
+and we have the same definition for the next state, s :
+
+v(s ) =def E[Gt+1 | St+1 = s ] .
+
+(5)
+
+Using (4) and (5), the value of the next state St+1 can be written:
+
+E[v(St+1) | St = s] = E[E[Gt+1 | St+1 = s ] | St = s] ,
+
+= E[Gt+1 | St = s] ,
+
+(6)
+
+which is used below to show that the value of the current state St = s is equal to the expectation of the reward plus the discounted value of the next state:
+
+v(s) =def E[Gt | St = s] , = E[Rt+1 + Gt+1 | St = s] , = E[Rt+1 | St = s] + E[Gt+1 | St = s] , = E[Rt+1 + v(St+1) | St = s] .
+
+(by (6)) (7)
+
+Equation (7) is the Bellman equation for v. The Bellman equation says that the value of a state is equal to the expectation of the reward plus the value of the next state. If v(s) is moved to the right hand side and inside the expectation (it can be moved inside the expectation because it is a constant),
+we get:
+
+E[Rt+1 + v(St+1) - v(s) | St = s] = 0,
+
+(8)
+
+which is referred to as the Bellman error. The error is equal to 0 for the true value function, v.
+Temporal-difference learning updates the weight vector, w, in the direction that minimizes the Bellman error. Note that (8) holds only approximately when using function approximation:
+
+E[Rt+1 + v^w(St+1) - v^w(s) | St = s]  0.
+
+(9)
+
+The simplest form of temporal-difference learning, the TD(0) algorithm, uses a sample of the left hand side of (9) to update w. This sample is called the TD error and is defined as:
+
+t =def Rt+1 + wt xt+1 - wt xt.
+
+(10)
+
+Finally, TD(0) uses (10) to update the weight vector as follows:
+
+wt+1  txt,
+
+(11)
+
+where  is a scalar constant step-size parameter at time-step. If  is adaptive and changes at each time step, it is denoted by t.
+In off-policy learning, the agent follows a behaviour policy b, but learns the value function for a different target policy . To account for the difference between the target and behaviour policies, importance sampling ratios are typically used. The importance sampling ratio is the probability of
+
+16
+
+taking an action in a state under the target policy divided by the same probability under the behaviour policy. Formally:
+
+t
+
+=def
+
+(At|St) b(At|St)
+
+.
+
+(12)
+
+Off-policy TD(0) augments the TD(0) update, (11), with an importance sampling ratio:
+
+wt+1  wt + ttxt.
+
+(13)
+
+One of the widely known ideas to make TD-style algorithms more efficient, are eligibility traces. Eligibility traces help assign credit to features that were activated in the past based on how far in the past they were activated. They assign credit by storing a fading trace of the features that were activated. We focus on one form of eligibility trace called the accumulating trace. The Off-policy TD() algorithm with eligibility traces is thoroughly explained by the following update rules:
+
+zt  zt-1 + t(zt-1 + xt), wt+1  wt + tzt.
+
+with z-1 = 0,
+
+Off-policy TD() might diverge when combined with linear function approximation. A simple example can help see this intuitively (Sutton & Barto, 2018). Suppose, two states in an MDP, whose values are approximated using the same weight w, except that the second state has a value twice as big as the first state as shown below1. Suppose, for this MDP that  = 1 and the rewards are 0 on all transitions.
+If the transition from w to 2w is experienced repeatedly, the weight will diverge to infinity. Suppose, the first time the transition is experienced, w = 10. This means 2w is 20 and the TD error will be 10. If, for example,  = 0.5, the value of w will be increased by 5 and will change to 15. If this transition is experienced repeatedly, it is clear that the weights will diverge to infinity.
+
+w
+
+2w
+
+There is no way on-policy TD(0) may diverge in the example above. In on-policy learning, when the agent moves from 2w to w, through some path (not shown in the figure above), the weights will eventually decrease and convergence will be guaranteed. In off-policy learning, however, there can be situations where the weights do not decrease when taking the path from 2w to w and divergence will occur.
+
+C.2 Gradient-TD Algorithms
+One way to assure convergence is to use stochastic gradient descent to minimize an objective. By using stochastic gradient descent, desirable theoretical guarantees including convergence will follow, even in the off-policy learning case. One important question is: What objective function should be minimized?
+One option is to minimize a the mean squared projected Bellman error, which we denote by PBE. To define PBE, we first need to define the Bellman operator. The Bellman error, in state s, can be written:
+E[Rt+1 + v^w(St+1) - v^w(St) | St = s] ,
+or in explicit form:
+
+(a|s) p(s , r|s, a)[r + v^w(s )] - v^w(s),
+
+(14)
+
+a
+
+s ,r
+
+1The weight vector in this example is a single number represented by w, and the feature vectors are 1 for the left state and 2 for the right state.
+
+17
+
+B v^w
+
+X
+
+PBE
+v^w
+
+B v^w
+
+Figure 8: Geometry of linear function approximation shown in three dimensional space.
+
+where p is the underlying transition probability distribution of the MDP. The Bellman operator B : R|S|  R|S|, at state s, is defined as:
+
+(Bv^w)(s) =def (a|s) p(s , r|s, a)[r + v^w(s )].
+
+(15)
+
+a
+
+s ,r
+
+As seen in (15), the Bellman operator works irrespective of the parameters of the value function. This means after applying the Bellman operator to a value function, the new value function might not be representable by in the feature space. It can, however, be projected back into the space of the representable functions, using a projection matrix. In the linear function approximation case, the projection operator is linear, meaning that it can be represented as an |S| × |S| matrix:
+
+ =def X(X DX)-1X D,
+
+where X is a matrix of size |S| × d with feature vectors of all states as its rows and D is a diagonal matrix with the state visitation norm on its diagonal. To minimize the distance between the value
+function and the projection of the value function after applying the Bellman operator, we first need to
+apply the Bellman operator to the current value function as in (15). The Bellman error for all states, put together in a vector is called the Bellman error vector. We denote the Bellman error vector by ¯w ((14) for all s). This vector can be projected to the space of representable value function. We denote the projected vector by ¯w. The distance between the value function before applying the Bellman operator and the projection of the function after applying the Bellman operator is known as the Mean Squared Projected Bellman Error or the PBE and can be minimized directly using stochastic gradient
+descent. See Figure 8. The PBE is defined as:
+
+PBE(w) = ||¯w||2µb ,
+
+(16)
+
+where µb is the state visitation distribution induced by policy b.
+All members of the Gradient-TD family minimize some form of the mean squared projected Bellman error. GTD() and GTD2() both minimize the PBE objective (Sutton et al. 2009). An earlier version of the Gradient-TD family minimizes the Norm of the Expected TD Update, or the NEU (Sutton, Maei, & Szepesvari, 2008). The NEU does not have a readily available geometric interpretation, but it is only different from the PBE in how the objective function (16) is weighted.2 The algorithm that minimizes the NEU was later found to be inferior to GTD and GTD2 algorithms and was abandoned (Sutton et al., 2009; Dann, Neumann, & Peters, 2014).
+Update rules for GTD() and GTD2() are similar to TD(). The only difference is that the GradientTD algorithms have a correction term that changes the original TD update to make sure it follows the direction of the gradient of PBE at each time step. To estimate the correction term, both algorithms use an additional learned weight vector, denote by v, that can be learned at a different rate than the
+
+2The algorithm proposed by Sutton, Maei, & Szepesvari (2008) was called GTD. The algorithms proposed by Sutton et al. (2009) were called TDC and GTD2. Later on, in Maei (2011), the TDC and GTD2 algorithms were combined with eligibility traces and were called GTD() and GTD2(), respectively; meaning that GTD(0) is the same as TDC and GTD2(0) is the same as GTD2.
+
+18
+
+primary weight vector. The update rules for GTD() are: zt  t(ttzt-1 + xt), with z-1 = 0,
+vt+1  vt + v tzt - (vt xt)xt , wt+1  wt + tzt - t+1(1 - t+1)(vt zt)xt+1,
+correction term
+and the update rules for GTD2() are: zt  t(ttzt-1 + xt), with z-1 = 0,
+vt+1  vt + v tzt - (vt xt)xt , wt+1  wt + (vt xt)xt - t+1(1 - t+1)(vt zt)xt+1.
+
+There were a few attempts at making GTD() and GTD2() faster. HTD(), was the first such algorithm. Hybrid TD was first proposed by Maei (2011). It was later developed more by Hackman (2012). It was finally extended to the eligibility trace case by White & White (2016). Sutton et al. (2009) showed that although Gradient-TD algorithms provide better convergence guarantees than off-policy TD, they learn slower. HTD() was an attempt at combining the fast learning of Off-policy TD() and the convergence guarantees of the Gradient-TD family. HTD() is a generalization of TD() in the sense that in the on-policy case, HTD() reduces to TD(). To better understand HTD(), we first write the PBE in an alternative form:
+PBE(w) = Eb[tzt] Eb x(St)x(St) -1 Eb[tzt] ,
+
+We then use the following definitions:
+
+C =def Eb x(St)x(St) , A =def -Eb (x(St+1) - x(St))x(St) , b =def Eb R(St, At)x(St) ,
+
+where R is the reward function and x is a function that takes in as input the state and returns the feature representation vector. Using the above identities, we write the PBE in the following form (Hackman, 2012):
+
+PBE = (-Aw + b) C-1(-Aw + b),
+
+(17)
+
+where
+
+-Aw + b = Eb[tzt] ,
+C = Eb x(St)x(St) .
+In (17), the C matrix is weighting -Aw + b. As long as -Aw + b becomes 0 asymptotically, the algorithms find a solution to the PBE and the weighting, C is irrelevant in the quality of the solution. However, the rate of convergence might change with C. More specifically, the C matrix can be replaced by any positive definite matrix and the resulting algorithm is guaranteed to be stable and will converge to the minimum of the PBE. The HTD() algorithm replaces C-1 with X- , where:
+
+X- =def Eb x(St) - x(St+1) zbt ,
+
+where zbt is an eligibility trace vector that does not use importance sampling ratios, or simply the on-policy trace:
+
+zbt =def zbt-1 + xt.
+
+(18)
+
+19
+
+Using X- instead of C-1, and computing the derivative of the resulting PBE, we get the HTD() update rules (White & White, 2016):
+
+zt  t(zt-1 + xt), with z-1 = 0,
+
+zbt  zbt-1 + xt,
+
+with zb-1 = 0,
+
+vt+1  vt + v tzt - (xt - t+1xt+1)(vt zbt ) ,
+
+wt+1  wt +  tz + (xt - t+1xt+1)(zt - zbt ) vt ,
+
+where zt is the normal off-policy trace with the importance sampling ratio and zbt is the on-policy trace.
+
+Proximal Gradient-TD algorithms are another set of algorithms proposed to improve on the original
+
+Gradient-TD algorithms (Mahadevan et al., 2014; Liu et al., 2015; Liu et al., 2016). Proximal
+
+Gradient-TD algorithms improve on classic Gradient-TD algorithms in the sense that they use the
+
+true gradient of the PBE objective to update the weight vector. This is in contrast to Gradient-TD
+
+algorithms that are not true stochastic gradient algorithms with respect to the PBE objective. The
+
+reason why the classic Gradient-TD algorithms are not exactly stochastic gradient descent is that they
+
+include a product of expectations over the next feature vector in the gradient of the objective function:
+
+-
+
+1 2
+
+PBE(w)
+
+=
+
+E
+
+(xt - xt+1)x
+
+E xtxt -1 E[txt] ,
+
+(19)
+
+= A C-1 (-Aw + b) .
+
+(20)
+
+The next state's feature vector, xt+1, appears in A. The gradient of PBE in (20) multiplies A with itself and includes a product of expectations of the next state's feature vector. To get an unbiased
+sample of the product, two independent samples are required. However, during the normal interaction
+of the agent with the environment, it is only possible to get one sample. Gradient-TD algorithms get around this issue by learning a second weight vector, v, and forming a quasi-stationary estimate of the last two expectations in (19).
+
+Proximal Gradient-TD algorithms solve the double sampling problem by writing the objective function using a saddle-point formulation:
+
+PBE(w) = min max(b - Aw)
+wv
+
+v
+
+-
+
+1 2
+
+v
+
+2C,
+
+(21)
+
+where
+
+1 2
+
+v
+
+2 C
+
+is
+
+the
+
+norm
+
+of
+
+v
+
+weighted
+
+by
+
+C,
+
+or
+
+simply
+
+v
+
+Cv. Computing the derivative of the
+
+objective function (21), with respect to v, results in:
+
+vPBE = b - Aw - Cv, and the derivative with respect to w results in:
+
+wPBE = -A v.
+The gradient of the saddle-point formulated objective does not have the product of the A matrix with itself and avoids the double sampling issue. This means the algorithm that minimizes the saddlepoint objective is a true stochastic gradient descent algorithm and as a result, they can make use of algorithms developed for improving the convergence rate of stochastic gradient descent. Mahadevan et al. (2014) combined stochastic mirror-prox (Juditsky, Nemirovski, & Tauvel, 20011) to derive a new version of Gradient-TD family, called Proximal GTD2. Proximal GTD2() is described by the following equations:
+
+vt+
+
+1 2
+
+ vt + v
+
+tzt - (vt xt)xt
+
+,
+
+wt+
+
+1 2
+
+ wt + (vt xt)xt - t+1(1 - t+1)(vt zt)xt+1,
+
+t+
+
+1 2
+
+=def
+
+Rt+1
+
++
+
+t+1wt+
+
+1 2
+
+xt+1
+
+-
+
+wt+
+
+1 2
+
+xt,
+
+vt+1  vt + v
+
+t+
+
+1 2
+
+zt
+
+-
+
+(vt+
+
+1 2
+
+xt)xt
+
+,
+
+wt+1
+
+
+
+wt
+
++
+
+(vt+
+
+1 2
+
+xt)xt
+
+-
+
+t+1(1
+
+-
+
+t+1
+
+)(vt+
+
+1 2
+
+zt
+
+)xt+1
+
+.
+
+20
+
+One of the most recent algorithms proposed for off-policy prediction learning is gradient Temporal Difference learning with Regularized Corrections (TDRC) (Ghiassian et al. 2020). TDRC(0) differs from GTD(0) in its update of the secondary weight vector. GTD(0)'s second weight vector minimizes the following objective function:
+
+J (v) = v xt - t 2 ,
+
+(22)
+
+taking the derivative with respect to v:
+
+= 2(v xt - t)v(v xt - t), = 2(v xt - t)xt, which results in the following update for the secondary weight vector for GTD(0):
+
+vt+1  vt + v txt - (vt xt)xt .
+TDRC(0) uses the same rationale, with the difference that it uses L2 regularization in its objective: J (v) = v xt - t 2 + ||v||22,
+the derivative of which is: = 2(v xt - t)xt + ||v||.
+The original TDRC paper suggests setting setting  = 1, which results in the following update for TDRC's secondary weight vector:
+
+vt+1  vt + v txt - (vt xt)xt - vvt.
+
+(23)
+
+The intuition for this update is that we need the correction term in the TD update, but we would like the correction to be small, and we control its magnitude by making the secondary weight vector small. This is exactly what the regularization term in (23) does. For the case of full bootstrapping, the update for the secondary weight vector is:
+
+vt+1  vt + v tzt - (vt xt)xt - vvt,
+which similar to the full bootstrapping case, subtracts a multiple the secondary weight vector from the update to keep the magnitude of v small. The update rule for the primary weight vector is the same as GTD().
+We close this section by mentioning that there are other objective functions that can be minimized. One alternative objective function is the Mean Squared Bellman Error (BE). BE is similar to the PBE objective but does not have the projection operator. The so-called residual gradient algorithms minimize BE. There has been some recent work in minimizing the BE objective using stochastic gradient descent. These algorithms are true stochastic gradient descent algorithms and in turn provide strong convergence guarantees, however, we do not focus on this class of algorithms in this paper as the BE is not learnable. (See Sutton & Barto, 2018 for a thorough discussion of why minimizing BE might not be desirable compared to other alternatives).
+
+C.3 Emphatic-TD Algorithms
+Emphatic-TD algorithms (Sutton, Mahmood, & White, 2016) provide an alternative strategy for stable off-policy learning. The strategy that Emphatic-TD algorithms use is completely different from the one used by Gradient-TD algorithms. Gradient-TD algorithms correct the semi-gradient updates of TD() so that the updates are in the direction of the gradient and convergence guarantees follow. However, Emphatic-TD algorithms use semi-gradient updates.
+The main idea of Emphatic-TD algorithms is to emphasize and de-emphasize the update on different time-steps. By using emphasis, Emphatic-TD algorithms assure that selective updating in off-policy learning cannot cause divergence. This can be explained by going over the w - 2w example. The problem is that the parameter is updated when the agent moves from w to 2w but no updates happen
+
+21
+
+when the agent moves from 2w to w. If an algorithm assures updates in parameter happen when moving from 2w to w, the value of w will decrease and divergence can be prevented. This is exactly
+what Emphatic-TD algorithms do. Emphatic-TD algorithms assure that the value of a state (or
+parameter vector) will be updated if the state is reachable from another state for which we update the parameter vector. In the w - 2w example, with Emphatic-TD algorithms, if an update happens when the agent moves from w to 2w, an update is assured when the agent moves from 2w to w.
+
+The first Emphatic-TD algorithms was Emphatic TD(), which is sometimes referred to as ETD() (Sutton, Mahmood, and White (2016)). This algorithm has one set of learned weights and one step-size parameter. This algorithm minimizes the emphatic weighted PBE. The Emphatic TD() algorithm is described by the following equations:
+
+Ft  t-1tFt-1 + 1,
+
+(24)
+
+Mt  + (1 - )Ft,
+
+(25)
+
+zt  t (tzt-1 + Mtxt) ,
+
+(26)
+
+wt+1  wt + tzt,
+
+where Ft in (24) is the followon trace and Mt is called the emphasis. As  approaches 1, Mt approaches  = 1. At the extreme, when  = 1, we have Mt =  = 1 in (25), Mt disappears from (26), and Emphatic TD(1) will reduce to Off-policy TD(1). As   1, Emphatic TD() will probably
+have a behaviour more like TD(), which means the largest difference between TD() and Emphatic
+TD() should be expected at  = 0.
+
+Emphatic TD() is prone to high variance. In spite of correcting for the difference between the target and behavior policies at each time-step, Emphatic TD() also corrects for the differences between the policies in the past. To do this, it uses a product of importance sampling ratios, as shown in (24). The followon trace can become large over time (even unbounded) and the step-size parameter should be reduced further down to avoid divergence.
+
+Emphatic TD(, ) was proposed to reduce the variance of Emphatic TD(). As the name suggests,
+the algorithm has an extra parameter  that provides some control over how quickly the magnitude
+of Ft grows over time. All the update rules for Emphatic TD(, ) are the same as the ones for Emphatic TD(), except for the update to the followon trace:
+
+Ft  t-1Ft-1 + 1,
+
+(27)
+
+By comparing (24) and (27) we see that if  is set to a value smaller than , Ft will grow at a slower rate than when  = . If  = 0 in (27), Emphatic TD(, ) reduces to Off-policy TD(), and if  is
+set to , the algorithm reduces to Emphatic TD().
+
+The emphasis idea has use-cases other than assuring convergence under off-policy training. Although originally proposed for off-policy learning, Emphatic TD() does not reduce to TD() even if the target and behavior policies are the same. In fact, Emphatic TD() is shown to empirically outperform TD() in some on-policy experiments (Ghiassian, Rafiee, & Sutton, 2016). Another possible use-case of the emphasis idea could be in combination with algorithms such as GTD().
+
+C.4 Algorithms for Fast Off-policy Prediction Learning
+A common concern with off-policy learning is that large importance sampling ratios might cause high variance.3 Several methods have been proposed that avoid large importance sampling ratios. Tree Backup() (Precup, Sutton, & Singh, 2000), Retrace() (Munos et al., 2016), and ABQ() (Mahmood, Yu, & Sutton, 2017) all avoid large importance sampling ratios. Tree Backup(), and ABQ() avoid explicit use of importance sampling ratios in their update rules. Retrace(), simply truncates any importance sampling ratio that happens to be larger than one.
+Tree Backup, Retrace, and ABQ can all be seen as Off-policy TD() with  generalized from a constant to a function of state and action. This unification was highlighted by Mahmood, Yu, and Sutton, (2017). The unification makes it simple to explain all three algorithms: all methods are exactly the same as Off-policy TD() but each method simply uses a different action-dependent trace
+3We would like to note that, to the best of our knowledge, variance issues due to importance sampling ratios have not been concretely demonstrated in the literature. This concern, therefore, is based on intuition and should be considered a hypothesis rather than a known phenomenon.
+
+22
+
+function  : S × A  [0, 1]. Simply put, each method sets  differently at each time step. All three methods mentioned above were originally proposed for control. Retrace() was later extended to prediction setting by Espeholt et al. (2018). Here we provide an easy way to understand all three algorithms and also present the natural state-value variants of all these algorithms.
+We begin by providing the generic Off-policy TD algorithm with action-dependent traces. The key idea is to set t =def (St-1, At-1) such that t-1t is well-behaved. The Off-policy TD() algorithm for this generalized trace function can be written:
+
+zt  tt-1tzt-1 + xt,
+
+(28)
+
+wt+1  wt + ttzt.
+
+Note that the update rules for Off-policy TD() are different from the ones provided in Sections A and C.1. These new updates explicitly uses t in the update to wt+1 which contrast the earlier Off-policy TD updates which have t in the trace. These two forms are actually equivalent, in that the update to w is exactly the same. We show this equivalence in Appendix E. We use this other form here, to more clearly highlight the relationship between t-1 and t. Using the generic update rule of Off-policy TD() with variable , we can now specify different algorithms, by specifying different implementations of the  function.
+Prediction variant of Tree Backup() is Off-policy TD() with t = bt-1, for some tuneable constant   [0, 1]. Replacing t with bt-1 in the eligibility trace update in (28) simplifies as follows:
+
+zt
+
+
+
+t
+
+t-1 bt-1
+
+bt-1zt-1
+
++
+
+xt,
+
+= tt-1zt-1 + xt.
+
+(29)
+
+A simplified variant of the Vtrace() algorithm (Espeholt et al., 2018) can be derived with a similar
+
+substitution: t = min
+
+, c¯
+
+1
+
+t-1 bt-1
+
+bt-1, where c¯  R+ and   [0, 1] are both tuneable constants.
+
+The eligibility trace update becomes:
+
+zt = t min
+
+c¯ t-1
+
+,
+
+1 bt-1
+
+bt-1
+
+t-1 bt-1
+
+zt-1
+
++
+
+xt
+
+= t min
+
+c¯ t-1
+
+,
+
+1 bt-1
+
+t-1zt-1 + xt
+
+= t min
+
+c¯t-1 t-1
+
+,
+
+t-1 bt-1
+
+zt-1 + xt
+
+= t min (c¯, t-1) zt-1 + xt.
+
+(30)
+
+The parameter c¯ is used to cap importance sampling ratios in the trace. Note that it is not possible to recover the full Vtrace() algorithm in this way. The more general Vtrace() algorithm uses an additional parameter, ¯  R+ that caps the t in the update to wt+1: min(¯, t)tzt. When ¯ is set to the largest possible importance sampling ratio, it does not affect t in the update to wt and so we obtain the equivalence above. For smaller ¯, however, Vtrace() is no longer simply an instance of Off-policy TD(). In our experiments, we investigate this simplified variant of Vtrace() that does not cap t and set c¯ = 1 as done in the original Retrace algorithm.
+ABTD() for   [0, 1] uses t = t-1bt-1, with the following eligibility trace update:
+
+zt
+
+=
+
+t
+
+t-1 bt-1
+
+t-1
+
+bt-1zt-1
+
++
+
+xt
+
+= tt-1t-1zt-1 + xt,
+
+(31)
+
+23
+
+with the following scalar parameters to define t
+
+t =def ((), st, at) =def min
+
+( ),
+
+1 max(b(at|st),
+
+(at|st))
+
+,
+
+() =def 20 + max(0, 2 - 1)(max - 20),
+
+0
+
+=def
+
+maxs,a
+
+1 max(b(a|s),
+
+(a|s))
+
+,
+
+max
+
+=def
+
+mins,a
+
+1 max(b(a|s),
+
+(a|s))
+
+.
+
+The convergence properties of all three methods are similar to Off-policy TD(). They are not guaranteed to converge under off-policy sampling with weighting µb and function approximation. With the addition of gradient corrections similar to GTD(), all variable- algorithms are convergent.
+For explicit theoretical results, see Mahmood, Yu & Sutton (2017) for ABQ with gradient correction
+and Touati et al. (2018) for convergent versions of Retrace and Tree Backup.
+
+An alternative way to understand variable- algorithms is to assume that the term t-1 is always present in the eligibility trace update rule, as it should be. However, it is not explicit. In (29), there is no t-1, but the term t-1 has the t-1 buried inside it:
+
+t-1
+
+=
+
+t-1 bt-1
+
+t
+
+.
+
+We can now remove t-1 from both sides of the equation and move t to the left hand side:
+
+t = bt-1,
+
+which is exactly how the effective trace parameter, t, is set in Tree Backup().
+
+In the ABTD() update rule, (31) we can similarly write:
+
+t-1t-1 = t-1t.
+
+Rearrangement the variables, we come to the effective t used by ABTD():
+
+t = t-1bt-1.
+
+For Vtrace update rule (30),
+
+min (c¯, t-1)  = t-1t,
+
+which when rearranged, results in exactly how t is set by the Vtrace algorithm:
+
+t
+
+=
+
+min
+
+(c¯, t-1) t-1
+
+
+
+=
+
+min
+
+(c¯,
+
+t-1)
+
+ t-1
+
+= min
+
+c¯ t-1
+
+,
+
+1
+
+
+
+= min
+
+c¯bt-1 t-1
+
+,
+
+1
+
+
+
+= min
+
+c¯ t-1
+
+,
+
+1 bt-1
+
+bt-1.
+
+D Derivations for TB(), ABTD(), and Vtrace()
+
+As mentioned before, the three variable- algorithms were all originally proposed for control. The prediction variant of all three algorithms can be derived in a similar way. To understand the prediction
+
+24
+
+variant of these algorithms, we derive the Off-policy TD() version of ABQ(), which we call ABTD(). Using ABTD(), we provide the extensions to Retrace and Tree Backup for prediction.
+Consider the generalized -return, for a  based on the state and action--as in ABQ()--or the entire transition (White, 2017). Let t+1 = (St, At, St+1) be defined based on the transition (St, At, St+1), corresponding to how rewards and discounts are defined based on the transition, Rt+1 = r(St, At, St+1) and t+1 = (St, At, St+1). Then, given a value function v^, the -return Gt for generalized  and  is defined recursively as
+Gt =def t Rt+1 + t+1 (1 - t+1)v^(St+1) + t+1Gt+1 .
+Similar to ABQ() (Mahmood et al., 2017, Equation 7), this -return can be written using TD-errors
+
+t =def Rt+1 + t+1v^(St+1) - v^(St),
+
+as where
+
+Gt = t Rt+1 + t+1v^(St+1) - t+1t+1v^(St+1) + t+1t+1Gt+1 = t t + v^(St) + t+1t+1 Gt+1 - v^(St+1) = tt + tv^(St) + tt+1t+1 t+1t+1 + t+1t+2t+2 Gt+2 - v^(St+2)
+
+= t (t+1t+1t+1)nt + tv^(St),
+n=t
+
+n
+
+(t+1t+1t+1)n =def
+
+iii.
+
+i=t+1
+
+This return differs from the return used by ABQ(), because it corresponds to the return from a state, rather than the return from a state and action. In ABQ(), the goal is to estimate the action-value for a given state and action. For ABTD(), the goal is to estimate the value for a given state. For the return from a state St, we need to correct the distribution over actions At with importance sampling ratio t. For ABQ(), the correction with t is not necessary, and importance sampling corrections only need to be computed for future states and actions, with t+1 onward. For ABTD(), therefore, unlike ABQ(), not all importance sampling ratios can be avoided. We can, however, still set  in a similar way to ABQ() to mitigate the variance effects of importance sampling, resulting in the below ABTD() algorithm.
+The trace function in ABTD() is set to ensure tt+1 is well-behaved. For some constant  > 0, let
+(St, At, St+1) = (, St, At)b(St, At)
+
+where
+
+(, St, At) =def min
+
+,
+
+max(b(St,
+
+1 At),
+
+(St,
+
+At)
+
+.
+
+In the -return, then
+
+tt+1
+
+=
+
+(St, b(St,
+
+At) At)
+
+
+
+(
+
+,
+
+St
+
+,
+
+At)b(St,
+
+At)
+
+=
+
+(, St, At)(St, At).
+
+This removes the importance sampling ratios from the eligibility trace. The resulting ABTD() algorithm can be written as the standard Off-policy TD() algorithm, for a particular setting of  as explained in C.4. The Off-policy TD() algorithm, with this , is called ABTD(), with updates
+
+t =def t Rt+1 + t+1wt xt+1 - wt xt zt  tt-1t-1zt-1 + xt with z-1 = 0 wt+1  wt + ttzt.
+
+25
+
+Finally, we can adapt Retrace() and Tree Backup() for policy evaluation. Mahmood, Yu, & Sutton
+(2017) showed that Retrace() can be specified with a particular setting of t (in their Equation 36). We can similarly obtain Retrace() for prediction by setting
+
+t-1 =  min
+
+1 t-1
+
+,
+
+1 bt-1
+
+,
+
+For Tree Backup(), the setting for t is any constant value in [0, 1] (see Algorithm 2 of Precup, Sutton & Singh, (2000)).
+An alternative but incorrect extension of ABQ() to ABTD() The ABQ() algorithm specifies  to ensure that tt is well-behaved, whereas we specified  so that tt+1 is well-behaved. This difference arises from the fact that for action-values, the immediate reward and next state are not re-weighted with t. Consequently, the -return of a policy from a given state and action is
+Rt+1 + t+1 (1 - t+1)v^(St+1) + t+1t+1Gt+1 .
+To mitigate variance in ABQ() when learning action-values, therefore, t+1 should be set to ensure that t+1t+1 is well-behaved. For ABTD(), however, t+1 should be set to mitigate variance from t rather than from t+1.
+To see why more explicitly, the central idea of these algorithms is to avoid importance sampling altogether: this choice ensures that the eligibility trace does not include importance sampling ratios. The eligibility trace zat in TD when learning action values is
+zat = tttzat-1 + xat ,
+for state-action features xat . For tt = tt, this trace reduces to zat = tttzat-1 + xat (Equation 18, Mahmood et al., 2017). For ABTD(), one could in fact also choose to set t so that tt = tt instead of tt+1 = tt. However, this would result in eligibility traces that still contain importance sampling ratios. The eligibility trace in TD when learning state-values is
+
+zt = t-1ttzt-1 + xt.
+
+Setting
+
+tt
+
+=
+
+tt
+
+would
+
+result
+
+in
+
+the
+
+update
+
+zt
+
+=
+
+t-1t
+
+t t
+
+tzt-1
+
++
+
+xt,
+
+which
+
+does
+
+not
+
+remove
+
+important sampling ratios from the eligibility trace. Rather, the corresponding update for policy
+
+evaluation requires t-1t = t-1t-1, giving the ABTD() in Section C.4.
+
+E Derivations for Importance Sampling Placement
+We first show that the placement of the importance sampling correction term, , is equivalent between two conventions found in the literature. The original work on Off-policy TD() used:
+
+wt+1  wt + tzt zt  t zt-1 + xt
+
+with z-1 = 0
+
+t =def Rt+1 + wt xt+1 - wt xt
+
+Other works have used a different placement of :
+
+wt+1  wt + ttzt zt  t-1zt-1 + xt with z-1 = 0
+Below, we show that given z-1 = z-1 = 0, the two sets of updates listed above for Off-policy TD() are equivalent. We start by showing that tzt is equal to the product ttzt at each step, given that
+
+26
+
+z-1 = z-1 = 0. ttzt = tt t-1zt-1 + xt = tt t-1(t-2zt-2 + xt-1) + xt = tt ()2 t-1t-2zt-2 + t-1xt-1 + xt
+
+= tt ()2 t-1t-2 t-3zt-3 + xt-2 + t-1xt-1 + xt
+
+= tt ()3 t-1t-2t-3zt-3 + ()2 t-1t-2xt-2 + t-1xt-1 + xt
+
+...
+
+= tt
+
+t
+
+i
+
+()i xt-i t-k
+
+i=0
+
+k=1
+
++ tt
+
+t+1
+()t+1 t-k
+k=1
+
+z-1,
+
+assuming that z-1 = 0:
+
+ttzt = tt
+
+t
+
+i
+
+()i t-k .
+
+i=0
+
+k=1
+
+(32)
+
+On the other hand we have:
+
+tzt = t t zt-1 + xt = tt t-1 zt-2 + xt-1 + xt
+
+= tt ()2 t-1zt-2 + t-1xt-1 + xt
+
+= tt ()2 t-1 t-2 zt-3 + xt-2 + t-1xt-1 + xt
+
+= tt ()3 t-1t-2zt-3 + ()2 t-1t-2xt-2 + t-1xt-1 + xt
+
+...
+
+= tt
+
+t
+
+i
+
+t
+
+()i xt-i
+
+t-k + tt ()t+1
+
+t-k z-1
+
+i=0
+
+k=1
+
+k=1
+
+which is equal to (32) given that z-1 = 0.
+
+Next we show that the third update--which only corrects a part of the TD-error--is unbiased and equal to the two previous sets of updates mentioned above in expectation (but not necessarily at each time step):
+
+wt+1  wt + tzt
+
+zt  t-1zt-1 + xt with z-1 = 0 t =def t Rt+1 + wt xt+1 - wt xt
+
+These update rules are also valid because they are equal to the previous ones in expectation.
+
+That is, Eb[tzt | Ht] = Eb[ttzt | Ht] = Eb[tzt | Ht] where Ht is the history up to time t
+
+(EHb[tt=zt
+
+{S0, A0, S1, A1, . . . | Ht] = Eb[ttzt |
+
+, St-1, At-1, St}). Ht]. Here we show
+
+It is immediate from what we showed that Eb[ttzt | Ht] = Eb[tzt | Ht]:
+
+above
+
+that
+
+Eb[ttzt | Ht] = ztEb[tt | Ht]
+
+(since all of zt is part of the history and known)
+
+= ztEb t Rt+1 + wt xt+1 - wt xt | Ht
+
+= ztEb t Rt+1 + wt xt+1 | Ht - Eb t wt xt | Ht . (33)
+
+27
+
+On the other hand:
+
+Eb[tzt | Ht] = ztEb[t | Ht] = ztEb t Rt+1 + wt xt+1 - wt xt | Ht
+
+= ztEb t Rt+1 + wt xt+1 | Ht - Eb wt xt | Ht
+
+(34)
+
+which is equal to (33) if:
+
+Eb wt xt | Ht = Eb t wt xt | Ht .
+
+This is true since Eb wt xt | Ht = wt xt:
+
+Eb t wt xt | Ht = wt xt Eb[t | Ht] = wt xt.
+=1
+
+28
+
+0.7
+ =256
+
+ =256
+
+0.5
+
+VE
+(averaged over
+time steps and
+50 runs)
+
+0.3
+GTD2
+0.1 0.7
+ =256
+
+0.5
+
+0.3
+
+64
+
+2-6
+
+16
+
+4 1 0.25
+
+2-4
+
+PGTD2
+
+64 16 4 1
+2-6 2-4 0.25
+
+ =256
+
+64
+16 4
+
+2-6 1 0.25 2-4
+
+64
+
+16
+
+1 4
+
+2-6
+
+2-4
+
+0.25
+
+GTD
+0.1 2-16 2-13 2-10 2-7 2-4 2-1
+
+HTD
+2-16 2-13 2-10 2-7 2-4 2-1
+
+Step-size parameter, (log scale)
+
+Figure 9: Performance of Gradient-TD algorithms with eight values of .
+
+F Additional Results and Experimental Details
+In this section, additional results from the Collision task are provided. These extra results do not change the conclusions made in the main text; they are merely provided for completeness.
+F.1 Additional Results of Gradient-TD Algorithms
+We presented Gradient-TD results with four values of  in Section 8. Here, we provide the results with eight values of  that were applied to the task. See Figure 9. In general, all algorithms had a low average RVE with small values of . Additional results for the TDRC() algorithm are shown in Figure 10. In the main text, we restricted TDRC() results to case with  = 1 and  = 1, where  is TDRC's regularization parameter (see
+
+0.7
+ =256
+0.5
+
+64 16
+4 1 2-6
+
+ =256
+
+64 16 4 1
+2-6
+
+VE
+(averaged over
+time steps and
+50 runs)
+
+0.3 0.1 0.7
+
+0.5
+
+0.3 0.1
+
+ = 0.01
+
+2-4
+0.25
+
+ =256
+ =1.0
+
+64 16 4 1
+2-6 0.25 2-4
+
+2-16 2-13 2-10 2-7 2-4 2-1
+Step-size parameter,  (log scale)
+
+ = 0.1
+
+2-4
+0.25
+
+2-16 2-13 2-10 2-7 2-4 2-1
+Step-size parameter,  (log scale)
+
+Figure 10: TDRC's performance for various values of  and .
+
+29
+
+Section A for TDRC() update rules). Sensitivity curves for eight different values of  and three values of  are shown in Figure 10. Each panel of the figure shows the performance for one value of . Each curve in each of the panels shows the performance for one value of . Value of  is written inside each panel. Consistent with the conclusions made in the original paper (Ghiassian et al., 2020), TDRC was fairly robust to the choice of .
+F.2 Additional learning curves for various values of the bootstrapping parameter
+One of the important attributes of an algorithm is its asymptotic error level. Here, we show that asymptotic error levels vary and depend on both the algorithm, and the bootstrapping parameter.
+Learning curves for algorithms with four values of  are shown in Figure 11. All learning curves in the figure correspond to the algorithm instance that minimizes the area under the learning curve. The leftmost panel shows the performance of algorithms with full bootstrapping. All learning curves are averaged over 50 runs and the shaded regions show one standard error. Emphatic TD converged to the lowest error level, followed by proximal GTD2. All other algorithms, including HTD, ABTD, Tree Backup, Vtrace, and the rest that are not shown in the figure converged to a little above 0.3, except Emphatic TD(, ) whose asymptotic error level depended on the magnitude of  and varied between that of Off-policy TD(0) and Emphatic TD(0).
+Performance for  = 0.5 is shown on the second panel of Figure 11. By the end of the run, all methods reached a lower asymptotic error level than the full bootstrapping case. Vtrace and Tree Backup performed similar to each other. HTD and ABTD performed similar to each other and had a lower asymptotic error level than Tree backup. Emphatic TD and Proximal GTD2 reached the lowest asymptotic error level than all other algorithms, however, proximal GTD2 learned more slowly than Emphatic TD.
+Performance for minimal bootstrapping with  = 0.9 is shown on the third panel of Figure 11. All algorithms performed better than their instance with  = 0.5, except ABTD. ABTD(0.9) performed similar to ABTD(0.5). With minimal bootstrapping, Tree backup, Vtrace, and ABTD all performed similarly. Proximal GTD2, HTD , and Emphatic TD all converged to the lowest error level of a little below 0.1.
+Performance with no bootstrapping is shown on the rightmost panel of Figure 11. The only algorithms that performed better than their algorithm instance with  = 0.9 were Tree backup and Vtrace. With no bootstrapping, ABTD, Tree backup, and Vtrace performed the same, but worse than the rest of the algorithms. This is because these algorithms set their effective  adaptively, which in turns results in asymptotic bias. Emphatic TD(1) learned more slowly than Emphatic TD(0.9).
+To better compare the performance of algorithms with full and minimal bootstrapping, best learning curves (the one with smallest average VE) for all algorithms with full and minimal bootstrapping are plotted in Figure 12. Generally, all algorithms performed better with minimal bootstrapping. They learned faster and converged to a lower error level. For Emphatic-TD algorithms, little difference in learning speed and final error level was observed with minimal and full bootstrapping. To avoid the bias induced by maximizing over parameters, we re-ran the algorithm with its best parameters for an extra 50 runs and presented the results for those extra runs. For more details see Appendix F.4.
+
+VE
+(averaged over
+50 runs)
+
+0.4 0.3
+
+HTD ABTD TB Vtrace
+
+ABTD
+
+HTD
+
+TB Vtrace
+
+0.2
+
+PGTD2
+
+ABTD TB Vtrace
+
+ABTD TB Vtrace
+
+0.1
+0 =0
+
+ETD
+ = 0.5 ETD PGTD2  = 0.9 PGTD2 HTD ETD  = 1 PGTD2 HTD ETD
+
+0 5 10 15 20 0 5 10 15 20 0 5 10 15 20 0 5 10 15 20
+
+Steps (×1000)
+
+Figure 11: Asymptotic error levels of various algorithms.
+
+30
+
+VE
+(averaged
+over
+50 runs)
+
+0.7 0.5 0.3 0.1
+0.7 0.5 0.3
+0.1 0
+
+TD
+PGTD2 20 0
+
+TB
+
+Vtrace
+
+ABTD
+
+TDRC
+
+HTD
+
+ETD
+
+20 0
+
+20 0
+
+Steps ×1000
+
+20 0
+
+GTD
+ETD  20
+
+Figure 12: Learning curves for minimal and full bootstrapping.
+
+GTD2
+=0 (in red)
+ = 0.9 (in blue)
+
+VE 0.7
+
+HTD GTD GTD2
+
+(averaged 0.5
+over
+
+time steps and
+50 runs)
+
+0.3 TD,TB, Vtrace
+0.1 ABTD
+
+ETD
+ETD
+
+TDRC PGTD2
+
+2-16 2-13 2-10 2-7 2-4 2-1
+
+Step-size parameter, (log scale)
+
+16 25 28 24 24 11 37 25 16 16 16 (%)
+
+TD PGGGTTTDDD22 TDHTRDC
+ETEDTD
+VAtrBaTTcBDe
+
+Figure 13: Results with full bootstrapping.
+
+F.3 A comparison of algorithms with full bootstrapping
+Here, we make a high level comparison of all algorithms with full bootstrapping. Sensitivity to step size is shown on the left panel of Figure 13. With full bootstrapping, Emphatic-TD algorithms had the lowest average VE with their appropriate . This lower error is a result of learning faster and converging to a lower final error level than other algorithms (see Figure 4). All other algorithms had an error of a little above 0.3, except for proximal GTD2 that reached to a lower error level than others. TDRC and HTD had the widest sensitivity curves at their bottom, meaning that they were less sensitive to  and in turn were easier to use than other Gradient-TD algorithms. GTD2 and proximal GTD2 had a higher error than all other algorithms when the step size was around 2-10.
+The difference observed between the two families of Emphatic- and Gradient-TD is statistically significant because it is more than twice the standard error in both means. Similarly, the difference between proximal GTD2 and other Gradient-TD algorithms is statistically significant.
+Waterfall plots provide another representation of the results. Waterfall plots are a great way of presenting all the data points in a condensed manner in one plot. All the results for the case of full bootstrapping are shown on the right panel of Figure 13. We see that some algorithms have more data points on the waterfall plot than others. These are the algorithms that have more than one tuned parameter and as a result, more instances of such algorithms were applied to the task. The numbers at the top of the waterfall plot shows the percentage of parameter settings that learned unstably and had an average VE higher than their VE at t = 0. For better visibility, these are shown as having an error of 0.8.
+F.4 Eliminating Bias Incurred by Maximizing Over Parameters
+Wherever we maximized over parameters to find the best parameter setting, we followed the following procedure to eliminate the bias incurred by maximizing over parameters: The parameters that resulted in the lowest error were selected. With those selected parameters, the specific algorithm instance was applied to the task for an additional 50 times (extra to the original 50 runs that resulted in the original error value) and the results for these extra 50 runs were presented.
+Two learning curves are shown in Figure 14. Both learning curves show the average error over 50 runs for the GTD(0) algorithm with  = 2-6, and  = 2-2. Each learning curve is the average error over a different set of 50 runs. The learning curve in orange is the average error over the original
+31
+
+0.7
+VE 0.5
+(averaged over
+50 runs) 0.3
+0.1
+
+GTD-re-run GTD-original
+ = 2-6  = 2-2
+
+0
+
+5,000
+
+10,000
+
+15,000
+
+20,000
+
+Steps
+
+Figure 14: Average error over 50 original and 50 additional runs for GTD(0).
+
+50 runs. The results from these runs were used to find the parameter setting that minimized the average error of the algorithm towards the end of the run (last 5% of the time steps in this case). After these parameters were found, the algorithm was applied to the task for another 50 runs. As seen in the figure, in this case, re-running with the best parameters did not result in error levels that were statistically significantly different from the original results.
+F.5 Specification of Dependencies and More Details
+Experiments were conducted using a supercomputer with 2,024 nodes. Each node had 2 sockets with 20 Intel Skylake cores (2.4 GHz, AVX512), for a total of 40 CPUs per node and an overall total of 80960 cores. Each node had 202 GB of RAM. The operating system used was Linux CentOS 7.
+Python 3.6 was used to run the code, with numpy version 1.19.0. To plot the data, matplotlib version 3.2.2 was used.
+For more details, see the code at: https://github.com/sinaghiassian/OffpolicyAlgorithms.
+
+32
+
+

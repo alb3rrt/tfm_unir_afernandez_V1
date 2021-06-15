@@ -1,0 +1,781 @@
+arXiv:2106.00588v1 [cs.CV] 1 Jun 2021
+
+TransVOS: Video Object Segmentation with Transformers
+Jianbiao Mei, Mengmeng Wang, Yeneng Lin, Yong Liu Laboratory of Advanced Perception on Robotics and Intelligent Learning,
+College of Control Science and Engineering, Zhejiang University
+{jianbiaomei, mengmengwang, 3140100486}@zju.edu.cn, yongliu@iipc.zju.edu.cn
+Abstract
+Recently, Space-Time Memory Network (STM) based methods have achieved stateof-the-art performance in semi-supervised video object segmentation (VOS). A critical problem in this task is how to model the dependency both among different frames and inside every frame. However, most of these methods neglect the spatial relationships (inside each frame) and do not make full use of the temporal relationships (among different frames). In this paper, we propose a new transformerbased framework, termed TransVOS, introducing a vision transformer to fully exploit and model both the temporal and spatial relationships. Moreover, most STM-based approaches employ two disparate encoders to extract features of two significant inputs, i.e., reference sets (history frames with predicted masks) and query frame, respectively, increasing the models' parameters and complexity. To slim the popular two-encoder pipeline while keeping the effectiveness, we design a single two-path feature extractor to encode the above two inputs in a unified way. Extensive experiments demonstrate the superiority of our TransVOS over state-of-the-art methods on both DAVIS and YouTube-VOS datasets. Codes will be released when it is published.
+1 Introduction
+Video Object Segmentation (VOS), as a fundamental task in the computer vision community, attracts more and more attention in recent years due to its potential application in video editing, autonomous driving, etc. In this paper, we focus on semi-supervised VOS, which provides the target objects' masks in the first frame of video sequences, and the algorithms should produce the segmentation masks for those objects in the subsequent frames. Under this setting, VOS remains challenging due to object occlusion, deformation, appearance variation, and similar object confusion in video sequences.
+A key problem in semi-supervised VOS is how to exploit the dependency both among different frames and inside every frame. To better depict this point, we define two relationships in this paper, i.e., temporal relationships (Fig. 1 (b)) and spatial relationships (Fig. 1 (c)). The former is the relationships among pixels in different frames, representing correspondence of target objects among all the frames, which is vital for learning robust global target object features and helps handle appearance change across frames. The latter is the relationships among pixels in one specific frame, including object appearance information for target localization and segmentation, which is important for learning local target object structure and helps obtain accurate masks. Recently, a group of matching-based methods [9, 32, 43, 25, 16, 22, 13, 18, 29] provide partial solutions for
+Equal contribution Corresponding author
+Preprint. Under review.
+
+capturing above correspondence and achieve state-of-the-art performance. The basic idea of these methods is to compute the similarities of target objects between the current and past frames by feature matching, in which attention mechanism is widely used. Among them, the Space-Time Memory (STM) based approaches [25, 16, 22, 13, 18, 29] have achieved great success. They propose to apply spatio-temporal attention between every pixel in previous frames and every pixel in the current frame. However, the spatio-temporal attention module in previous approaches could not thoroughly model the temporal and spatial relationships. As illustrated in Fig. 1 (a), it only computes attentions among pixels in the query frame against pixels in each reference frame. The temporal relationships are not fully utilized since they ignore the dependency among all the history frames. Besides, the spatial relationships of pixels inside every frame are also neglected. There are a few methods that have paid attention to this issue. For instance, EGMN [22] proposes a fully-connected graph to capture cross-frame correlation, which exploits the temporal relationships effectively. However, EGMN still omits the spatial relationships. Our key insight is that both the temporal and spatial relationships are significant to VOS and should be utilized effectively. We find the recent vision transformer [5, 37, 42, 2] is a satisfactory model to cater to the demand since the self-attention modules in the transformer could establish dependency among every elements in the input sequence. Therefore, we proposed a new transformer-based architecture for VOS, capturing the temporal relationships and spatial relationships jointly.
+Another significant but open problem is how to effectively represent the inputs, i.e., reference sets (history information) and query frames (current information). Many existing methods try to encode these two kinds of information with two disparate encoders (always termed as memory/reference encoder and query encoder), since reference sets include several history images and their predicted masks while the query frames only has current images. This two-encoder pipeline is swollen and contains plenty of redundant parameters. Existing ways to slim it are limited. For example, AGAME [11] and RANet [38] employ a siamese network to encode reference and query frame and then concatenate features of the reference frame with its predicted mask to reinforce target features. RGMP [24] and AGSS-VOS [19] concatenate the current frame with the previous frame's mask or warped mask to form a 4-channel input, so as the reference sets. Then a shared encoder with a 4-channel input layer is used to extract features. These strategies can reuse features and effectively reduce the amount of parameters. Nevertheless, directly concatenating them with high-level semantic features is insufficient since the abundant features like contour and edges of the mask are not fully leveraged. Besides, due to the padding operation, object positions of frame features and predicted mask may be misaligned. In addition, concatenating with the previous frame's mask with the query frame may bring large displacement shifting error and using optical flow to warp the mask is timeconsuming. In this paper, we develop a plain yet effective feature extractor which has a two-path input layer and accepts the reference sets and the query frames in the meanwhile, significantly simplifying the existing VOS framework while keeping the effectiveness.
+Our main contributions can be summarized as follows:
+· We proposed a new transformer-based VOS framework, termed TransVOS, to effectively model temporal and spatial dependency.
+· TransVOS is an end-to-end model and does not need multiple encoders and other post-processing such as multi-object merging, dramatically simplifying the existing VOS pipelines.
+· We comprehensively evaluate the proposed TransVOS on 3 benchmark datasets including DAVIS 2016/2017 [26, 27] and YouTube-VOS [40]. Extensive experiments demonstrate the effectiveness and efficiency of our method in comparison with state-of-the-art approaches.
+2 Related works
+Tracking-based methods. Tracking-based methods [36, 3, 34, 10] integrate object tracking techniques to indicate target location and spatial area for segmentation and improve the inference speed. SiamMask [36] adds a mask branch on SiamRPN [14] to narrow the gap between tracking and segmentation. FTAN-DTM [10] takes object segmentation as a sub-task of tracking, introducing "tracking-by-detection" model into VOS. While the accuracy of tracking often limits these methods' performance. SAT [3] and FTMU [30] fuse object tracking and segmentation into a truly unified pipeline. SAT combines SiamFC++ [41] and proposed an estimation-feedback mechanism to switch between mask box and tracking box, making segmentation and tracking tasks enhance each other.
+2
+
+Reference frames
+
+Frame i Frame k
+
+Fame n
+
+Query frame (a)
+
+Frame j
+
+(b)
+
+(c)
+
+Figure 1: (a) relationships between pixels in query frame and pixels in reference frames. (b) relationships among pixels in different frames. (c) relationships among pixels in the same frame.
+
+Matching-based methods. Recently, state-of-the-art performance has been achieved by matchingbased methods [9, 32, 43, 25, 22, 18, 29], which perform feature matching to learn target object appearances offline. FEELVOS [32] and CFBI [43] perform the nearest neighbor matching between the current frame and the first and previous frames in the feature space. STM [25] introduces an external memory to store past frames' features and uses the attention-based matching method to retrieve information from memory. KMN [29] proposes to employ a gaussian kernel to reduce the non-locality of the STM. RMNet [39] proposes to replace STM's global-to-global matching with local-to-local matching to alleviate the ambiguity of similar objects. EGMN [22] organizes the memory network as a fully connected graph to store frames as nodes and capture cross-frame relationships by edges. However, these methods do not fully utilize the spatio-temporal relationships among reference sets and query frame. In this paper, we introduce a vision transformer to model spatio-temporal dependency, which can help handle large object appearance change.
+Vision transformers. Transformers were first proposed in [31] for the sequence-to-sequence machine translation task. Recently, transformer has achieved great success in vision tasks like image classification [5], object detection [2], semantic segmentation [35], object tracking [42], etc. For instance, DETR [2] used a transformer with a fixed small set of learned object queries to reasons about the relations of the objects and the global image context and directly outputs the final set of predictions in parallel. Due to the importance of spatial and temporal relationships for segmenting, we also employ the vision transformer to model them. Our work is inspired by DETR. Different from DERT, our proposed TransVOS focus on the video object segmentation task and aims to learn global target object information across frames and local target object structure in a specific frame. We have found one transformer-based method SST [6] of VOS. It uses the transformer's encoder with sparse attention to capture the spatio-temporal information among the current frame and its preceding frames. Our work has the following main differences with SST. (1) Encoders of transformers are different. Our TransVOS keeps regular structure of transformer encoder and demonstrates its effectiveness rather than carefully designed sparse attention in SST. (2) The mask usage is different. TransVOS explores the mask representations which could avoid alignment error and contain abundant contour/edge features instead of merely regarding it as a indicator for objects as SST. (3) The decoders are different. TransVOS exploits the transformer's decoder to predict the target's position and focus on the most relevant object. While SST does not employ the transformer's decoder and could not enjoy the strong power of it.
+
+3 Methods
+The overview of our framework is illustrated in Fig. 2. It mainly consists of a feature extractor (Sec. 3.1), a vision transformer (Sec. 3.2), a target attention block (Sec. 3.3) and a segmentation head (Sec. 3.3). When segmenting a specific frame, we firstly use the feature extractor to extract the features of the current frame and reference sets. The outputs of the extractor are fed into a bottleneck layer to reduce the channel number. Then features are flattened before feeding into a vision transformer, which models the temporal and spatial relationships. Moreover, the target attention block takes both the transformer's encoder and decoder's outputs as input and then outputs the feature maps, representing the target mask features. Finally, a segmentation head is attached after the target attention block to obtain the predicted object mask.
+
+3
+
+Two-path Input Layer
+
+Query frame
+
+C
+
+CNN
+
+Positional encoding
+Sequence of encoded features
+Transformer Encoder
++
+
+Target prediction Transformer Decoder
+
+Target Attention Block
+C
+Segmentation
+Segmentation Head
+
+Reference set
+
+Feature extractor
+
+Sequence of frame features
+Transformer
+
+Target query
+
+Predicted mask
+
+Figure 2: Overview of our TransVOS. The feature extractor is used to extract the features of the current frame and reference sets. The vision transformer is exploited to model the temporal and spatial relationships. The target attention block (TAB) is used to extract the target mask features. The segmentation head is designed to obtain the predicted object mask. "+", "C" indicate adding and concatenating operation, respectively.
+3.1 Feature Embedding
+To fully utilize the temporal and spatial information in the reference sets (past frames with predicted masks) and the query frame, we need a delicate feature extractor that can effectively extract the target object features and map them into an embedding space to be ready for feeding into the following vision transformer.
+Feature extractor. Our method uses a single feature extractor to extract features of the current frame (query frame) and reference sets in a unified way. Specifically, we design a two-path input layer to adaptively encode two types of inputs, i.e, RGB frames or the pairs of RGB frames with corresponding object masks. When taking the RGB frames as input, it will go through the first path which has one regular convolution operation. For reference pairs, the second path will be used, which contains three convolutions to encode the RGB frame, the object mask's foreground and background, respectively. The output features of the three convolutions are added together to output the features. Our method can use arbitrary convolutional networks as the feature extractor by replacing the first layer with our two-path input layer. Here we employ the first four stages of ResNet [8] as our feature extractor. After going through the two-path input layer, the features from the query frame and reference sets are first concatenated along the temporal dimension and then fed into the convolutional network (CNN). Finally, the reference sets and current frame are mapped to feature maps f  R(T +1)×C×H×W , where H, W , C are the height, width and channel. T is the number of the reference pairs. Before feeding into the vision transformer, we use a 1x1 convolution layer to reduce the spatial channel of the feature maps from C to d (d < C), resulting in new feature maps f1  R(T +1)×d×H×W . Then, the spatial and temporal dimensions of f1 are flattened into one dimension, producing feature vectors X  R(T +1)HW ×d, which servers as the input of the transformer encoder.
+3.2 Relationship Modeling
+Transformers have strong capabilities for modeling spatio-tempral relationships. First, the positional encoding explicitly introduces space-time position information, which could help the encoder model spatio-temporal relationships among pixels in the input frames. Second, the encoder could find the target object's correspondence among the input frames and model the target object's structure in a specific frame. Third, the decoder could predict the spatial positions of the target objects in the query frame and focus on the most relevant object, which helps learn robust target object features and make our network handle similar object confusion better.
+Temporal and spatial positional encoding. The transformer's core component self-attention is permutation-invariance. However, both spatial and temporal positional information is vital for accurate object segmentation and establishing spatial and temporal relationships. Equipping with the space-time location information in feature maps, the encoder could capture the spatial and temporal dependency among all feature elements in the sequence better, helping our network handle challenging situations like object occlusion and deformation. Therefore, explicitly embedding space-time position information into the transformer model is essential. We add sinusoidal positional encoding P E [31]
+
+4
+
+to the embedded features X to form the inputs Z of the transformer. Mathematically,
+
+Z = X+PE
+
+(1)
+
+P E(pos, 2i) = sin(pos/100002i/d)
+
+(2)
+
+P E(pos, 2i + 1) = cos(pos/100002i/d)
+
+(3)
+
+where pos is the spatio-temporal position and i is the dimension.
+
+Transformer encoder. The transformer encoder is used to model the spatio-temporal relationships among pixel-level features of the sequence. It takes features Z as input and outputs encoded features E. The encoder consists of N encoder layers, each of which has a standard architecture including
+a multi-head self-attention module and a fully connected feed-forward network. The multi-head
+self-attention module is used to capture spatio-temporal relationships from different representation sub-spaces. Let zp,t  Rd represents an element of Z, where p and t denote the spatial and temporal position, respectively. Firstly, for mE-th (mE  ME) attention head, the query/key/value vector (qm p,tE /km p,tE /vpm,tE ) is computed from the representation zp,t:
+
+qm p,tE = WqmE zp,t, km p,tE = WkmE zp,t, vpm,tE = WvmE zp,t
+
+(4)
+
+Then the multi-head self-attention feature ^zp,t is calculated by
+
+^zp,t
+
+=
+
+ME
+
+T +1
+
+WomE [
+
+mE =1
+
+t=1
+
+HW p=1
+
+( (qm p,tE )T km p,tE dmE
+
+)
+
+·
+
+vpm,tE ]
+
+(5)
+
+where T represents the size of the referent set, WqmE , WkmE , WvmE  RdmE ×d and WomE  Rd×dmE are learnable weights (dmE = d/ME by default),  indicates the sof tmax function. Note that we compute attention along the spatio-temporal dimension. Thus we can model the spatial
+relationships and temporal relationships in the meanwhile.
+
+Transformer decoder. The transformer decoder aims to predict the spatial positions of the target and focus on the most relevant object in the query frame. It takes encoded features E and target query xo as input and output decoded features O. We only utilize one target query in the decoder to query the target object features and remove the Hungarian algorithm [12] used in DETR [2] since there is only one prediction. The decoder consists of N decoder layers, each of them includes a multi-head self-attention module, a multi-head cross-attention module, and a fully connected feedforward network. In our TransVOS, the multi-head self-attention module is used to integrate target information from different representation sub-space. And the multi-head cross-attention module is mainly leveraged to fuse target object features from the encoder. With only one target query xo, the multi-head self-attention feature x^so can be expressed as:
+
+MD
+
+x^so =
+
+WomD (WvmD xo)
+
+(6)
+
+mD =1
+
+where mD indexes the attention head in multi-head self-attention module, WvmD  RdmD ×d and WomD  Rd×dmD are learnable weights (dmD = d/MD by default). For the multi-head cross-attention module, let ep,t  Rd represents an element of E, p and t denote
+the spatial and temporal position, respectively. For mD-th (mD  MD) attention head, the key and value vectors km p,tD , vpm,tD are computed as:
+
+kpm,tD = WkmD ep,t, vpm,tD = WvmD ep,t
+
+(7)
+
+Then with the query xo, the cross-attention feature x^co is calculated:
+
+x^co
+
+=
+
+MD mD =1
+
+T +1
+WomD [
+t=1
+
+HW p=1
+
+( (WqmD xo)T dmD
+
+km p,tD
+
+)
+
+·
+
+vpm,tD ]
+
+(8)
+
+where T denotes the size of the reference set, WqmD , WkmD , WvmD  RdmD ×d and WomD  Rd×dmD are learnable weights (dmD = d/MD by default).  indicates the sof tmax function.
+
+5
+
+3.3 Segmentation
+
+Target attention block. To obtain the target mask prediction from the outputs of the transformer,
+
+the model needs to extract the target's mask features of the query frame. To achieve this goal, similar
+
+to DETR [2], we use a Target Attention Block (TAB) to get an attention map first. TAB computes the
+
+similarity between encoded features EQ of query frame and the output features O from the decoder.
+
+O and EQ are fed into a multi-head self-attention module (with MA head) to obtain the attention
+
+maps. Different from DETR, we concatenate the attention maps with EQ as the input S of the
+
+following segmentation head to enhance the target features. The above procedure can be formulated
+
+as:
+
+Attni(O,
+
+EQ)
+
+=
+
+(
+
+(Wqi O)T (Wki EQ) di
+
+)
+
+(9)
+
+S = [EQ, Attn1(O, EQ), · · · , AttnMA (O, EQ)]
+
+(10)
+
+where i indexes the attention head, Wqi , Wki  Rdi×d, are learnable weights (di = d/MA by default).
+
+Segmentation head. The features S are fed into a segmentation head which outputs the final mask prediction. Here, we use a refine module used in [24, 25] as the building block to construct our segmentation head. It consists of two blocks, each of which takes both the output of the previous stage and the current frame's feature maps from feature extractor at the corresponding scale through skip-connections. Gradually upscale the compressed feature maps by a factor of two at a time. And a 2-channel convolution and a sof tmax operation are attached behind blocks to attain the predicted mask in 1/4 scale of the input image. Finally, we use bi-linear interpolation to upscale the predicted mask to the original scale. Our framework can be extended to multi-object segmentation easily. Please refer to supplementary materials for more details.
+
+3.4 Training and Inference
+
+Training. Our proposed TransVOS doesn't require extremely long training video clips since it does not have any temporal smoothness assumptions. Even though, TransVOS can still learn long-term dependency. Just like most STM-based methods [25, 16, 22, 18, 29], we synthesis video clips by applying data augmentations (random affine, color, flip, resize and crop) on a static image of datasets [4, 20, 15, 7]. Then we use the synthetic videos to pretrain our model. This pre-training procedure
+
+helps our model to be robust against a variety of object appearance and categories. After that, we train our model on real videos. We randomly select T frames from a video sequence of DAVIS [26, 27] or YouTube-VOS [40] and apply data augmentation on those frames to form a training video clip. By doing so, we can expect our model to learn long-range spatio-temporal information. We add cross-entropy loss Lcls and mask IoU loss LIoU as the multi-object training loss L, which can be expressed as:
+
+1 N-1
+
+L= N
+
+[Lcls(Mi, Yi) + LIoU (Mi, Yi)]
+
+(11)
+
+i=0
+
+1 Lcls(Mi, Yi) = - || [Yilog(
+p
+
+exp(Mi)
+
+N -1 j=0
+
+(exp(Mj
+
+))
+
+)]p
+
+(12)
+
+LIoU (Mi, Yi) = 1 -
+
+p min(Ypi , Mpi ) p max(Ypi , Mpi )
+
+(13)
+
+where  denotes the set of all pixels in the object mask, Mi, Yi represent the predicted mask and ground truth of object i, N is the number of objects. Note that N is set to 1 when segmenting a single
+object.
+
+Inference. Our model uses past frames with corresponding predicted masks to segment the current frame in the online reference phase. Considering memory limitation and reference speed, we don't use external memory to store every past frame's features but only use the first and previous frames with the predicted masks as the reference sets. Because the first frame with its ground-truth mask always provides the most reliable information, and the previous frame is the most similar one to the current frame.
+
+6
+
+Methods
+
+OL
+
+DAVIS16 val
+
+DAVIS17 val
+
+FPS J &F(%) J (%) F(%) J &F(%) J (%) F(%)
+
+OSVOS [1] OnAVOS [33] PReMVOS [23] STM-cycle(+YT) [17] FRTM(+YT) [28]
+
+0.22 80.2
+
+79.8 80.6
+
+60.3
+
+56.7 63.9
+
+0.08 85.5
+
+86.1 84.9
+
+67.9
+
+64.5 71.2
+
+0.03 86.8
+
+84.9 88.6
+
+77.8
+
+73.9 81.7
+
+-
+
+-
+
+-
+
+-
+
+72.3
+
+69.3 75.3
+
+21.9 83.5
+
+-
+
+-
+
+76.7
+
+-
+
+-
+
+RGMP [24] RaNet [38] AGSS [19]
+GC [16] AFB-URR [18] AGAME(+YT) [11] FEELVOS(+YT) [32] STM(+YT) [25] KMN(+YT) [29] EGMN(+YT) [22] CFBI(+YT) [43] SST(+YT) [6]
+
+7.7 81.8
+
+30
+
+85.5
+
+-
+
+-
+
+25
+
+86.6
+
+-
+
+-
+
+14.3 82.1
+
+2.2 81.7
+
+6.3 89.3
+
+8.3 90.5
+
+-
+
+-
+
+6
+
+89.4
+
+-
+
+-
+
+81.5 82.0
+
+66.7
+
+85.5 85.4
+
+65.7
+
+-
+
+-
+
+66.6
+
+87.6 85.7
+
+71.4
+
+-
+
+-
+
+74.6
+
+82.0 82.2
+
+70.0
+
+81.1 82.2
+
+71.5
+
+88.7 89.9
+
+81.8
+
+89.5 91.50 82.8
+
+-
+
+-
+
+82.8
+
+88.3 90.5
+
+81.9
+
+-
+
+-
+
+82.5
+
+64.8 68.6 63.2 68.2 63.4 69.8 69.3 73.5 73.0 76.1 67.2 72.7 69.1 74.0 79.2 84.3 80.0 85.6 80.2 85.2 79.1 84.6 79.9 85.1
+
+TransVOS TransVOS(+YT)
+
+6.6
+
+85.8
+
+85.4 86.2
+
+78.1
+
+75.7 80.5
+
+6.6
+
+90.5
+
+89.8 91.2
+
+83.9
+
+81.4 86.4
+
+Table 1: Comparison with state-of-the-art on the DAVIS16 and DAVIS17 validation set. 'OL' indicates the use of online-learning strategy. '+YT' indicates the use of YouTube-VOS for training.
+
+4 Experiments
+4.1 Implementation details.
+We use the first four stages of ResNet50 [8] and replace its input layer with the proposed two-path input layer to form our feature extractor. TransVOS was trained with the input resolution of 480p, and the length T of the training video clip is set to 2. We freeze all batch normalization layers and minimize our loss using AdamW [21] optimizer ( = (0.9, 0.999), eps = 10-8, and the weight decay is 10-4) with the initial learning rate lr = 10-4. The model is trained with batchsize 4 for 160 epochs on 4 TITAN RTX GPUs, taking about 1.5 days. Note that we don't use any post-processing. In the inference stage, considering the memory limitation and running speed, TransVOS with input resolution 480p only refers to the first and previous frames to segment the current frame. We conduct all inference experiments on a single TITAN RTX GPU.
+4.2 Datasets and Evaluation Metrics
+We evaluate our approach on DAVIS [26, 27] and YouTube-VOS [40] benchmarks. Both DAVIS2016 and DAVIS2017 have experimented. DAVIS2016 is an annotated single-object dataset containing 30 training video sequences and 20 validation video sequences. DAVIS2017 is a multi-objects dataset expanded from DAVIS2016, including 60 training video sequences, 30 validation video sequences, and 30 test video sequences. YouTube-VOS dataset is a large-scale dataset in VOS, having 3471 training videos and 474 validation videos. And each video contains a maximum of 12 objects. The validation set includes seen objects from 65 training categories and unseen objects from 26 categories, which is appropriate for evaluating algorithms' generalization performance. We use the evaluation metrics provided by the DAVIS benchmark to evaluate our model. J&F evaluates the general quality of the segmentation results, J evaluates the mask IoU and F estimates the quality of contours.
+4.3 Comparison with the State-of-the-art
+DAVIS. We compare the proposed TransVOS with the state-of-the-art methods on DAVIS benchmark [26, 27]. We also present the results trained with additional data from YouTube-VOS. The evaluation results on DAVIS16 validation and DAVIS17 validation set are reported in Table. 1. When adding YouTube-VOS for training, our method achieves state-of-the-art performance on DAVIS 2017 validation set (J&F 83.9%), outperforming the online-learning methods with a large margin and have higher performance than the matching-based methods such as STM [25], KMN [29] and CFBI [43]. Specifically, TransVOS outperforms transformer-based SST [6] with 1.4% in (J&F ). When
+
+7
+
+Methods
+
+OL
+
+DAVIS17 test-dev
+
+YouTube-VOS 2018 val
+
+J &F (%) J (%) F (%) Overall Js(%) Ju(%) Fs(%) Fu(%)
+
+OSVOS [1] OnAVOS [33] PReMVOS [23] STM-cycle [17]
+FRTM [28]
+
+50.9
+
+47.0 54.8 58.8 59.8 54.2 60.5 60.7
+
+52.8
+
+49.9 55.7 55.2 60.1 46.6 62.7 51.4
+
+71.6
+
+67.5 75.7
+
+-
+
+-
+
+-
+
+-
+
+-
+
+58.6
+
+55.3 62.0 70.8 72.2 62.8 76.3 71.9
+
+-
+
+-
+
+-
+
+72.1 72.3 65.9 76.2 74.1
+
+RGMP [24] AGSS [19] AGAME [11] FEELVOS [32] RaNet [38] STM [25]
+GC [16] CFBI [43] AFB-URR [18] KMN [29] EGMN [22]
+SST [6]
+
+52.9
+
+51.3 54.4 53.8 59.5 45.2
+
+-
+
+-
+
+-
+
+-
+
+-
+
+71.3 71.3 65.5 75.2 73.1
+
+-
+
+-
+
+-
+
+66.1 67.8 60.8
+
+-
+
+-
+
+57.8
+
+55.2 60.5
+
+-
+
+-
+
+-
+
+-
+
+-
+
+55.3
+
+53.4
+
+-
+
+-
+
+-
+
+-
+
+-
+
+-
+
+72.2
+
+69.3 75.2 79.4 79.7 72.8 84.2 80.9
+
+-
+
+-
+
+-
+
+73.2 72.6 68.9 75.6 75.7
+
+74.8
+
+71.1 78.5 81.4 81.1 75.3 85.8 83.4
+
+-
+
+-
+
+-
+
+79.6 78.8 74.1 83.1 82.6
+
+77.2
+
+74.1 80.3 81.4 81.4 75.3 85.6 83.3
+
+-
+
+-
+
+-
+
+80.2 80.7 74.0 85.1 80.9
+
+-
+
+-
+
+-
+
+81.7 81.2 76.0
+
+-
+
+-
+
+TransVOS
+
+76.9
+
+73.0 80.9 81.8 82.0 75.0 86.7 83.4
+
+Table 2: Compare to the state of the art on the DAVIS17 test-dev set and YouTube-VOS 2018 validation set. 'OL' indicates the use of online-learning strategy. The subscripts of J and F on YouTube-VOS denote seen objects (s) and unseen objects (u). The metric overall means the average of Js, Ju, Fs, Fu.
+
+Variants
+1 2 3 4 5
+
+Mask utilization
+multiply residual weights-shared weights-shared weights-shared
+
+Reference sets
+1st frame 1st frame 1st frame previous frame 1st & previous frames
+
+JM (%)
+51.4 58.5 66.5 64.3 73.1
+
+JR(%)
+59.9 67.1 78.2 74.8 86.6
+
+JD (%)
+13.4 17.6 13.3 11.7 1.8
+
+FM (%)
+58.3 65.5 73.6 70.5 79.7
+
+FR(%)
+63.6 75.0 83.5 81.3 91.5
+
+FD (%)
+14.4 18.6 15.9 14 5.3
+
+J &F(%)
+54.9 62.0 70.0 67.4 76.4
+
+Table 3: Ablation studies of mask utilization and reference sets with input resolution 240p on DAVIS 2017 validation set.
+
+only using DAVIS for training, our model achieves better quantitative results than those methods with same configuration and even better than several methods like FEELVOS [32] and AGAME [11] which apply YouTube-VOS for training. On DAVIS 2016 validation set, TransVOS has comparable performance with state-of-the-art methods. Compared to KMN [29], our model has the same J&F score with a higher J score while a slightly lower F score. Since DAVIS 2016 is a single object dataset, segmentation details such as boundaries play an important role in performance evaluation. We believe that the Hide-and-Seek training strategy, which provides more precise boundaries, helps KMN a lot. We also report the results on the DAVIS 2017 test-dev set in Table. 2. Our TransVOS outperforms all the online-learning methods. Except slightly lower than KMN of 0.3%(J&F ), TransVOS surpasses all the methods in the second part.
+YouTube-VOS. Table. 2 shows comparison with state-of-the-art methods on YouTube-VOS 2018 validation set [40]. On this benchmark, our method obtains an overall score of 81.8% and also outperforms all the methods in the first and second parts, which demonstrates that TransVOS is robust and effective. Specifically, the proposed TransVOS surpasses STM [25] by 2.4% in overall score. Note that we only refer to the first and previous frames to segment the current frame, while STM contains a large memory bank which saves a new memory frame every five frames. Also, TransVOS outperforms KMN [29] and CFBI [43] with gaps of both 0.4% in overall score. Besides, it surpasses the most related transformer-based SST [6].
+4.4 Ablation Study
+We conduct all the ablation experiments on DAVIS17-val set [27]. The model used in this section does not do pre-training on synthetic videos and the input resolution is 240p unless specified. And we test the model with only the first and previous frames by default. Here we list the ablation studies
+
+8
+
+Components
+w/o transformer decoder w/ transformer decoder 1 encoder layer & 1 decoder layer
+
+JM (%)
+71.7 73.1 70.6
+
+JR(%)
+83.4 86.6 82.2
+
+JD (%)
+5.2 1.8 4.1
+
+FM (%)
+78.7 79.7 77.4
+
+FR(%)
+89.7 91.5 89.1
+
+FD (%)
+7.5 5.3 7.6
+
+J &F(%)
+75.2 76.4 74.0
+
+Table 4: Ablation studies of different components with input resolution 240p on DAVIS 2017 validation set.
+
+Input resolution JM (%) JR(%) JD(%) FM (%) FR(%) FD(%) J &F (%) FPS
+
+240p 480p
+
+74.4 85.6
+
+6.8
+
+81.4 91.3
+
+8.1
+
+81.4 90.6
+
+7
+
+86.4 93.7
+
+8.8
+
+77.9 17.0 83.9 5.2
+
+Table 5: Input resolution analysis. We compared models with different input resolution on DAVIS 2017 validation set.
+
+about mask utilization, reference sets, transformer structure, and input resolution. The exploration of the feature extractor and train strategy are presented in the supplementary materials.
+Mask utilization. We do ablation studies to demonstrate the effectiveness of our weights-shared feature extractor. Three ways are designed to utilize the predicted masks of past frames. (1) the predicted masks are multiplied with the encoded features of RGB frame, denoted as `multiply'; (2) the encoded features of RGB frame and the predicted mask are multiplied firstly and then added to the former, denoted as `residual'; (3) the predicted masks and the RGB frame are fed into a weightsshared feature extractor, denoted as `weights-shared'. As shown in Table. 3, compared to directly multiply the predicted mask with encoded features (line 1) and fusing mask with residual structure (line 2), our weights-shared feature extractor gains 15.1%(J&F ) and 8.0%(J&F ) improvement.
+Reference sets. We test how reference sets affect the performance of our proposed model. We experiment with three types of reference set configurations: (1) Only the first frame with the groundtruth masks; (2) Only the previous frame with its predicted mask; (3) Both the first and previous frame with their masks. Considering memory limitation and reference speed, we don't use external memory like methods [25] to save more memory frames. And as Table. 3 shows, even with two frames referred, our model could achieve superior performance.
+Transformer structure. We do ablation studies to explore the effectiveness and necessity of the transformer decoder. As shown in Table. 4, equipping with transformer decoder, our model obtains 1.2%(J&F ) improvement over removing it. And we also valid how the number of transformer encoder and decoder layers affect TransVOS's performance. From Table. 4, we can see that the performance drops 2.4%(J&F ) when using only one pair of encoder and decoder layers.
+Input resolution. We adjust the input resolution of the model as shown in Table. 5, from which we can see that our method achieves better performance with a larger input size. TransVOS with half input resolution runs faster (11.8fps improvement) while the performance drops 4.0%J&F . Therefore, we compare our TransVOS with input resolution 480p to other state-of-the-art methods.
+5 Conclusions
+In this paper, we propose a novel transformer-based pipeline, termed TransVOS, for semi-supervised video object segmentation (VOS). Specifically, we employ the vision transformer to model spatiotemporal relationships among reference sets and query frame. And our plain yet effective feature extractor can help slim the existing VOS framework while keeping the effectiveness. Our TransVOS is simple but it achieves state-of-the-art performance. We hope it will serve as a new solid baseline for VOS.
+References
+[1] Sergi Caelles, Kevis-Kokitsi Maninis, Jordi Pont-Tuset, Laura Leal-Taixé, Daniel Cremers, and Luc Van Gool. One-shot video object segmentation. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 221­230, 2017.
+
+9
+
+[2] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander Kirillov, and Sergey Zagoruyko. End-to-end object detection with transformers. In European Conference on Computer Vision, pages 213­229. Springer, 2020.
+[3] Xi Chen, Zuoxin Li, Ye Yuan, Gang Yu, Jianxin Shen, and Donglian Qi. State-aware tracker for real-time video object segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9384­9393, 2020.
+[4] Ming-Ming Cheng, Niloy J Mitra, Xiaolei Huang, Philip HS Torr, and Shi-Min Hu. Global contrast based salient region detection. IEEE transactions on pattern analysis and machine intelligence, 37(3):569­582, 2014.
+[5] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929, 2020.
+[6] Brendan Duke, Abdalla Ahmed, Christian Wolf, Parham Aarabi, and Graham W Taylor. Sstvos: Sparse spatiotemporal transformers for video object segmentation. arXiv preprint arXiv:2101.08833, 2021.
+[7] Mark Everingham, Luc Van Gool, Christopher KI Williams, John Winn, and Andrew Zisserman. The pascal visual object classes (voc) challenge. International journal of computer vision, 88(2):303­338, 2010.
+[8] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 770­778, 2016.
+[9] Yuan-Ting Hu, Jia-Bin Huang, and Alexander G Schwing. Videomatch: Matching based video object segmentation. In Proceedings of the European conference on computer vision (ECCV), pages 54­70, 2018.
+[10] Xuhua Huang, Jiarui Xu, Yu-Wing Tai, and Chi-Keung Tang. Fast video object segmentation with temporal aggregation network and dynamic template matching. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8879­8889, 2020.
+[11] Joakim Johnander, Martin Danelljan, Emil Brissman, Fahad Shahbaz Khan, and Michael Felsberg. A generative appearance model for end-to-end video object segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8953­8962, 2019.
+[12] Harold W Kuhn. The hungarian method for the assignment problem. Naval research logistics quarterly, 2(1-2):83­97, 1955.
+[13] Zihang Lai, Erika Lu, and Weidi Xie. Mast: A memory-augmented self-supervised tracker. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6479­6488, 2020.
+[14] Bo Li, Junjie Yan, Wei Wu, Zheng Zhu, and Xiaolin Hu. High performance visual tracking with siamese region proposal network. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 8971­8980, 2018.
+[15] Yin Li, Xiaodi Hou, Christof Koch, James M Rehg, and Alan L Yuille. The secrets of salient object segmentation. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 280­287, 2014.
+[16] Yu Li, Zhuoran Shen, and Ying Shan. Fast video object segmentation using the global context module. In European Conference on Computer Vision, pages 735­750. Springer, 2020.
+[17] Yuxi Li, Ning Xu, Jinlong Peng, John See, and Weiyao Lin. Delving into the cyclic mechanism in semi-supervised video object segmentation. arXiv preprint arXiv:2010.12176, 2020.
+[18] Yongqing Liang, Xin Li, Navid Jafari, and Qin Chen. Video object segmentation with adaptive feature bank and uncertain-region refinement. arXiv preprint arXiv:2010.07958, 2020.
+[19] Huaijia Lin, Xiaojuan Qi, and Jiaya Jia. Agss-vos: Attention guided single-shot video object segmentation. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 3949­3957, 2019.
+[20] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays, Pietro Perona, Deva Ramanan, Piotr Dollár, and C Lawrence Zitnick. Microsoft coco: Common objects in context. In European conference on computer vision, pages 740­755. Springer, 2014.
+[21] Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. arXiv preprint arXiv:1711.05101, 2017.
+[22] Xinkai Lu, Wenguan Wang, Martin Danelljan, Tianfei Zhou, Jianbing Shen, and Luc Van Gool. Video object segmentation with episodic graph memory networks. arXiv preprint arXiv:2007.07020, 2020.
+[23] Jonathon Luiten, Paul Voigtlaender, and Bastian Leibe. Premvos: Proposal-generation, refinement and merging for video object segmentation. In Asian Conference on Computer Vision, pages 565­580. Springer, 2018.
+10
+
+[24] Seoung Wug Oh, Joon-Young Lee, Kalyan Sunkavalli, and Seon Joo Kim. Fast video object segmentation by reference-guided mask propagation. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 7376­7385, 2018.
+[25] Seoung Wug Oh, Joon-Young Lee, Ning Xu, and Seon Joo Kim. Video object segmentation using spacetime memory networks. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 9226­9235, 2019.
+[26] Federico Perazzi, Jordi Pont-Tuset, Brian McWilliams, Luc Van Gool, Markus Gross, and Alexander Sorkine-Hornung. A benchmark dataset and evaluation methodology for video object segmentation. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 724­732, 2016.
+[27] Jordi Pont-Tuset, Federico Perazzi, Sergi Caelles, Pablo Arbeláez, Alex Sorkine-Hornung, and Luc Van Gool. The 2017 davis challenge on video object segmentation. arXiv preprint arXiv:1704.00675, 2017.
+[28] Andreas Robinson, Felix Jaremo Lawin, Martin Danelljan, Fahad Shahbaz Khan, and Michael Felsberg. Learning fast and robust target models for video object segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7406­7415, 2020.
+[29] Hongje Seong, Junhyuk Hyun, and Euntai Kim. Kernelized memory network for video object segmentation. In European Conference on Computer Vision, pages 629­645. Springer, 2020.
+[30] Mingjie Sun, Jimin Xiao, Eng Gee Lim, Bingfeng Zhang, and Yao Zhao. Fast template matching and update for video object tracking and segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10791­10799, 2020.
+[31] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762, 2017.
+[32] Paul Voigtlaender, Yuning Chai, Florian Schroff, Hartwig Adam, Bastian Leibe, and Liang-Chieh Chen. Feelvos: Fast end-to-end embedding learning for video object segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9481­9490, 2019.
+[33] Paul Voigtlaender and Bastian Leibe. Online adaptation of convolutional neural networks for video object segmentation. arXiv preprint arXiv:1706.09364, 2017.
+[34] Paul Voigtlaender, Jonathon Luiten, Philip HS Torr, and Bastian Leibe. Siam r-cnn: Visual tracking by re-detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6578­6588, 2020.
+[35] Huiyu Wang, Yukun Zhu, Hartwig Adam, Alan Yuille, and Liang-Chieh Chen. Max-deeplab: End-to-end panoptic segmentation with mask transformers. arXiv preprint arXiv:2012.00759, 2020.
+[36] Qiang Wang, Li Zhang, Luca Bertinetto, Weiming Hu, and Philip HS Torr. Fast online object tracking and segmentation: A unifying approach. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1328­1338, 2019.
+[37] Yuqing Wang, Zhaoliang Xu, Xinlong Wang, Chunhua Shen, Baoshan Cheng, Hao Shen, and Huaxia Xia. End-to-end video instance segmentation with transformers. arXiv preprint arXiv:2011.14503, 2020.
+[38] Ziqin Wang, Jun Xu, Li Liu, Fan Zhu, and Ling Shao. Ranet: Ranking attention network for fast video object segmentation. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 3978­3987, 2019.
+[39] Haozhe Xie, Hongxun Yao, Shangchen Zhou, Shengping Zhang, and Wenxiu Sun. Efficient regional memory network for video object segmentation. arXiv preprint arXiv:2103.12934, 2021.
+[40] Ning Xu, Linjie Yang, Yuchen Fan, Jianchao Yang, Dingcheng Yue, Yuchen Liang, Brian Price, Scott Cohen, and Thomas Huang. Youtube-vos: Sequence-to-sequence video object segmentation. In Proceedings of the European Conference on Computer Vision (ECCV), pages 585­601, 2018.
+[41] Yinda Xu, Zeyu Wang, Zuoxin Li, Ye Yuan, and Gang Yu. Siamfc++: Towards robust and accurate visual tracking with target estimation guidelines. In Proceedings of the AAAI Conference on Artificial Intelligence, pages 12549­12556, 2020.
+[42] Bin Yan, Houwen Peng, Jianlong Fu, Dong Wang, and Huchuan Lu. Learning spatio-temporal transformer for visual tracking. arXiv preprint arXiv:2103.17154, 2021.
+[43] Zongxin Yang, Yunchao Wei, and Yi Yang. Collaborative video object segmentation by foregroundbackground integration. In European Conference on Computer Vision, pages 332­348. Springer, 2020.
+11
+
+

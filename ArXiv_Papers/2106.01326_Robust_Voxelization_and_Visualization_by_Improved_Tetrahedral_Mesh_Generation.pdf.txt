@@ -1,0 +1,536 @@
+Robust Voxelization and Visualization by Improved Tetrahedral Mesh Generation
+
+Joseph Chen Graduate Institute of Networking and Multimedia, National Taiwan University
+
+Ko-Wei Tai Department of Computer Science and Information
+Engineering, National Taiwan University
+
+Wen-Chin Chen Department of Computer Science and Information
+Engineering, National Taiwan University
+
+Ming Ouhyoung Department of Computer Science and Information
+Engineering, National Taiwan University
+
+Abstract--When obtaining interior 3D voxel data from triangular meshes, most existing methods fail to handle low quality meshes which happen to take up a big portion on the internet. In this work we present a robust voxelization method that is based on tetrahedral mesh generation within a user defined error bound. Compared to other tetrahedral mesh generation methods, our method produces much higher quality tetrahedral meshes as the intermediate outcome, which allows us to utilize a faster voxelization algorithm that is based on a stronger assumption. We show the results compared to various methods including the state-of-the-art.
+Our contribution includes a framework which takes triangular mesh as an input and produces voxelized data, a proof to an unproved algorithm that performs better than the state-of-the-art, and various experiments including parallelization built on the GPU and CPU. We further tested our method on various datasets including Princeton ModelNet and Thingi10k to show the robustness of the framework, where near 100% availability is achieved, while others can only achieve around 50%.
+Keywords--voxelization, geometry
+1. INTRODUCTION
+Just as pixels are important in 2D graphics, voxel representation plays an important role in 3D graphics. It has welcoming natures such as the ease to perform binary operations and is particularly ideal for simulations when per-element simulation is needed. Voxelized data can be further categorized into solid and surface data. The solid binary voxel representation, which this work is going to focus on, is arguably the most accurate and intuitive data structure for 3D models(Figure 1). However, due to its sparse nature, most 3D models are not stored in voxel forms for its storage cost is too expensive.
+The demand on solid voxelized data has grown tremendously these days with techniques such as 3D printing and 3DCNN, which is growing popular at a thundering pace. In comparison to generating their own voxelized data, alternatively, researchers often gather triangular surface meshes and voxelize them using a pipeline. However, a big portion of triangular mesh data in the internet isn't produced by professionals and includes flaws making current data gathering pipeline tools easy to stall.
+Researchers has been performing this pipelining process by first generating tetrahedral mesh to obtain space information, then voxelizing the tetrahedral mesh according to whether the sampling point is within a tetrahedral or not. This method is precise and can somewhat solve the flawed mesh problem depending on the tetrahedral mesh generating algorithm used. In other words, a nicely voxelized solid model heavily relies on a nice tetrahedral mesh of that model.
+In this paper we present a robust framework that can successfully voxelize nearly 100% of our testing data. Furthermore, our work voxelizes tetrahedral mesh faster than other methods on the assumption that tetrahedral mesh will have nice quality. Detailed experiment and results are given in §5.
+
+XXX-X-XXXX-XXXX-X/XX/$XX.00 ©2021
+
+While surveying for related works, we noticed that (Ogayar-Anguita et al., 2020) has recently presented a work with similar scope and impressive outcomes. It integrated with the GPU through GLSL, making the work independent from GPU vendors. However, as they mentioned in their framework, the model needs to be topologically closed for their algorithm to work. In the rest of the context, we consider their work as the state of the art so far, and we will cover other related papers in the following section.
+2. RELATED WORK Overview
+Related work of this paper can be briefly divided into three fields of research. Voxelization methods regard all work that are popular to this work, which includes surface and solid voxelization methods, as well as dense and sparse voxelization methods. Mesh repair techniques hold an important part in our work, making it possible to handle imperfect meshes, which is the backbone of the robustness issue in our system. Tetrahedral mesh generation processes the surface triangle mesh into solid meshes containing volume information. It is also somewhat involved in both mesh repair and voxelization. Voxelization
+Voxelization methods, that dates back to (Lee & Requicha, 1982), has different focuses along its evolution due to hardware capabilities. Early in the 1990s, research focused on providing accurate and robust results. The attention had moved on to time efficient processing since (Dong et al., 2004). Various works pioneered by works of (Eisemann & Décoret, 2008), (Jia et al., 2007) has pushed the field further as a popular research topic for computer graphics.
+The amount of different approaches to achieve this task is remarkable. Starting from conventional approaches such as those presented in (Stolte & Kaufman, 2001) (Sramek & Kaufman, 1999) (Huang et al., 1998), and (Haumont & Warzée, 2002), (Rueda et al., 2004) presents a scan plane/line method for both solid and surface voxelization. (Eisemann & Décoret, 2008) uses the slicemap algorithm from their previous work (Eisemann & Décoret, 2006). (An algorithm different from (Barbier et al., 2018)'s sliceMap for medical rasterizations.)
+Forest et al. (2009) presented a surface voxelization using octrees that runs in real time. (Nesme et al., 2009) presents an irregular hexahedral structure, and Fang and Chen (Fang & Chen, 2000) presents one of the most cited work using slice-based rasterization in the standard rendering pipeline.
+The most related studies from our work includes (Gascon et al., 2013) and (Ogayar-Anguita et al., 2020), using tetrahedral mesh rasterization which successfully produced better outcomes than that of other methods. (Ogayar-Anguita et al., 2020), proposed a parallelized method that takes no assumption of the GPU vendor running on the target machine.
+
+Mesh Reconstruction
+The eagerness to obtain a better model has existed ever since 3D models are created. The attention has only grown bigger and bigger after the invention of 3D printers. (Üçoluk & Toroslu, 1999) introduced an algorithm to match non-overlapping curves. (Okada et al., 2008) and (Fürnstahl et al., 2012) fetched information from overlapping fragments as additional restrictions to enhance the quality of the result.
+Some newer research includes machine learning approaches (Pan et al., 2019) (Kong et al., 2021). These methods are fast and robust, but may produce noise which is fatal for voxelizing. (Idram et al., 2019) employed an algorithm especially for bone models, using an AABB structure to reach efficiency. There is another work on biological tissues, (Garcia et al., 2018) furthermore examined into the materials used in 3D printing to mimic living organisms. (Hu et al., 2018) achieved superior results by taking account of a user defined -envelope while transforming the surface mesh into a solid tetrahedral mesh, which is ideal for voxelization and will be introduced in the next section.
+Tetrahedral Mesh generation
+To voxelize, or 3D rasterize, over generated tetrahedral mesh is by far the most intuitive and accurate method to perform voxelization. The state of the art method (Ogayar-Anguita et al., 2020) also uses this approach. The tetrahedral mesh generated by their method connects every triangle facet to the calculated centroid of the model, which naturally produces faulty tetrahedral meshes and is undesired in models with more faces. Better tetrahedral mesh generating techniques include Delaunay triangulation and background grid insertions.
+The most studied method of tetrahedral mesh generation is to perform a 3D Delaunay triangulation. Due to its accuracy and well optimized structure, it is also the most widely used method in commercial software. (Alliez et al., 2005; Aurenhammer, 1991; Aurenhammer et al., 2013; Boissonnat & Cazals, 2002; Boissonnat & Oudot, 2005; Busaryev et al., 2009; Si & Shewchuk, 2014)
+Grid insertion is another popular method on tetrahedral mesh generation, and the same concept is also used in voxelization. Grid insertion is intuitive in both tetrahedral mesh generation and voxelization. The to be processed model is inserted into a grid of neat, tidy shapes (either tetrahedral or cubes), aligned by its bounding box.
+These algorithms produce good results in the interior of meshes but suffer from accuracy and quality around the boundary. It is also computationally expensive when handling sparse models. However, by combining this idea with other methods like Delaunay triangulation, we are able to create quality mesh while maintaining the process speed.
+
+3. METHOD This work is inspired by the works (Hu et al., 2020) (Alrawy & Ali, 2020), which we will give a brief review in the upcoming sections. The outline of our proposed method is illustrated in Figure 2. Tetrahedral Mesh generating In order to obtain a valid tetrahedral mesh, we adapted the method of (Hu et al., 2020), which is based on a background mesh insertion with mesh improvement processing both before and after the insertion process. This tetrahedral mesh generation algorithm requires a user defined  as an input.  indicates the user's tolerance towards errors. An obvious artifact that the paper also demonstrates suggests that the same  also decides the amount of zigzag edges the algorithm will produce when dealing with straight lines (Figure 3). We found out that the error in setting  to as much as 1e-2, which is 10 times the default value, still isn't large enough to produce a major difference when voxelized. Furthermore, slight differences produced by setting the error bound larger can be efficiently used as a data augmentation technique for 3DCNNs.
+Voxelization Also known as 3D rasterization, this process is made to be implemented closely related to the types of
+GPU. By the tetrahedral mesh generation step we previously went through, we do not need to rely on water tightness or even topologically closed. Furthermore, since we have tetrahedral mesh with a quality exceeding previous works, we adapt a faster algorithm that assumes the tetrahedral mesh to have a large minimum angle, no overlapping, and with small variance.
+We iterate over every bounding box of the tetrahedral and apply the fastest point-in-tetrahedral test algorithm accordingly. Phillip B's algorithm was invented in June 2020 but was left unproven in correctness until the point this paper is written. As a part of the proof of the robustness, we would show our proof in §4. Parallelization
+We implemented our parallelization with OpenMP and CUDA. Since loading the data into GPU memory takes up resources, voxelizing models with a smaller tetrahedral count in GPU isn't guaranteed to be significantly faster. We pick a few models from the thingi10k dataset that has an order difference of tetrahedral count to illustrate the overhead in GPU memory copying (Table 1).
+
+Vertices Triangles Tetrahedral Nodes
+
+CPU
+
+CPU+GPU
+
+1.3*10^6 2.7*10^6
+
+10^7
+
+1.3*10^6
+
+98.931s
+
+9.77s
+
+4.8*10^4
+
+10^5
+
+10^6
+
+2.7*10^5
+
+2.947s
+
+2.776s
+
+10^4
+
+2*10^4
+
+10^5
+
+2.7*10^4
+
+0.503s
+
+1.665s
+
+Table 1. Comparison of GPU parallelization. The models are voxelized into a 2563 binary 3D grid.
+
+4. PHILIPP B'S ALGORITHM
+Philipp B's algorithm plays a crucial role in sampling voxel points from tetrahedral meshes. It was first brought up by Philipp Beisel in (Beisel, 2020). Although it was measured to be faster than all other algorithms with the same purpose, the correctness of the algorithm was left unproven.
+We will start the proof by first defining the theorem.
+
+Theorem 1
+
+Let there be arbitrary points P, A, B, C, D in 3D Cartesian coordinates and
+
+
+
+
+
+
+
+
+
+ = ,  = ,  = ,  = 
+
+Point P lies in the interior of the tetrahedral spanned by the four arbitrary points ABCD if and only if one
+
+of the two formula holds:
+
+ > 0   < 0   > 0   < 0
+
+
+
+
+
+
+
+
+
+or
+
+ < 0   > 0   < 0   > 0
+
+
+
+
+
+
+
+
+
+Where,
+
+ denotes the determinant of  = {b, c, d}, the matrix whose row vectors are b, c, d,
+
+
+
+
+
+ denotes the determinant of  = {a, c, d}, the matrix whose row vectors are a, c, d,
+
+
+
+
+
+ denotes the determinant of  = {a, b, d}, the matrix whose row vectors are a, b, d,
+
+
+
+
+
+ denotes the determinant of  = {a, b, c}, the matrix whose row vectors are a, b, c.
+
+
+
+
+
+Proof We are going to complete the proof step by step through four lemmas.
+
+Lemma 1.1 There are 2 kinds of tetrahedral with the same vertices' names but opposite signed volumes.
+Proof
+Given a tetrahedral ABCD, consider triangle ABC viewing from the opposite direction of point D in regard to plane ABC. In other words, consider triangle ABC from the outer side of the tetrahedral. We define the tetrahedral type I if the vertices read ABC in counterclockwise order, and type II is the vertices read ACB in counterclockwise order, as in Fig 4.
+
+Since point D decides the orientation of triangle ABC, it is clear that Type I and Type II tetrahedral differ from each other. Additionally, since there is not a third way to represent triangle ABC and that point D decides the orientation, all tetrahedral lie in one of the two types provided. It is left to prove that they have opposite signed values.
+
+Recall that a signed volume of a tetrahedral can be calculated by one sixth of the determinant of the three vectors that span the tetrahedral, shown in Figure 5. Using the tetrahedral from Figure 4, we can get the following equations:
+
+   =    =
+
+  
+(  )
+6
+  
+(  )
+6
+
+It is clear that the two volumes can be obtained by exchanging two rows in the determinant of the other volume, which leads to an opposite signed volume.
+Lemma 1.2 If P lies in tetrahedral ABCD, then
+
+ > 0   < 0   > 0   < 0, or
+
+
+
+
+
+
+
+
+
+ < 0   > 0   < 0   > 0
+
+
+
+
+
+
+
+
+
+where  denotes the determinant of  = {b, c, d}, the matrix whose row vectors are b, c, d,
+
+
+
+
+
+ denotes the determinant of  = {a, c, d}, the matrix whose row vectors are a, c, d,
+
+
+
+
+
+ denotes the determinant of  = {a, b, d}, the matrix whose row vectors are a, b, d,
+
+
+
+
+
+ denotes the determinant of  = {a, b, c}, the matrix whose row vectors are a, b, c,
+
+
+
+
+
+holds.
+
+Proof
+We will prove this lemma by going through all possible outcomes. Recall that the signed volume of a tetrahedral is determined by the right-hand rule. Since we have only two types of tetrahedral, we will go through both of them and check if the lemma holds.
+
+By applying the right-hand rule to each tetrahedral PABC, PACD, PABD, and PBCD, we get the following results.
+
+Lemma 2.1
+
+If  > 0   < 0   > 0   < 0,
+
+
+
+
+
+
+
+
+
+or  < 0   > 0   < 0   > 0
+
+
+
+
+
+
+
+
+
+Holds, the plane P and any 2 vertices form divide the other 2 into different sides of the plane.
+
+Proof 1.  = det(abc) = - det(bac) = det(bca)
+
+
+ = det(bcd),
+
+
+We know that  and  have different signs, meaning that a and d must point towards different sides of
+
+
+
+
+
+the plane b and c spans, by the right-hand rule. Thus, gives us the fact that A and D are divided by plane
+
+PBC. Similar processes can be applied to other point sets.
+
+2.  = det(acd) = - det(adc)
+
+
+ = det(abd) = - det(adb).
+
+
+Since  and  have differ signs, B and C are divided by plane PAD by the right-hand rule.
+
+
+
+
+
+3.  = det(bcd) = - det(cbd) = det(cdb)
+
+
+ = det(acd) = - det(cad) = det(cda)
+
+
+Since  and  have differ signs, A and B are divided by plane PCD by the right-hand rule.
+
+
+
+
+
+4.  = det(bcd) = - det(bdc)
+
+
+ = det(abd) = - det(bad) = det(bda).
+
+
+Since  and  share the same signs, det(bdc) and det(bda) have differ signs. Thus, A and C are divided
+
+
+
+
+
+by plane PBD by the right-hand rule.
+
+5.  = det(acd)
+
+ = det(abc) = - det(acb).
+
+
+Since  and  share the same signs, det(acd) and det(acb) have differ signs. Thus, B and D are divided
+
+
+
+
+
+by plane PAC by the right-hand rule.
+
+6.  = det(abd)
+
+
+ = det(abc).
+
+
+Since  and  have differ signs, C and D are divided by plane PAB by the right-hand rule.
+
+
+
+
+
+Since all cases are proven correct, the plane P and any 2 vertices form divide the other 2 into different sides of the plane.
+Lemma 2.2 If P is not in the interior of ABCD, then there must be two vertices on the same side of which P and the other 2 vertices form.
+
+Proof Let P be a point outside of ABCD, we know that tetrahedral PABC, PABD, PACD, and PBCD must then have overlapping volumes. Without loss of generality, assume PABC and PABD have overlap volumes.
+
+Consider plane PAB, point C and D must be on the same side of PAB to overlap each other, thus completing the proof.
+
+From the four above lemmas, we complete the only if side by lemma 1.1 and 1.2, the if side from lemma 2.1 and 2.2.
+5. EXPERIMENTS AND RESULTS In this section we will illustrate some experimental results we accomplished using the presented work. We also compared our method to other algorithms to accentuate the robustness and capability of
+
+pipelining. Main experiments are based on an Intel i7-10700 CPU with 16GB memory, and an NVidia RTX 3080 with 10GB memory. The input/output operations are done on a Micron MX500 SSD.
+
+We compared our results with (Ogayar-Anguita et al., 2020). Table 2 shows the benchmark performance proposed by their paper. Each model is voxelized into 5 million samples, with a resolution of 2563. The entire framework is implemented in C++, running on Ubuntu 18.04.1, Intel Xeon CPU E5-2650, and an NVidia RTX8000. For testing the performance of the storage input and output, we used two RAID0 HDDs.
+
+Ours Ogayar-Anguita et al.
+
+GPU Voxelization
+
+0.102778h
+
+21.02h
+
+GPU-CPU transfers
+
+18.07917h
+
+16.28h
+
+GPU memory allocation
+
+412.0569h
+
+462.5h
+
+Table 2. Results on voxelizing into 5 million samples with an output resolution of 2563
+
+Testing Datasets
+We tested our method on various popular CAD models, including Princeton ModelNet40 and ModelNet10, also Thingi10k by (Zhou & Jacobson, 2016) for testing on non-manifold meshes. Figure shows some of our results. We compared our tetrahedral mesh generation method with the most widely used commercial software Tetgen(Si, 2015). 3000 models in Thingi10k are tested and the timeout is set to 20 minutes. Only if the tetrahedral mesh is generated within 20 minutes it would be further voxelized and verified as a successful voxelization.
+
+Ours
+
+Tetgen
+
+Timeout (20m)
+
+10
+
+46
+
+Fail to produce outcome
+
+8
+
+1183
+
+Overall success rate
+
+99.4%
+
+59.1%
+
+Table 3. Rate of successfully producing voxelized outcome tested on 3000 thingi10K models, using different tetrahedral mesh generation methods
+
+Error Bounds
+The  is a controllable parameter in the tetrahedral mesh generation algorithm. However, it has a big chance containing zigzags within the error bound when dealing to long straight lines/planes. This error can be smoothed out by the voxelization sampling process if the error bound is small enough. We experimented how small the error should be without major loss in. In the thingi10k dataset, we observed that the voxelization result doesn't differ much when  is less than 1e-2, and nearly identical results to the ground truth is produced when  is less than 1e-3.
+Octrees
+Due to its sparse nature, voxels are often calculated and stored in octree data formats. Since the tetrahedral in our work are relatively regular compared to existing methods, we generally have a good bounding box volume to tetrahedral volume ratio, which results in only a handful sample candidates. Even without the octree structure, our algorithm iterates over every tetrahedral faster than other algorithms iterating over each sample point.
+
+6. CONCLUSION, DISCUSSION AND FUTURE WORK
+In this paper we presented a robust 3D surface mesh voxelization method that is suit for pipelining over dirty meshes found in the wild. It handles even non-manifold, non-watertight models. We also provided a proof to a point in the tetrahedral algorithm that had its correctness unproved. As an addition to the above contributions, we also included parallel specs and experiment results for various tweaks.
+On the downside of the method, this two-pass structure leads to a result slower than the state of the art right now. Currently we complete the tetrahedral mesh generation part before performing our voxel sampling. We believe that there is space for optimization by combining the background grid insertion method in tetrahedral mesh generation with the grid method for voxelization sampling. Transferring our algorithm to a GLSL based parallelization, excluding the GPU vendor constraint is also a future work of ours.
+We also have application ideas about connecting to 3DCNN and data augmenting, but consider them out of the scope of this paper.
+REFERENCES
+Alliez, P., Cohen-Steiner, D., Yvinec, M., & Desbrun, M. (2005). Variational tetrahedral meshing. In ACM SIGGRAPH 2005 Papers (pp. 617-625).
+Alrawy, S. N., & Ali, F. H. (2020). Voxelization Parallelism Using CUDA Architecture. Al-Rafidain Engineering Journal (AREJ), 25(1), 1-11.
+Aurenhammer, F. (1991). Voronoi diagrams--a survey of a fundamental geometric data structure. ACM Computing Surveys (CSUR), 23(3), 345-405.
+Aurenhammer, F., Klein, R., & Lee, D.-T. (2013). Voronoi diagrams and Delaunay triangulations. World Scientific Publishing Company.
+Barbier, M., Bottelbergs, A., Nuydens, R., Ebneth, A., & De Vos, W. H. (2018). SliceMap: an algorithm for automated brain region annotation. Bioinformatics, 34(4), 718-720.
+Beisel, P. (2020, June, 18, 2020). How to check whether the point is in the tetrahedron or not? https://stackoverflow.com/a/61703017
+Boissonnat, J.-D., & Cazals, F. (2002). Smooth surface reconstruction via natural neighbour interpolation of distance functions. Computational Geometry, 22(1-3), 185-203.
+Boissonnat, J.-D., & Oudot, S. (2005). Provably good sampling and meshing of surfaces. Graphical Models, 67(5), 405-451.
+Busaryev, O., Dey, T. K., & Levine, J. A. (2009). Repairing and meshing imperfect shapes with Delaunay refinement. 2009 SIAM/ACM Joint Conference on Geometric and Physical Modeling,
+Dong, Z., Chen, W., Bao, H., Zhang, H., & Peng, Q. (2004). Real-time voxelization for complex polygonal models. 12th Pacific Conference on Computer Graphics and Applications, 2004. PG 2004. Proceedings.,
+Eisemann, E., & Décoret, X. (2006). Fast scene voxelization and applications. Proceedings of the 2006 symposium on Interactive 3D graphics and games,
+Eisemann, E., & Décoret, X. (2008). Single-pass gpu solid voxelization and applications. GI'08: Proceedings of Graphics Interface 2008,
+Fürnstahl, P., Székely, G., Gerber, C., Hodler, J., Snedeker, J. G., & Harders, M. (2012). Computer assisted reconstruction of complex proximal humerus fractures for preoperative planning. Medical image analysis, 16(3), 704-720.
+Fang, S., & Chen, H. (2000). Hardware accelerated voxelization. Computers & Graphics, 24(3), 433-442.
+Forest, V., Barthe, L., & Paulin, M. (2009). Real-time hierarchical binary-scene voxelization. journal of graphics, gpu, and game tools, 14(3), 21-34.
+Garcia, J., Yang, Z., Mongrain, R., Leask, R. L., & Lachapelle, K. (2018). 3D printing materials and their use in medical education: a review of current technology and trends for the future. BMJ
+
+Simulation
+
+and
+
+Technology
+
+Enhanced
+
+Learning,
+
+4(1),
+
+27-40.
+
+https://doi.org/10.1136/bmjstel-2017-000234
+
+Gascon, J., Espadero, J. M., Perez, A. G., Torres, R., & Otaduy, M. A. (2013). Fast deformation of
+
+volume data using tetrahedral mesh rasterization. Proceedings of the 12th ACM
+
+SIGGRAPH/Eurographics Symposium on Computer Animation,
+
+Haumont, D., & Warzée, N. (2002). Complete Polygonal Scene Voxelization. Journal of Graphics Tools,
+
+7(3), 27-41. https://doi.org/10.1080/10867651.2002.10487563
+
+Hu, Y., Schneider, T., Wang, B., Zorin, D., & Panozzo, D. (2020). Fast tetrahedral meshing in the wild.
+
+ACM Transactions on Graphics (TOG), 39(4), 117: 111-117: 118.
+
+Hu, Y., Zhou, Q., Gao, X., Jacobson, A., Zorin, D., & Panozzo, D. (2018). Tetrahedral meshing in the
+
+wild. ACM Trans. Graph., 37(4), 60:61-60:14.
+
+Huang, J., Yagel, R., Filippov, V., & Kurzion, Y. (1998). An accurate method for voxelizing polygon
+
+meshes. IEEE symposium on volume visualization (Cat. No. 989EX300),
+
+Idram, I., Bintara, R. D., Lai, J.-Y., Essomba, T., & Lee, P.-Y. (2019). Development of mesh-defect
+
+removal algorithm to enhance the fitting of 3D-printed parts for comminuted bone fractures.
+
+Journal of Medical and Biological Engineering, 39(6), 855-873.
+
+Jia, J., Qin, Z., & Chen, J. (2007). A new method on voxelizing triangular mesh model. Information
+
+Technology Journal, 6(8), 1286-1289.
+
+Kong, F., Wilson, N., & Shadden, S. C. (2021). A Deep-Learning Approach For Direct Whole-Heart
+
+Mesh Reconstruction. arXiv preprint arXiv:2102.07899.
+
+Lee, Y. T., & Requicha, A. A. (1982). Algorithms for computing the volume and other integral properties
+
+of solids. II. A family of algorithms based on representation conversion and cellular
+
+approximation. Communications of the ACM, 25(9), 642-650.
+
+Nesme, M., Kry, P. G., Jeábková, L., & Faure, F. (2009). Preserving topology and elasticity for
+
+embedded deformable models. In ACM SIGGRAPH 2009 papers (pp. 1-9).
+
+Ogayar-Anguita, C. J., Rueda-Ruiz, A. J., Segura-Sánchez, R. J., Díaz-Medina, M., & García-Fernández,
+
+Á. L. (2020). A GPU-Based Framework for Generating Implicit Datasets of Voxelized Polygonal
+
+Models for the Training of 3D Convolutional Neural Networks. IEEE Access, 8, 12675-12687.
+
+Okada, T., Iwasaki, Y., Koyama, T., Sugano, N., Chen, Y.-W., Yonenobu, K., & Sato, Y. (2008).
+
+Computer-assisted preoperative planning for reduction of proximal femoral fracture using
+
+3-D-CT data. IEEE Transactions on Biomedical Engineering, 56(3), 749-759.
+
+Pan, J., Han, X., Chen, W., Tang, J., & Jia, K. (2019). Deep mesh reconstruction from single rgb images
+
+via topology modification networks. Proceedings of the IEEE/CVF International Conference on
+
+Computer Vision,
+
+Rueda, A. J., Segura, R. J., Feito, F. R., de Miras, J. R., & Ogáyar, C. (2004). Voxelization of solids using
+
+simplicial coverings.
+
+Si, H. (2015). TetGen, a Delaunay-based quality tetrahedral mesh generator. ACM Transactions on
+
+Mathematical Software (TOMS), 41(2), 1-36.
+
+Si, H., & Shewchuk, J. R. (2014). Incrementally constructing and updating constrained Delaunay
+
+tetrahedralizations with finite-precision coordinates. Engineering with Computers, 30(2),
+
+253-269.
+
+Sramek, M., & Kaufman, A. E. (1999). Alias-free voxelization of geometric objects. IEEE transactions
+
+on visualization and computer graphics, 5(3), 251-267.
+
+Stolte, N., & Kaufman, A. (2001). Novel techniques for robust voxelization and visualization of implicit
+
+surfaces. Graphical Models, 63(6), 387-412.
+
+Üçoluk, G., & Toroslu, I. H. (1999). Automatic reconstruction of broken 3-D surface objects. Computers
+
+& Graphics, 23(4), 573-582.
+
+Zhou, Q., & Jacobson, A. (2016). Thingi10k: A dataset of 10,000 3d-printing models. arXiv preprint
+
+arXiv:1605.04797.
+
+

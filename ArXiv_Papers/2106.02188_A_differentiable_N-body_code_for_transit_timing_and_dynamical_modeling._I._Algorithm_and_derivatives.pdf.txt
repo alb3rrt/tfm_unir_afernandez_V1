@@ -1,0 +1,4154 @@
+arXiv:2106.02188v1 [astro-ph.EP] 4 Jun 2021
+
+MNRAS 000, 1­24 (2020)
+
+Preprint 7 June 2021
+
+Compiled using MNRAS LATEX style file v3.0
+
+A differentiable N-body code for transit timing and dynamical modeling. I. Algorithm and derivatives.
+Eric Agol,1,2,3 David M. Hernandez,4,5 & Zachary Langford.1
+1Astronomy Department, University of Washington, Seattle, WA 98195, USA 2Institut d'Astrophysique de Paris, 98bis Boulevard Arago, Paris 75014, France 3Guggenheim Fellow 4Harvard­Smithsonian Center for Astrophysics, 60 Garden St., MS 51, Cambridge, MA 02138, USA 5Physics and Kavli Institute for Astrophysics and Space Research, Massachusetts Institute of Technology, 77 Massachusetts Ave., Cambridge, MA 02139, USA
+Accepted XXX. Received YYY; in original form ZZZ
+ABSTRACT When fitting -body models to astronomical data ­ including transit times, radial velocity, and astrometric positions at observed times ­ the derivatives of the model outputs with respect to the initial conditions can help with model optimization and posterior sampling. Here we describe a general-purpose symplectic integrator for arbitrary orbital architectures, including those with close encounters, which we have recast to maintain numerical stability and precision for small step sizes. We compute the derivatives of the -body coordinates and velocities as a function of time with respect to the initial conditions and masses by propagating the Jacobian along with the -body integration. For the first time we obtain the derivatives of the transit times with respect to the initial conditions and masses using the chain rule, which is quicker and more accurate than using finite differences or automatic differentiation. We implement this algorithm in an open source package, NbodyGradient.jl, written in the Julia language, which has been used in the optimization and error analysis of transit-timing variations in the TRAPPIST-1 system. We present tests of the accuracy and precision of the code, and show that it compares favorably in speed to other integrators which are written in C. Key words: Planetary systems; planets and satellites: dynamical evolution and stability
+
+1 INTRODUCTION
+The gravitational -body problem refers to the integration of the positions and velocities of a set of  point-particles forward or backward in time using Newton's equations, after specifying their masses and initial phase-space coordinates. The solution of the -body problem can be put to many uses, for example, matching observational data on a set of astronomical bodies, estimating the long-term stability or sensitivity to initial conditions of a model system, or determining the outcome of interactions between bodies.
+For each of these applications, it can be beneficial to be able to compute the derivatives of the state of the system at a given time with respect to the initial conditions and masses. As the N-body problem is highly non-linear, non-linear optimizers are needed to find the model parameters with the maximum a posteriori probability (MAP), or maximum likelihood estimate. Derivative-free optimization, such as Nelder-Mead, can be slow to converge, and typically becomes less efficient as the number of dimensions grows. Hence, derivatives can significantly speed up the process of optimization. Once the MAP is found, the Hessian can be computed with derivatives to estimate the uncertainties on parameters. Then, each parameter can be varied along a fixed grid, and the non-linear optimization can be re-run to trace out the likelihood profile. Finally, the posterior can be sampled
+ E-mail: agol uw.edu (EA)
+© 2020 The Authors
+
+using Bayesian techniques which take advantage of derivatives to improve the efficiency of the sampling in high dimensions.
+Finite-difference derivatives can be easy to compute numerically; however, finite-differences are computationally expensive and limited by numerical precision. The computation of derivatives along with N-body integration can yield higher precision with less computation time, enabling more effective application of non-linear optimization and parameter uncertainty estimation. This calculation can be laborious, involving propagating derivatives through each time step of an integration, but the result can be much more computationally efficient and accurate relative to computing derivatives with finite differences.
+The calculation of derivatives of the -body problem has been investigated in prior work. Mikkola & Innanen (1999) and Rein & Tamayo (2015) derive the variational equations of the symplectic integrator of Wisdom & Holman (1991) , the "WH" method, to obtain the tangent map of an -body system as a function of time, from which the positional variations may be derived as a function of variations in the initial phase-space coordinates. This is implemented in the WHF integrator in the REBOUND package based on the Wisdom-Holman method (Rein & Tamayo 2015). Secondorder variational equations were derived by Rein & Tamayo (2016) for a high-order integrator ( 15) which is assumed to exactly solve the -body equations. Pál (2010) used a Lie-integration scheme, including derivatives with respect to the initial orbital elements and
+
+2 E. Agol et al.
+
+masses, to fit for planet-planet perturbations in radial-velocity detected systems.
+1.1 Algorithm
+The purpose of this paper is to implement first-order derivatives in a symplectic integrator, including the mass derivatives, and allowing for a system hierarchy which is more general than standard symplectic integrators, and which includes derivatives of the transit times with respect to the initial conditions, which is currently absent in the literature. Instead of using the variational equations, which assume exact solution of the -body problem for obtaining the derivatives, we compute the derivatives of the -body symplectic map, with the goal of yielding a more precise result for the Jacobian of the state of the system at a given time with respect to the specified initial conditions. Although the Rein & Tamayo (2016) integrator could have been put to use for this problem, we are interested in developing a complementary code which trades generality and precision for potentially more speed.
+The basic integrator we use has been described in two prior papers: Hernandez & Bertschinger (2015) and Dehnen & Hernandez (2017). The novel aspect underlying the integrator is to allow all bodies to be treated on equal footing. A universal Kepler solver (Wisdom & Hernandez 2015) is used to integrate pairs of bodies with Keplerian drifts forwards in time, interspersed with constant-velocity corrections which are negative in time, while using operator splitting to create a symplectic and time-symmetric integrator out of the original concept proposed by Gonçalves Ferrari et al. (2014). A potential advantage of this approach is the adaptability to different problems with various geometries, such as hierarchical triples, pairs of binaries, or other more complex hierarchies (Hamers & Portegies Zwart 2016). The popular Wisdom­Holman method, and its variants, which use different coordinates and Hamiltonian splittings (Hernandez & Dehnen 2017) assume that there is a dominant mass and widely separated planets. For general applications, these assumptions can be too constraining.
+A drawback of this integrator is the potential for numerical cancellation errors to accumulate due to alternating negative and positive time steps which are a necessary part of the algorithm. In developing this code, we found that these cancellations caused numerical errors which accrue in proportion to the number of time steps. This becomes more significant when the time steps are short, as more steps are required for a given integration time. We have rectified this problem by combining the negative and positive time steps into a single step, and cancelling the terms analytically, which we find reduces the numerical errors significantly. Thus, another goal of this paper is to describe this improved integrator.
+1.2 Motivation: TTVs and photodynamics
+The particular application we have in mind is the detection and characterization of exoplanet systems. Planetary interactions become important when data are of high precision, or if integrations are carried out on long timescales to study system stability. The first example of non-Keplerian interactions being important was the pulsar exoplanet system PSR 1257+12 (Wolszczan & Frail 1992). As had been predicted, the interactions of the planets were detected in the pulsar timing, and then used to confirm the planetary nature of the system, as well as measure the inclinations and masses of the planets by breaking the mass-inclination degeneracy which accompanies Doppler shifts (Rasio et al. 1992; Malhotra et al. 1992; Peale 1993; Wolszczan
+MNRAS 000, 1­24 (2020)
+
+1994). Second, high-precision radial-velocity measurements of exoplanet systems also require accounting for planet-planet interactions. An early example of this is GJ 876, which required an -body integration to match the observed stellar radial velocity instead of treating the radial velocity signal as a sum of unperturbed Keplerians (Laughlin & Chambers 2001). Third, the Kepler spacecraft yielded sufficient precision of the times of transit of exoplanets to produce a novel means of detecting and characterizing exoplanets: transittiming variations (TTVs; Holman & Murray 2005; Agol et al. 2005). The Kepler-9 planet system showed strong anti-correlated variations in the times of transit relative to a fixed ephemeris, which allows for measurement of the planet masses (Holman et al. 2010; Freudenthal et al. 2018; Borsato et al. 2019). Currently, several planets have been detected with TTVs, while hundreds have been characterized (see Agol & Fabrycky 2017; Jontof-Hutter 2019, and references therein).
+Transit-timing variations are entirely due to non-Keplerian motion of the planetary orbits. In the Newtonian two-body problem, transits occur at regular intervals, and so the transit times are uniformly spaced in time with the orbital period of the system. When three or more bodies interact, each pair of bodies no longer follows a Keplerian orbit, but is perturbed by the other bodies in the system. In the planetary case, the perturbations of the times of transit by other planets are typically small compare with the orbital period of the planet. TTVs are defined as the residuals of a linear fit to the times of transit (Agol et al. 2005), and so by definition TTVs are imparted by non-Keplerian motion. Consequently, the presence of TTVs typically requires an -body model for the computation of the times of transit.
+The advent of the detection of TTVs spurred theoretical models for short-term planetary dynamics. Analytic prescriptions exist for transit-timing variations (e.g. Agol et al. 2005; Nesvorný & Beaugé 2010; Lithwick et al. 2012; Nesvorný & Vokrouhlický 2014; Deck & Agol 2015; Agol & Deck 2016; Deck & Agol 2016; Nesvorný & Vokrouhlický 2016; Hadden & Lithwick 2016). However, the dynamics of multi-planet systems is sufficiently complex that any analytic prescription is only accurate in a confined region of parameter space and/or limited timescales, and generally needs to be checked against numerical integration since it is unknown beforehand whether these restrictions apply to the masses and orbital elements of a particular system (e.g. Deck & Agol 2015; Jontof-Hutter et al. 2016; Hadden & Lithwick 2017; Linial et al. 2018; Yoffe et al. 2021). On the other hand, numerical integration can be much more computationally expensive and can accrue numerical errors.
+When optimizing a TTV model, the gradient of the likelihood is often required to find the direction in which the variation of the initial conditions will improve the likelihood. The likelihood gradient in turn requires the gradient of each transit time with respect to the initial conditions. Often finite-differences are used to estimate this gradient; however, finite difference derivatives are limited by the numerical accuracy of the integration; see Rein & Tamayo (2016) regarding the drawbacks of finite-difference derivatives. This can cause difficulty in optimizing numerical TTV model fits. In addition, finite-differences are expensive to compute as at least two integrations are required for each parameter, and truncation or round-off errors can limit the precision. For planetary systems, this requires 14 integrations for  planets.
+Computing the posterior parameter distributions for observed systems requires numerous evaluations of the likelihood, which becomes difficult to explore for high-dimensional planetary systems due to the "curse of dimensionality" making grid-based and Markov-chain based integrations prohibitive. This can be ameliorated by Hamilto-
+
+Derivatives of TTVs 3
+
+nian Markov chains, which require computation of the derivatives of the likelihood function (Girolami & Calderhead 2011).
+Dynamical interactions have also been measured in systems where multiple stars are present. The triple-star KOI-126 was characterized with a "photodynamical" model (Carter et al. 2011), which requires coupling an -body code to a photometric model. The architecture of this system prohibits the use of a standard Wisdom-Holman type symplectic integrator to describe the dynamics as there is a binary star in orbit about a more massive star. Similarly, circumbinary planets, such as Kepler-16b, have been found which require a photodynamical model of the stars and planets (Doyle et al. 2011). One can imagine more complex geometries, such as a planet-moon pair orbiting a binary star, which would also require a photodynamical code to model. The computational expense of each of these models is significant, so that obtaining converged posterior parameters is a challenge. An advantage of photodynamical models is that the covariance between transit parameters and orbital parameters may be computed directly from the light curve.
+Given these observational modeling problems, the motivation for this code is to provide derivatives of a general -body integrator for short-term integrations to model stellar and planetary systems with arbitrary hierarchy, and to compute the derivatives of the model with respect to the initial conditions to allow for better optimization of the model likelihood and to explore parameter space more efficiently with Hamiltonian Markov chain Monte Carlo.
+In §2 we describe the original symplectic integrator algorithm, and discuss its numerical instability. In §3 we give the modifications to the algorithm we have made to prevent numerical cancellation. In §4 we introduce the derivatives of the algorithm. In §5 we describe the implementation and precision of the algorithm. In §6 we compare the algorithm with other -body integrators. Finally, in §7 we conclude.
+2 OVERVIEW OF SYMPLECTIC INTEGRATOR
+We carry out the -body integration with a symplectic integrator (Channell & Scovel 1991) which uses Kepler steps to integrate pairs of bodies, interspersed with constant velocity corrections, thus treating each and every body in an identical manner (Hernandez & Bertschinger 2015). The advantage of this approach relative to the WH method is that the integrator can be used as an all-purpose integrator for studying systems with a range of architectures. The integrator is especially powerful when binaries at any scale are present. A fourth-order corrector gives higher precision to this integrator without much additional computational cost (Dehnen & Hernandez 2017); hence, we refer to the algorithm as DH171 in what follows. DH17 is mathematically written by eq. (30) in Dehnen & Hernandez (2017), using  = 0. In Section 4.9 and Algorithm 2 we present a generalization of the method, described mathematically by eq. (40) in Dehnen & Hernandez (2017). This generalization is also referred to as DH17 as Dehnen & Hernandez (2017) also called both methods the same name. The methods described here are all time-reversible and time-symmetric (Hairer et al. 2006; Hernandez & Bertschinger 2018). We give an overview of DH17, along with transit-time finding, in algorithm 1, which uses a fixed time step, , from initial time 0 over a duration max.
+Unfortunately the DH17 algorithm is numerically unstable. Consequently, we have modified the DH17 algorithm, and present a
+1 In Dehnen & Hernandez (2017), this algorithm was called `DH16'. We have used `DH17' to reflect the publication year.
+
+modified algorithm, which we will refer to as AHL21, in which we combine pairs of steps of the DH17 algorithm into a single step. The AHL21 algorithm is mathematically identical to the DH17 algorithm; however, thanks to carrying out the cancellation analytically rather than numerically, it more numerically stable, as we describe in §3. But first we start by outlining the DH17 algorithm and its drawbacks.
+
+2.1 DH17 algorithm summary
+
+The original DH17 algorithm is given in Algorithm 1. The algorithm is derived from splitting the Hamiltonian into pairwise Keplerian terms,
+
+ =  +,
+
+ 
+
+= +
+
+  ,
+
+ >
+
+ 
+
+= +
+
+  -   ,
+
+(1)
+
+ >
+
+where  is the kinetic energy,  is the total potential energy, while   ,   , and   are the kinetic, potential, and total energy of a pair of bodies  and . The   term is the two-body Hamiltonian, whose solution amounts to a Keplerian orbit whose center of mass moves at a constant velocity, hence the notation "" (Hernandez & Bertschinger 2015). Note that the minus sign in front of the kinetic energy term indicates a backward drift in time.
+A symplectic integration is achieved by successively solving each component of the Hamiltoninan, using a Kepler solver and a simple drift, to give the positions and velocities at the start of the next component (Dehnen & Hernandez 2017). The creation of a secondorder map from this splitting of the Hamiltonian involves division of each time-step of duration  into two sub-steps of duration /2. In each of the substeps the order of application of the terms is reversed to cancel first-order error terms. In addition, a fourth-order velocity corrector is added in the middle of the time step, which amounts to applying tidal accelerations to the velocities which are neglected in the two-body elements of the Hamiltonian, yielding much higher precision without much additional computational effort; this results in Algorithm 1.
+As mentioned, there is an unfortunate drawback to the DH17 algorithm, which is the negative time step. In cases in which the potential energy term is small, the   and -  terms nearly cancel. What this means is that the motion induced by these terms in the mapping can be nearly equal and opposite, causing numerical cancellation which leads to roundoff errors which accumulate with time. This has two different causes. First, the center-of-mass portion of these Hamiltonians is identical, and thus cancels exactly (Dehnen & Hernandez 2017). Second, if the acceleration is weak, or the time step is short enough that the acceleration does not result in a significant change in velocity, then the Keplerian step is nearly inertial, and so entire Kepler step is very nearly equal and opposite to the negative drift. These two sources of cancellation can lead to numerical errors when implementing the algorithm. We found these errors to be severe for long integrations, for weakly interacting bodies (e.g. pairs of planets), or for very short time steps, which compounds the error more rapidly. We present a solution to this issue in the next section, which is our first main result.
+As a side-note, the DH17 algorithm differs in its accuracy from symplectic integrators typically used for planetary systems. Planetary sytems with a dominant mass are described by a Hamiltonian,
+
+ =  + ,
+
+(2)
+
+MNRAS 000, 1­24 (2020)
+
+4 E. Agol et al.
+Data: Initial Cartesian coordinates and masses at time  = 0. Result: Integration of -body system over time max, and
+resulting times of transit and derivatives. for  - 0 < max do
+Drift all particles for time /2; for all pairs of particles (, ) do
+Drift particles  and  for time -/2; Apply a Kepler solver to advance the relative coordinates of  and  by /2; Advance center of mass coordinates of  and  by /2; end
+Apply fourth-order velocity correction to all particles over time step ; for reversed pairs of particles (, ) do
+Apply a Kepler solver to advance the relative coordinates of  and  by /2; Advance center of mass coordinates of  and  by /2; Drift particles  and  for time -/2; end Drift all particles for time /2; if transit has occurred for particles  and  then Refine transit time, and save. end
+Increment time  by . end Algorithm 1: Transit times with DH17 symplectic integration
+where  1 in which the terms  and  are typically chosen to be integrable. For this Hamiltonian, the Wisdom­Holman method (WH) (Wisdom & Holman 1991) has been developed which carries an energy error of O ( 2)2, where  is the step size. In contrast, the DH17 algorithm is 4th order and its error is O ( 4). However, while WH assumes  1, DH17 does not require this assumption.
+
+3 THE MORE ACCURATE AHL21 ALGORITHM
+In this paper we present a modified version of the DH17 algorithm in which the negative drifts (-  ) and Keplerian steps (  ) are combined algebraically, so that leading order terms are cancelled by hand. This exact cancellation prevents the accumulation of round-off and truncation errors which occur when implementing the DH17 algorithm. We find that this approach gives a higher precision numerical algorithm yielding results that obey the expected 4 scaling of the algorithm down to machine precision on the timescales we have tested.
+To describe this new approach, we first need to summarize the application of these two sub-steps.
+
+3.1 Kinetic-energy drift
+
+The drift term is the most straightforward: each particle (for ) or pair of particles (for   ) simply drifts inertially,
+
+x ( + ) = x () + v (),
+
+(3)
+
+for a time-step , where x () and v () are, respectively, the position and velocity vectors of the th body at time . Again, note that - 
+in equation (1) indicates that  is negative.
+
+2 Different conventions are used for the scalings with  . In the convention of Hernandez & Dehnen (2017), the error scales as O (  22). In this convention, all scalings get an extra factor of  .
+MNRAS 000, 1­24 (2020)
+
+3.2 Universal Kepler step
+
+To carry out the   mapping, we use a universal Kepler solver to compute the change in the relative position between the bodies (Wisdom & Hernandez 2015). The Kepler solver uses a universal Kepler equation based upon the initial positions and velocities of a pair of bodies at the start of a step. The solution of Kepler's equation enables a mapping of the initial phase-space coordinates to the final phase-space coordinates after a time  assuming pairwise Keplerian motion (i.e. neglecting every other body in the system).
+The equation of motion in Cartesian coordinates derived from the   Hamiltonian for each Kepler step is given by
+
+x  = - x  ,
+
+(4)
+
+3
+
+
+
+where  =   ,   =  +   is the sum of the masses of the th and th pair of bodies, x  = x - x  , and   = |x  |. The universal
+solver transforms the time dependence to an independent variable, , defined by  = / = -1, where  is the distance between
+
+the bodies, which simplifies the equations of motion. In the rest of
+
+this section we drop the subscript   from the mass, coordinate and velocity vectors, i.e.  =   ,  =   , x  x  , and v  v  . We will refer to the Cartesian coordinates for the Keplerian as (x0, v0) at the start of a step and (x, v), a time  later.
+
+A Kepler step uses the fact that in the two-body problem angular
+
+momentum is conserved; thus the final relative positions and velocities of the two bodies, x and v, are in the same plane as the initial relative positions and velocities, x0 and v0, while the center-of-mass velocity remains constant and the center-of-mass position drifts at
+
+a constant rate as there are no external perturbers. This means that
+
+the final relative positions and velocities can be expressed as a linear
+
+combination of the initial relative velocities and positions,
+
+x =  x0 + v0
+
+v =  x0 + v0,
+
+(5)
+
+where  and  are Gauss's functions, which we define in more detail below as a function of x0, v0, , and , where  =  is the central force constant.
+Then, the equations describing the initial and final states are given
+by Wisdom & Hernandez (2015), based on Mikkola & Innanen (1999). We define 0 = |x0| is the initial separation, 0 = |v0| is the initial relative speed, and  = |x| ,  = |v| are the separation
+and relative speed at the end of the step. We define two additional
+quantities,
+
+0 = x0 · v0,
+
+(6)
+
+ = 2 - 2, 0 0
+
+(7)
+
+= 2 - 2.
+
+(8)
+
+
+
+Expressing the final positions and velocities in terms of the initial values requires the Gauss  and  functions, which are given by
+
+
+
+ = 1 - 0 2,
+
+(9)
+
+ = 01 + 02,
+
+(10)
+
+and their derivatives
+
+
+
+ = -0 1,
+
+(11)
+
+
+
+=
+
+1 
+
+(00
+
++
+
+01)
+
+,
+
+(12)
+
+where  (, ) are four functions whose definitions depend on the sign of  for  = 0, ..., 3 (Table 1). With these definitions, Wisdom &
+Hernandez (2015) show that
+
+ () = 00 + 01 + 2.
+
+(13)
+
+This equation may also be derived from conservation of angular momentum, requiring x0 ×v0 = x×v, which yields the condition  -   = 1; this equation is equivalent to equation (13). We transform these equations from  to  = ||1/2, as  is dimensionless. Equation
+(13) can be integrated over a time step, , to give an implicit Kepler's
+equation for ,
+
+ = 01 + 02 + 3,
+
+(14)
+
+which can be solved using Newton's method to find  as a function of , 0, 0, , and . The functions 0, 1, 2 and 3 are defined in Table 1 in terms of trigonometric and hyperbolic functions (Wisdom & Hernandez 2015), which differ based upon whether the bodies are bound (elliptic) or unbound (hyperbolic).3 As the  functions only depend upon  and , once  is found numerically, the remainder of the Kepler step simply involves algebraic computation.
+
+3.3 Combined Kepler and Drift step
+In the AHL21 algorithm these two steps, -  and   , are combined in different orders: either a negative drift followed by a Kepler step, -  +   , or a Kepler step followed by a negative drift,   -   (Algorithm 2). As these operations do not commute, we need to handle each one separately. A diagram showing the order of these mappings is given in Figure 1. In each case, the position coordinate takes on an intermediate value, which changes the nature of the combined steps.
+We describe these two options in the following subsections.
+
+3.3.1 Drift then Kepler (DK)
+
+In the first case, the negative drift is taken first, yielding an intermediate position
+
+x^0 = x0 - v0.
+
+(15)
+
+With this modified value of the initial position, the Gauss  , ,  , and  functions need to be computed from (x^0, v0, , ) after solution
+of Kepler's equation for , so we indicate these functions with a hat, e.g. ^   (x^0, v0, , ). In addition, we would like to find the difference between the final and initial coordinates, x = x^ - x0 and v = v^ - v0; this allows for a more accurate computation of
+these quantities when the step sizes are small. In the combined step,
+-Drift+Kepler (which we indicate with "DK"), the resulting term is
+
+xDK = ( ^ - 1)x0 + (^ -  ^)v0,
+
+vDK = ^x0 + (^ -  ^ - 1)v0,
+
+(16)
+
+where, again, ^, ^, ^, and ^ are all computed in terms of (x^0, v0, , ). The scalar functions in equation 16 are given in Appendix A.
+Note that in these equations the 1's are cancelled analytically; this yields more stable computation of the changes in the positions and velocities when these are small.
+
+Derivatives of TTVs 5
+
+3.3.2 Kepler then Drift (KD)
+
+In the other case, a Kepler step is applied first, followed by a neg-
+ative drift. The Kepler step can be computed in terms of the initial coordinates, x0 and v0, yielding intermediate coordinates (x, v), and then the negative drift is applied resulting in x = x - v (Figure 1).
+We combine these and take the difference with the initial coordinates, x  = x - v - x0 and v  = v - v0, to give the resulting difference vectors
+
+xKD = (  -   - 1)x0 + ( - )v0,
+
+vKD =  x0 + ( - 1)v0,
+
+(17)
+
+where  , ,  , and  are all computed in terms of (x0, v0, , ), and the "KD" indicates that the Kepler step precedes the negative drift, Kepler-Drift. The scalar functions in equation 17 are given in Appendix A.
+We take care that these functions are evaluated in a numericallystable manner to avoid round-off error due to cancellations between terms at small time steps. With the combination of the drift and Kepler steps, it turns out that we no longer need the drift of the center-ofmass coordinates in each Kepler step as these cancel exactly.
+Thus, the DH17 algorithm simplifies significantly at the expense of making the substeps slightly more complicated. This new combined algorithm we dub "AHL21", which is given in Algorithm 2. The fourth-order correction is the same as that given in Dehnen & Hernandez (2017), and is summarized in §4.8. The transit-time finding is described below in §4.11. An alternate version of the algorithm in which the combined drift and Kepler steps are replaced by a kick for some pairs of bodies is given in §4.7.
+
+Data: Initial Cartesian coordinates and masses at time  = 0. Result: Integration of -body system over time max, and
+resulting times of transit and derivatives. for  - 0 < max do
+Kick particles in  for time /6; Drift all particles for time /2; for pairs of particles (, ) in  do
+Apply a combined -Drift+Kepler step for bodies  and  over a time /2 to give the changes in position and velocity of x and v and update x  and v  ;
+end
+Apply velocity correction and a kick, both multiplied by 2/3, to particles in  ;
+Apply velocity correction to particles in ; for reversed pairs of particles (, ) in  do
+Apply a combined Kepler-Drift step for bodies  and  over a time /2 to give the changes in position and velocity of x  and v  and update x  and v  ; end Drift all particles for time /2;
+Kick particles in  for time /6; if transit has occurred for particles  and  then
+Refine transit time, and save. end
+Increment time  by . end Algorithm 2: Transit times with AHL21 symplectic integration.
+
+3 This equations simplifies to a cubic in the parabolic case when  = 0. The solution of this cubic is also used as the starting guess for the Newton's solver in the elliptic and hyperbolic cases.
+
+The primary goal of this paper is to describe the implementation and differentiation of the AHL21 algorithm, yielding the derivatives of the transit times with respect to the initial conditions. Along the
+MNRAS 000, 1­24 (2020)
+
+6 E. Agol et al.
+
+Table 1. Functions  () used in solving Universal Kepler equation, and functions  used later in the combined drift+Kepler step and its derivatives.
+
+variable
+
+elliptic
+
+parabolic
+
+hyperbolic
+
+
+
+0 (, ) 1 (, ) 2 (, ) 3 (, ) 1 (, ) 2 (, ) 3 (, ) 5 (, ) 6 (, )
+
+> 0 
+
+cos  = 1 - 2
+
+-1/2 -1
+
+(s1in--1c=(os2-)-s=1in/22s)i-n/112sinc2o12s
+
+1 2
+
+
+
+
+-2 (2 - 2 cos  -  sin )
+
+-1-1( 4(3si-sni3n/2-( s-sininc-ocsos c-os-23))/)/ 
+
+1 2
+
+-2
+
+(9
+
+-
+
+8
+
+cos
+
+
+
+-
+
+cos
+
+2
+
+-
+
+6
+
+sin
+
+)
+
+=0
+--
+1
+
+1 2
+2
+1 3
+6
+1 4
+12
+1 3
+3
+- 1 5
+10
+- 1 5
+60
+1 6
+40
+
+< 0 -
+
+cosh  = 1 - 2
+
+(-
+
+)
+
+-1/2
+-1
+
+(s1in-h-c1o(=sh2-()-si=nh)--21)//2-s1i-nshinh12 2
+
+cosh 1
+2
+
+1 2
+
+
+
+-2 (2 - 2 cosh  +  sinh )
+
+-1-(14(-(s3ins)hi-n3h/-2(s--inshinchocshos+h-c2-os3h)/))/--
+
+1 2
+
+-2
+
+(9
+
+-
+
+8
+
+cosh
+
+
+
+-
+
+cosh
+
+2
+
++
+
+6
+
+sinh
+
+)
+
+(x0, v0)
+
+-Tij
+
+(x^0, v0)
+
+x^0 = x0 - hv0 -Drift Kepler
+
+x = f (x0, v0)x0 + g(x0, v0)v0 v = f(x0, v0)x0 + g(x0, v0)v0
+
+Kij
+
+Kij
+
+x^ = f (x^0, v0)x^0 + g(x^0, v0)v0 v^ = f(x^0, v0)x^0 + g(x^0, v0)v0
+
+(x, v)
+
+Kepler -Drift
+x = x - hv -Tij
+
+Result : (xDK , vDK ) = (x^, v^) - (x0, v0) or (xKD, vKD) = (x - hv, v) - (x0, v0)
+
+Figure 1. The order of the combined substeps (from upper left corner to lower right corner) has two sequences: first a negative drift followed by a Kepler step, then a Kepler step followed by a negative drift. These two options need to be handled separately, and notation for the intermediate steps is summarized in this diagram.
+
+way we compute the derivatives of the state of the system at each time step with respect to the initial conditions, which may be used for other applications such as photodynamics, radial velocity, astrometry, or computation of Lyapunov exponents. Next we describe the derivative computation.
+4 DIFFERENTIATION OF SYMPLECTIC INTEGRATOR We divide the differentiation of algorithm 2 into a series of steps,
+(i) Derivative of coordinates at end of a symplectic step with respect to coordinates at the beginning. This includes the Kepler step, drifts and kicks (§4.4-§4.7).
+(ii) Derivatives of fourth-order velocity correction (§4.8). (iii) Propagation of Jacobians through each of these steps (§4.9). (iv) Derivative of parameters output at specified times with respect to the coordinates at the symplectic time grid. Here we give the example of the derivatives of the transit times with respect to the initial conditions (§4.11), but this could also include eclipse times, radial velocity at pre-specified time, or relative positions of the bodies at times of observation. This step involves an AHL21 step with a fractional time duration.
+We describe each of these steps in turn, after some preliminaries.
+MNRAS 000, 1­24 (2020)
+
+4.1 Notation conventions
+The integration is carried out in inertial Cartesian coordinates (Hernandez & Bertschinger 2015), while the initial conditions of the  bodies are specified in either of two forms: Cartesian coordinates of  bodies, or orbital elements in a hierarchy of  - 1 Keplerians (which we leave to a future paper). The initial time of the start of the integration, 0, requires a snapshot of the phase-space coordinates or orbital elements, which fully specify the problem with the addition of the masses of the bodies, m = {1, ...,  }, which are constant in time. In this section we describe the phase-space coordinates.
+4.2 Code units
+We utilize units for masses in  , positions in AU, and time in days. Our gravitational constant is given by   = 0.00029598 AU3day-2 -1. The initial conditions, then, simply need to be specified in terms of masses in  , positions in AU, and velocities in AU/day.
+4.3 Cartesian coordinates
+The Cartesian coordinates utilize a right-handed coordinate system for which the sky plane is the  -  plane, while the  axis is along the line of sight, increasing away from the observer (Figure 2). Positions for each body are denoted with a vector x () = ( (),  (),  ()), while velocities are denoted with v () = ( (),  (),  ()), with
+
+z (x , y, z)
+(x, y, z) x Sky plane
+y
+to observer at (0,0,-D)
+Figure 2. Cartesian coordinate system. Body  is at position x = (  ,  , ) with velocity v = (  ,  , ).
+
+subscript 
+
+=
+
+1, .., 
+
+labelling
+
+each
+
+body, and
+
+
+
+=
+
+ 
+
+indicates time
+
+derivative of variable . The observer is located at x = (0, 0, -),
+
+where  is the distance of the observer to the center of mass of the
+
+system. The initial conditions are completely specified via q(0), where
+q() = {x (), v (), ;  = 1, ...,  }. The vector q() has 7 elements, where the 7( - 1) + th element refers to planet  and the th
+
+element of the vector
+
+q () = { (),  (),  (),  (),  (),  (),  }
+
+(18)
+
+where  = 1, ..., 7. Note that we take the origin of the coordinates to
+be the center of mass of the system, so that a constraint on the initial conditions is   ,  (0) = 0 for  = 1, ..., 6, where ,  denotes the th element of of q ().4
+The coordinate system is right-handed, with the -axis pointing
+to the right on the sky, then the -axis points downwards, so that ^ × ^ = ^ points away from the observer, for unit vectors {^, ^, ^}
+(Figure 2).
+
+4.4 Derivative of a combined Drift and Kepler step
+The building block of this integrator is the universal Kepler solver for integrating pairs of bodies (Wisdom & Hernandez 2015), which we combined with a negative drift, before or after, described in §3.3. Standard Wisdom-Holman -body symplectic integrators (Wisdom & Holman 1991) use an elliptic (bound) Kepler solver for the `unperturbed' motion, while the weaker interactions between low-mass or distant bodies are treated as impulses or kicks alternating with the Kepler drifts. In the case of the DH17 integrator, a hyperbolic step is needed for the pairwise Keplerian integration of bodies that are unbound; this is used as an alternative to kicks. In this section we summarize the computation of the the Jacobian of the final relative coordinates with respect to the initial coordinates over a time step with duration , and then the transformation to the coordinates of the individual bodies.
+The variational equations for the Cartesian coordinates depends
+
+4 In general, the center-of-mass is allowed to move at a constant velocity, which is not implemented in our initial conditions, but could be if required.
+
+Derivatives of TTVs 7
+
+on the ordering of the negative drift and Kepler step. For the combined negative drift followed by a Kepler step, the change in relative position and velocity is
+
+xDK = ( ^ - 1)x0 + (^ -  ^)v0
+
++ ( ^ - 1)x0 + (^ -  ^)v0,
+
+(19)
+
+vDK = ^x0 + (^ -  ^ - 1)v0
+
++  ^x0 + (^ -  ^ - 1)v0,
+
+(20)
+
+while for a combined Kepler step followed by a negative drift, the variation of the change in relative coordinates is
+
+xKD = (  -   - 1)x0 + ( - )v0
+
++ (  -   - 1)x0 + ( - )v0,
+
+(21)
+
+vKD =  x0 + ( - 1)v0
+
++   x0 + ( - 1)v0,
+
+(22)
+
+where we have taken the differential of equations (16) and (17). The first line of each equation we have already computed, while the differentials of the Gauss functions in the second lines remain to be computed.
+Each of the differential Gauss function terms involve the basis (x0, v0, , ), while each of these functions is defined in terms of  (, ), , , 0,  and 0 (or ^  (^, ^), ^, ^, ^0, ^ and ^0). Note that if  is varied as a function of phase space, symplecticity is lost; however we accept a small symplecticity violation at a single timestep when searching for transit times. A similar choice was made in Deck et al. (2014). Thus, we first need to compute the differential of these Gauss function terms with respect to these intermediate quantities, and then propagate through these differentials using the chain rule to obtain the derivatives with respect to the basis. There is an extra step involved in the drift-first case (DK): since the functions on the right hand side are defined in terms of x^0 = x0 - v0, we also need to apply the chain rule to x^0 to transform the derivatives to the basis.
+The differentials of intermediate quantities are given in Appendix B.
+
+4.4.1 Differential of drift-then-Kepler step
+The differential of the scalar quantities ( ^-1), (^ -  ^), ( ^), and (^ -  ^ - 1) should also be scalars, and can be expressed in terms similar to the  and  terms given in Apppendix B. Note, however, that as the Kepler step takes place after the negative drift, all of these functions are to be computed in terms of x^0 substituted for x0, and so we need to add an extra step in the derivation to find the differentials in terms of x0 in lieu of x^0. The differential of these functions in terms of intermediate scalar quantities is given in appendix B.
+Substituting these differentials into equations (19) and (20), we arrive at expressions for xDK/x0, xDK/v0, xDK/, vDK/x0, vDK/v0, and vDK/. We also know /x0 = 0, /v0 = 0, and / = 1, which we insert into a Jacobian, Jkep, which is a 7×7 matrix. In addition, we need the time derivatives of the coordinates with respect to the time step, , xDK/, vDK/, to obtain the time derivatives of the transit times with respect to the initial coordinates
+This completes the summary of the Jacobian of the combined negative drift then Kepler step for the variation of the relative coordinates of bodies  and  (recall that we dropped the   subscripts in this section). In the next subsection we discuss the results for the Kepler step followed by a negative drift.
+MNRAS 000, 1­24 (2020)
+
+8 E. Agol et al.
+4.4.2 Differential of Kepler then drift step
+The Kepler step followed by a negative drift is slightly simpler as the Gauss functions can be expressed in terms of x0 rather than x^0. The differentials of the scalar functions are given in Appendix B.
+As with the prior combined step, the terms in these differentials may be inserted into a Jacobian, Jkep, as well give the derivatives with respect to . This completes the description of the Jacobians computed for the combined drift and Kepler steps for the change in the relative coordinates between bodies  and . This needs to be translated into the variations of the positions and velocities of the individual bodies  and , which we describe next.
+
+4.5 Jacobian of combined Kepler drift step
+
+The foregoing computation gives the variation in the relative difference between the positions and velocities of bodies  and . This translates into variations in the positions of bodies  and  given by
+
+x,DK
+
+=
+
+  + 
+
+
+
+xDK,
+
+x ,DK
+
+=
+
+-
+
+
+
+ +
+
+
+
+xDK,
+
+ v,DK =  +   vDK,
+
+v ,DK
+
+=
+
+-
+
+
+
+ +
+
+
+
+vDK,
+
+(23)
+
+and likewise for DK  KD, where x ( + ) = x () + x,DK is carried out with compensated summation.
+The Jacobian may be found by differentiating these equations with respect to the initial conditions of the Kepler-drift step, which is straightforward for the position, velocity, and time step derivatives. However, since this equation involves the masses  and   , the mass derivative of a combined Kepler/drift step involves an additional term, where
+
+x,DK 
+x,DK  
+
+=
+
+- (
+
+ +   )2 xDK
+
++
+
+   +  
+
+xDK , 
+
+=
+
+(
+
+ +
+
+
+
+)2
+
+xDK
+
++
+
+   +  
+
+xDK , 
+
+(24)
+
+and the same equations apply for x  v,   , and DK  KD. The
+first of these two equations has a cancellation due to the difference
+in sign between the two terms on the right hand side. Specifically, xDK  , so there is a term in the derivative, DK/, which equals xDK/, which exactly cancels the first term in the equation. We carry out this cancellation algebraically, thus avoiding roundoff
+errors which can occur when this term is much larger than the others in xDK/. The second equation has both terms with the same sign, so this cancellation does not occur when the derivatives are
+with respect to the mass of the other body. Here we give the resulting
+derivatives:
+
+x,DK 
+
+=
+
+2  ^^^02
+
+[1x0 - 2v0] ,
+
+(25)
+
+v,DK 
+
+=
+
+2  ^^3^02
+
+[3x0
+
++ 4v0] ,
+
+(26)
+
+where 1 - 4 are functions given in Appendix C. Note that the derivatives of x ,DK and v ,DK with respect to   look identical save for replacing   with -.
+
+MNRAS 000, 1­24 (2020)
+
+Similarly, the mass derivatives in the Kepler followed by drift step are given as:
+
+x,KD 
+
+=
+
+2   3 2
+
+[5x0
+
++
+
+6v0] ,
+
+(27)
+
+0
+
+v,KD 
+
+=
+
+2   3 2
+
+[7x0 + 08v0] ,
+
+(28)
+
+0
+
+where 5 - 8 are given in Appendix C. As above, the derivatives of x ,KD and v ,KD with respect to   look identical save for replacing   with -. We place all of these derivatives into a
+Jacobian matrix for each drift+Kepler substep, J ,  or J ,  .
+
+This completes the computation of the Jacobian of the drift plus
+
+Keplerian evolution of bodies  and  with respect to one another.
+
+Next, we describe the derivatives of the drift step applied at the start
+
+and end of each time step.
+
+4.6 Drift
+
+The drift of an individual body is given by
+
+x ( + ) = x () + v (),
+
+(29)
+
+v ( + ) = v ().
+
+(30)
+
+This has the straightforward differential of
+
+x ( + ) = x () + v () + v (),
+
+(31)
+
+v ( + ) = v ().
+
+(32)
+
+There are two stages at which the drifts are applied: all particles drift at the start and end of each AHL21 step with a duration /2 (see algorithm 2). We refer to this as I + JD () for drifting all of the planets. In some cases it proves to be faster and sufficiently accurate
+to use instantaneous kicks between pairs of bodies rather than solving
+the Kepler problem; we now turn to describing this option.
+
+4.7 Derivative of kicks
+
+Hernandez & Bertschinger (2015) show that for some pairs of par-
+
+ticles (typically distant or unbound), sufficient accuracy may be ob-
+
+tained by applying a gravitational kick between particles, rather than
+
+a Keplerian step and negative drift. Letting  be the set of pairs (, )
+
+advanced with drift+Kepler steps, then  is the complementary set
+
+which
+
+receives
+
+pairwise kicks
+
+such
+
+that
+
+
+
+
+
+
+=
+
+.
+
+Note
+
+that
+
+if all
+
+pairs are in  , the integrator becomes leapfrog.
+
+Algorithm 2 implements this method by applying the pairwise kicks (to set  ) for a time step /6 before the initial drifts , then
+
+after the combined drift-Kepler is applied to set , a second set of kicks is applied for a time step 2/3 along with separate correction terms for the pairs in  and  , and then after the second Kepler-drift
+
+step is applied to  in reverse order, there is a final set of pairwise kicks applied to  for a time /6 after the final drifts (on set  ).
+
+For a pair of particles  and , the kicks applied over a time step 
+
+are given by:
+
+v = -   x  , 3
+
+
+x 
+
+v  = 
+
+,
+
+(33)
+
+3
+
+
+
+where, as above, x  = x - x  ,   = |x  |, which has derivatives
+
+given by
+
+v
+
+=
+
+-   5
+
+x
+
+
+
+  
+
+2
+
+
++
+
+w 
+
+,
+
+(34)
+
+
+
+v 
+
+=
+
+ 
+5
+
+x
+
+
+
+ 
+
+2
+
+
++
+
+w
+
+
+
+,
+
+(35)
+
+
+
+w 
+
+=
+
+x
+
+
+
+2
+
+
+-
+
+3x
+
+ x
+
+
+
+·
+
+x
+
+.
+
+(36)
+
+These differentials yield a Jacobian for the kicks between all pairs of
+
+bodies
+
+(,
+
+)
+
+
+
+
+
+
+.
+
+We
+
+now
+
+move
+
+on
+
+to
+
+describing
+
+the
+
+derivatives
+
+of the fourth-order correction which is used to improve the order of
+
+the algorithm.
+
+4.8 Derivative of correction
+Dehnen & Hernandez (2017) reduced the error in the Hernandez & Bertschinger (2015) mapping, obtaining a symplectic integrator accurate to 4. We incorporate this correction into our integrator, using  = 0 (eq. (40) of Dehnen and Hernandez 2017) which only requires one call of the corrector in between the sequences of binary drift-Kepler and Kepler-drift steps (in the middle of algorithm 2). Two corrections need to be computed: one for the pairs in , and one for those in  . We describe these in the next two subsections.
+
+4.8.1 Drift+Kepler pairs correction ()
+
+The first correction is applied to the velocities of the bodies which are treated with the Kepler+drift splitting, with an impulse term for the th body in  of
+
+v
+
+=
+
+3    T  ,
+
+(37)
+
+24 ,   
+
+5
+
+
+T 
+
+=
+
+x 
+
+2 + 3a  · x   
+
+-
+
+2
+
+
+a
+
+
+
+,
+
+(38)
+
+where  =  +   , a  = a - a  , and
+
+a = -
+
+
+
+  x  .
+
+(39)
+
+, 
+
+3
+
+
+Note that the sum is only taken over the particles in , and no
+correction is required for the positions. We will define a constant  = ( 3)/24 in what follows.
+The derivative of this correction term can be computed in two steps, first computing the derivative of a, and then the derivative of v ,
+
+a = -   
+
+, 
+
+5
+
+
+x 
+
+  
+
+2
+
+
++
+
+x
+
+
+
+2
+
+
+-
+
+3x  x 
+
+·
+
+x 
+
+,
+
+(40)
+
+v
+
+=
+
+
+
+
+
+    
+
+-
+
+
+
+5x 
+
+·
+
+x 
+
+  
+
+T 
+
+ ,  
+
+5
+
+
+6
+
+
+ 
+
+ 
+
+
+
+
+
++
+
+  
+
+
+
+T  ,
+
+(41)
+
+,
+
+
+
+
+
+5
+
+
+Derivatives of TTVs 9
+
+with
+
+T  = x  2 + 3a  · x   
+
++ 2x   +   - x  · x 
+
+ 
+
+
+
+2
+
+
+
++ x  3x  · a  + 3a  · x 
+
+-
+
+2(x 
+
+·
+
+x  )a 
+
+-
+
+2
+
+
+a
+
+
+
+.
+
+(42)
+
+When implementing these equations as computer code, we precompute and store the dot products to save computational time.
+
+4.8.2 Correction for fast-kick pairs ( )
+
+The
+
+pairs
+
+in
+
+
+
+
+also
+
+require
+
+a
+
+correction,
+
+but
+
+with
+
+a
+
+slightly
+
+simpler relation:
+
+v
+
+=
+
+3   
+
+36
+,   
+
+5
+
+
+3x  (a 
+
+·
+
+x  )
+
+-
+
+a
+
+
+
+2
+
+
+,
+
+(43)
+
+where the sum is taken only over pairs in  . The derivatives are
+computed in a manner similar to that described in the prior sub-
+section. The overall Jacobian for this step is given by I + J4th (), which is
+the identity matrix for the position and mass component, and is given by v/x  for the offdiagonal components relating bodies  and .
+The time derivatives are straightforward as they involve derivatives with respect to 3, and so involve the same formulae multiplied by 3/. With the Jacobians now defined for each component of a time
+step, we next describe how we combine these into the Jacobian of a
+full time step. 4.9 Jacobian of a time step
+
+With the Jacobian transformations computed at each step of algorithm 2, we can now compute the complete derivative of each transit time with respect to the initial conditions, keeping track of the product of Jacobians throughout 2. Now, in each case we compute the change in the coordinates over a time step, and so the Jacobian of each substep has the form:
+
+Jsubstep = I + Jsubstep,
+
+(44)
+
+where Jsubstep is the Jacobian of the change in coordinates at the end of the substep with respect to the coordinates at the beginning of the substep. Consequently, the Jacobian can be written as:
+
+Jcurrent = (I + Jsubstep)Jprior
+
+= Jprior + JsubstepJprior.
+
+(45)
+
+The propagation of the Jacobian involves adding terms to the prior Jacobian as a function of each substep. Now, when the timestep is small, this involves very small additions to the Jacobian which can increase the impact of round-off error during the propagation of the derivatives. To mitigate the impact of this, we use compensated summation (Kahan 1965).
+As an example, in the 3-body case, an individual AHL21 step looks like:
+
+JAHL21 ()
+
+=
+
+(I
+
++
+
+JD
+
+(
+
+ 2
+
+))
+
+(I
+
++
+
+JDK,12
+
+(
+
+ 2
+
+)
+
+)
+
+(I
+
++
+
+JDK,13
+
+(
+
+ 2
+
+))
+
+(I
+
++
+
+JDK,23
+
+(
+
+ 2
+
+))
+
+(I + J4th ())
+
+(I
+
++
+
+JKD,23
+
+(
+
+ 2
+
+))
+
+(I
+
++
+
+JKD,13
+
+(
+
+ 2
+
+))
+
+(I
+
++
+
+JKD,12
+
+(
+
+ 2
+
+))
+
+(I
+
++
+
+JD
+
+(
+
+ 2
+
+)
+
+).
+
+(46)
+
+MNRAS 000, 1­24 (2020)
+
+10 E. Agol et al.
+
+In this example we do not use fast kicks for any pair of bodies. Note that each Jacobian in this product is computed with the updated state of the system from the prior substep.
+We have also implemented a version of the integrator which allows the drift + Kepler interactions to be replaced with kicks for some subset of pairs bodies (§4.7). For this version of the integrator an additional three Jacobians must be multiplied.
+After taking  + 1 steps whereby the first transit occurs in between steps  and  + 1, a substep is taken to find the intermediate time,  =  -  - 0, which minimizes the sky separation between the two bodies at time . To compute the derivatives of the times of transit requires computing the Jacobian of a step with intermediate time , which is used to compute the derivatives of the time of transit with respect to the initial conditions, which we describe next.
+
+Throughout the time-integration of a system, transits between a
+
+planet and star (or any pair of bodies) are checked for by identifying when sky,  () changes sign from negative to positive between two time steps, and the planet (or occultor) is nearer to the observer
+
+than the star. Once a transit time has been identified as occurring between time steps  and  + 1, where  = 0 + , by the condition sky,  () < 0 and ,  (+1) > 0 and  () <   (), then the
+time of transit is solved for with Newton's method,which makes use
+
+of our Jacobian calculation. Newton's method is applied to obtain the time   =  +, where  is the time after  at which sky,,  = 0, which is taken as the time of transit. The initial guess for the time of transit, init, is found by linear interpolation,
+
+init
+
+=
+
+-
+
+sky,  ()
+
+sky,  (+1) - sky,  ()
+
+.
+
+(50)
+
+4.10 Time derivative of a step
+
+The derivative of the positions and coordinates as a function of the time step duration, , requires a propagation of the time step deriva-
+tive through all of the substeps of a single time step. The involves
+applying the chain rule through each of the sub-steps in algorithm 2. Let qcurrent = q + qprior be the coordinates and velocities of all bodies after applying one component of a substep. Then,
+
+qcurrent 
+
+=
+
+(I
+
++
+
+Jsubstep)
+
+qprior 
+
++
+
+q 
+
+,
+qprior
+
+(47)
+
+q
+where  is the partial derivative of a particular sub-step with respect to the time step . Note that in the AHL21 algorithm (2),
+the combined drift and Kepler steps take place over a time  = /2,
+
+which introduces a factor of 1/2 in the partial derivatives with respect
+
+to .
+
+At the end of the step we refer to the derivative over the time step with respect to  as:
+
+q()
+
+, 
+
+(48)
+
+where  is the total simulation time upon completion of the time step of duration . This may then be used to compute the transit times
+and their derivatives, as described next.
+
+To implement Newton's method, the system is integrated in be-
+
+tween these time steps with a single AHL21 step, but with a time  < , instead of , giving q( + ). From these coordinates, sky ( + ) is computed between the two bodies, and refined using
+
+ = -sky
+
+sky  
+
+-1
+,
+
+(51)
+
+where sky  
+
+=
+
+ 
+
+, - ,   
+
++  
+
+, - ,   
+
++
+
+, 
+
+ -    
+
++ , 
+
+ -    
+
+,
+
+(52)
+
+and   =  -   , etc., and the time derivatives with respect to  are computed with equation (48). Note that in practice since
+the integration time step, , is fixed, for the transit time derivatives   = ().
+Once a transit time is found, how does it vary with the initial
+conditions? We focus on the initial conditions just before transit at time , q = q(). If q is perturbed slightly, then the time of transit will change, but the new time of transit must still satisfy sky,  (  + ) = 0, where the new time of transit is at  +  + (). So,
+
+sky q
+
+
+
+(q)
+
++
+
+sky () 
+
+=
+
+0,
+
+(53)
+
+4.11 Derivative of transit times
+We define the times of transit between bodies  and  as the point in time where the sky-projected separation is at a minimum, and body  is in front of body  (Fabrycky 2010). Since multiple transits can occur between two bodies, we count these with a third index, , so that the set of transit times during the time integration is given by   ; , ,  . At a transit time, the sky-velocity between the two bodies must be perpendicular to their sky separation, where the "sky plane" is the  -  plane; this guarantees an extremum of the sky separation between the bodies. The dot product of the relative sky separation and sky velocity of the two bodies equals zero at the time of transit, and is negative/positive just before/after transit. So, transit times are computed from the constraints
+
+where we have dropped the , ,  subscripts from  in this equation. Thus the gradient of each transit time with respect to the state,
+q = q(), at the beginning of the th time step just preceding the transit is given by
+
+ () q
+
+= - sky -1  
+
+ -   q q
+
+(, - , )
+
++
+
+, - ,  q q
+
+( -  )
+
++
+
+ -   q q
+
+(, - , )
+
++
+
+, - ,  q q
+
+( -  ) ,
+
+(54)
+
+sky,  (   ) 
+
+= <
+
+( -   ) (, - ,  ) + ( -   ) (, - ,  ) = 0 where the gradients are computed over the partial time step, so that,
+
+
+
+for example,
+
+ q
+
+is the component of
+
+JAHL21 ()
+
+associated with
+
+sky, 
+
+the -component of body . Note again that the transit time is   =
+
+> 0, 
+
+(49) 0 +  + , but since  and 0 are fixed,   /q = /q.
+
+where  is the index of the planet, and  is the index of the star (Fabrycky 2010), and  is an index for the number of transits between
+
+In addition to the transit time,   , it is also useful to compute the
+
+sky
+
+velocity,
+
+sky,
+
+
+
+
+
+,
+
+and
+
+the
+
+impact
+
+parameter
+
+squared,
+
+2
+sky,
+
+
+
+
+
+,
+
+at
+
+the bodies.
+
+the time of transit. These can be used to compute transit light curves,
+
+MNRAS 000, 1­24 (2020)
+
+as well as measure the variation of the impact parameter and duration as a function of time as additional dynamical constraints on a system. These two quantities are given by:
+
+ sky,   (q,    ) = ( , -  ,  )2 + (, - ,  )2, (55)
+
+2
+sky,
+
+
+
+
+
+(q,
+
+
+
+
+
+
+
+)
+
+=
+
+( -  )2 + ( -  )2,
+
+(56)
+
+where there is a direct dependence upon q which is propagated to the time of transit within the timestep, , and there is an indirect dependence upon q through the fact that these are evaluated at the time of transit,   (q).
+Taking the derivative of these with respect to q gives:
+
+sky,  
+
+=
+
+sky,  
+
++
+
+sky,  
+
+ ,
+
+q
+
+q
+
+ q
+
+(57)
+
+sky,   q
+
+=
+
+-1
+sky,  
+
+(, - , )
+
+, - ,  q q
+
++
+
+(, - , )
+
+, - ,  q q
+
+,
+
+(58)
+
+sky,   
+
+=
+
+-1
+sky,  
+
+(, - , )
+
+, - ,   
+
++
+
+(, - , )
+
+, - ,   
+
+,
+
+(59)
+
+2
+sky,  
+q
+
+=
+
+2 ( -  )
+
+ -   q q
+
++
+
+( -  )
+
+ -   q q
+
+.
+
+(60)
+
+Note
+
+that
+
+we
+
+compute
+
+2
+sky
+
+rather
+
+than
+
+sky
+
+to
+
+avoid
+
+the
+
+problem
+
+that when the orbits are edge-on, the impact parameter is zero at
+
+mid-transit, causing the derivative of sky to be divided by sky = 0,
+
+which results in a NaN.
+
+This completes the computation of all of the Jacobians needed to
+
+propagate the derivatives of the transit times, and sky velocity/impact
+
+parameter, through to the initial conditions, which we describe next.
+
+4.12 Jacobians of positions, velocities, transit times
+
+With the Jacobians computed at each of the steps, we can recursively compute the Jacobian at step  with  = 0 +  as
+
+J = JAHL21 ()J-1.
+
+(61)
+
+Starting with the initial state q0 = q(0) and initial Jacobian J0 =
+
+q0 q0
+
+=
+
+I (the identity matrix), we iteratively compute the Jacobian at
+
+step  with respect to the state at initial time, 0 ( = 0), giving the
+
+Jacobian transformation from q0 to q,
+
+J
+
+=
+
+q
+. q0
+
+(62)
+
+Then, the gradient of the transit times is given by
+
+
+
+
+
+q(0) = q() J.
+
+(63)
+
+We save this gradient for each transit time in an array that is preallocated when calling the routine.
+In our implementation, we do not compute JAHL21 () for each step, directly; instead, we iteratively multiply the current Jacobian by the Jacobian for each sub-step.
+
+Derivatives of TTVs 11
+This completes the description of the algorithm and its derivatives. We now turn to the implementation and testing of the code.
+5 IMPLEMENTATION AND TESTING
+We have developed NbodyGradient.jl5 in the Julia language for carrying out the foregoing computations. This involves the initialization of the algorithm, the -body integration, the finding of transit times, and the Jacobian propagation. Given the complicated nature of the calculations, we have written unit tests for each of the steps in the algorithm; these were critical in developing the code for computing the derivatives, and helped to pinpoint inaccuracies in the DH17 algorithm which led to developing the AHL21 algorithm. We have also created tests of the code as a whole, and carried out comparisons with other codes for both speed and accuracy, which are summarized here.
+In this section we describe some aspects of the implementation of the code (§5.1) and the tests we have carried out. We test the -body algorithm for accuracy by varying the step size and checking for conservation of energy and angular momentum (§5.2), while we check the transit-time algorithm for accuracy by measuring the variation in transit times with step size (§5.4). We compare the -body integrator with a C implementation to check for speed (§5.3). We check the numerical precision of the code by carrying out comparisons with extended precision (§5.5), and we check the accuracy of the derivatives by comparing with finite-differences carried out in extended precision (§5.5). Most of our tests are carried out with integrations of the outer Solar System and of the TRAPPIST-1 system.
+We start by describing the implementation of the algorithm in Julia.
+5.1 Julia implementation
+We chose the Julia language to develop this code (Bezanson et al. 2017), given its several advantages. The high-level, interactive ("REPL") capability can make debugging code more straightforward. The just-in-time compiler can make the code execution competitive with compiled C, if attention is paid to memory allocation and type stability. An advantage of Julia for testing code accuracy is that different numerical types can easily be changed which allows for straightforward computation at different precisions. Julia also uses multiple dispatch which allows us to automatically select versions of functions that match in precision, and gives us control over computing gradients, transit times, and other outputs. Finally, Julia is open-source, and thus amenable to distribution and usage amongst scientists.
+We have optimized the code keeping in mind several unique aspects of Julia. Memory allocation and garbage collection were minimized by defining arrays at higher levels which were then passed to subroutine functions to avoid repeated allocation of large arrays. Matrix multiplication can be sped up by utilizing the BLAS linear algebra routines (Blackford et al. 2002), specifically gemmv, which gave significant reduction in run-time for the multiplication of Jacobians at each step. For multiplication of the JDK/KD,  Jacobian, we found more efficiency by copying the portion of J (times the prior substeps) relevant to bodies  and  to a new 14 × 7 matrix, then using the BLAS routine to carry out the multiplication, and then copying
+5 http://github.com/ericagol/NbodyGradient.jl
+MNRAS 000, 1­24 (2020)
+
+12 E. Agol et al.
+
+the result back into J. For loops in which we access elements of arrays successively, we try to step through elements which are adjacent in memory, and we also avoid index-checking to save time. Finally, we try to avoid changing the types of variables, and we define the types up front to make this explicit. Thanks to these details, we find a favorable run-time comparison with C (§5.3).
+Another aspect of our implementation is that the code is simple to use and extendable. Here is an example of running the integrator and computing transit times interactively from the Julia prompt (REPL), or from within a Jupyter or Pluto notebook6 (a slightly modified version of the script used in the comparisons with other codes in §6):
+using NbodyGradient
+# Set up initial conditions from file of orbital elements # (Initial time, # of bodies, orbital elements file) ic = ElementsIC(0.0, 8, "elements.txt") # Time step. Period of planet b / 100 h = ic.elements[2,2]/100 # Set up integrator (time step, initial time, elapsed time) intr = Integrator(h, 0.0, 4533.0) # Compute and store initial Cartesian coordinates s = State(ic) # Allocate arrays for transit times and derivatives tt = TransitTiming(intr.tmax, ic) # Run integration & compute transit times w/ derivatives. intr(s, tt)
+Here, the initial conditions are specified by a file containing rows of orbital elements, elements.txt7. An integration is triggered by passing a State type (s in the example) to an Integrator (intr in the example), along with any "output" type (tt in the example): intr(s,tt). The State holds the Cartesian coordinates and Jacobian which are updated at each step. Passing the output structure tt of type TransitTiming tells the integrator to compute transit times of the system and store the results in the tt structure. The transit times can be accessed within the structure as tt.tt, which is a two dimensional array of size  by  , which holds the transit times for each planet, each of which have a count in the vector tt.count with a maximum allowed value of  . The derivatives with respect to the initial Cartesian coordinates and masses are stored as tt.dtdq0 which is a 4-dimensional array with the same first two dimensions as tt.tt, and the last two dimensions of sizes 7 and  which hold the derivatives with respect to , , and  for each body (q0). By utilizing multiple dispatch, adding functionality to the code consists of simply making a new Integrator method and a structure to hold the output.
+Next, we describe the accuracy of the -body algorithm by checking conservation of energy and angular momentum.
+6 Further details on running the code can be found in the documentation at http://github.com/ericagol/NbodyGradient.jl 7 We leave discussion of initial conditions to future work, but for sake of completeness the elements file is set up as follows. Each row is given by the mass, period, time of initial transit, eccentricity vector components, Inclination, and Long. of Ascending Node for each body. The columns are delimited by a comma (','). The eccentricity vector is defined by (cos(), sin()) where  is the eccentricity and  is the long. of periastron. The orbital elements are given in Jacobi coordinates which are converted to Cartesian coordinates to start the integration.
+
+5.2 Energy and angular momentum conservation
+
+To test the accuracy of the algorithm, we have carried out integrations
+
+of the outer Solar System. We start with positions, velocities, and
+
+masses given in Hairer et al. (2006), only including the giant planets
+
+(Jupiter, Saturn, Uranus and Neptune). The mass of the Sun is added
+
+to the sum of the masses of the terrestrial planets for a fifth inner
+
+body.
+
+We compute the total energy and angular momentum of the system
+
+as a function of time. We measured the RMS value for the energy and
+
+all three components of the total angular momentum, and varied the
+
+time steps by factors of two. We expect the energy precision to scale with time step to the fourth power,  4. Figure 3 shows that this
+
+scaling holds over a range of two orders of magnitude in the time step.
+
+We used time steps from 1.5625 to 200 days, and the RMS energy and angular momentum was measured over  106 time steps in each
+
+case. The upper end of the time steps was set by the requirement that
+
+the time step be smaller than 1/20 of the shortest orbital period, in this
+
+case Jupiter. At the lower end of this range (1.5625 and 3.125 days) we see a deviation from the 4 scaling thanks to the limit of double-
+
+precision representation of the energy. This occurs at approximately 2-52 = 2.2 × 10-16 of the absolute error value of each conserved
+
+quantity, which is plotted as dotted lines in each panel in Figure 2 (the energy is  -3 × 10-8  AU2day-2, while the total angular momentum is  6 × 10-5  AU2day-1). The three components of
+
+angular momentum show a better conservation precision which is
+
+close to double-precision for all values of the time step. Numerical
+
+errors accumulate with time step, and the expectation is that these
+
+scale
+
+as
+
+
+
+err 1/21/2
+
+=
+
+err
+
+
+
+1/2
+
+
+
+,
+
+where
+
+
+
+is
+
+the
+
+number
+
+of
+
+time
+
+steps and err is a random numerical error (Hairer et al. 2008). This
+
+is also borne out in Figure 3 which shows a scaling of the error with
+
+time step  ( is held fixed in these integrations).
+
+Our conclusion is that the numerical integration is behaving as expected: energy is conserved with an accuracy  4 above the
+
+double-precision limit, and angular momentum is conserved close to
+
+double-precision, but grows according to Brouwer's law. Note that
+the RMS relative error (defined as /0, with 0 the initial energy, and  the change in this energy) measures an oscillation which can
+
+be orders of magnitude larger than the mean relative error over time.
+
+Given this evidence of accurate behavior of the -body algorithm,
+
+we next ask: how does the -body implementation fare in computa-
+
+tion time?
+
+5.3 Comparing with C implementation
+To check that we have optimized the computational speed of the body integrator, we carried out a comparison of the Julia version of our code with a C implementation without derivatives (Hernandez 2016). First, we compared the Kepler solver (Wisdom & Hernandez 2015) and found that our Julia implementation matches the C version. Both versions take 0.15  sec per Kepler step for a bound orbit with  = 0.5.8 Note that in this comparison we used a version of the Kepler step which is not combined with a backward drift.
+Next, we carried out an integration of the outer solar system (with 5 bodies, as described in the prior section) with the C implementation. We found that the C implementation runs at the same speed as our Julia implementation of AHL21. With 50-day time steps, both
+
+8 These comparisons were made on a Macbook with a 2.8 GHz Intel Core i7 processor with Julia v1.6. The C code was compiled with cc -O3.
+
+MNRAS 000, 1­24 (2020)
+
+Derivatives of TTVs 13
+Now that we have verified the speed and accuracy of the -body algorithm, we next examine the accuracy and precision of the transit times as a function of step size.
+
+LLxy Lz 10 19
+
+Angular momentum error [M AU2 day 1]
+
+10 20
+
+10 21
+
+101
+
+102
+
+Time step [days]
+
+Figure 3. (Top) Conservation of energy. Standard deviation of energy versus step size (blue dots). Orange line shows 4 scaling. Green dotted line shows double-precision limit. (Bottom) Angular momentum conservation. The standard deviation of each component is plotted versus step size. The dotted lines shows the double-precision limit for angular momentum ( is zero, so this is not shown). The black dashed curve shows that angular momentum error scales   according to Brouwer's law.
+versions take about 4.7 sec per timestep.9 In this comparison, we use the same convergence criterion for the Kepler solver; when we include the 4th-order corrector in AHL21 it increases the run time by  10% for the outer solar system problem. Thus, we conclude that the speed of the Julia implementation is comparable to compiled C.
+When using the convergence that a fractional tolerance of 10-8 is reached for the solution to Kepler's equation ­ we find a bias in the long-term energy conservation which causes it to drift with time. If instead we use the convergence criterion that the eccentric-anomaly, , remains unchanged relative to one of the prior two iterations of Newton's solver ­ then we find that this bias is significantly reduced. This adds iterations to the Kepler-solver, typically 1-2, and thus causes the code to take about 10% longer to run, but with the tradeoff of better energy conservation. Thus, using the 4th-order corrector and this criterion adds about 20% to the overall run-time, amounting to 5.7 sec per time-step compared with the example above.
+9 See footnote 8.
+
+5.4 Transit-timing accuracy
+Since the numerical accuracy of the integration depends upon the step size parameter, , as the AHL21 integrator is fourth order in  (Fig. 3), we also expect that the accuracy of transit times should scale with 4. Further precision could be obtained if we were to use a corrector at the start of the integration; however, such a corrector is left for future work.
+Figure 4 shows the change in the transit times with stepsize for a simulation of TRAPPIST-1 b and c over 400 days. Compared with the times computed with a very small step-size, the transit times drift with time. This behavior is expected due to the difference between the symplectic Hamiltonian and the full Hamiltonian which contains high-frequency terms which cause the coordinates of the symplectic integrator to be offset from the real coordinates. This offset causes the longitudes to drift with time, and due to the slight difference in orbital frequency, the drift grows linearly as shown in Figure 4. Since the AHL21 algorithm has order 4, these offsets decrease with step-size as 4 (Fig. 4), and so at small stepsize the symplectic integrator better approximates the real system. In practice these coordinate offsets are not expected to be important for transit-timing analyses as they will lead to very small differences between the inferred parameters and real parameters, even for large . We recommend that the user determine which step size is appropriate by checking the difference in transit times as a function of step size.
+For the purposes of transit-timing variations, we are primarily interested in the precision of the non-linear portion of the transit times versus epoch. So, to assess the TTV precision, we subtract a linear fit from the difference between an integration with large  with an integration with small , and then compute the RMS of the residuals. We expect the RMS to scale as 4, and figure 4 indeed shows that this is the case for large step size for a system with two planets of periods 1.5 and 2.4 days, masses 3 × 10-5 of the star, low eccentricity, and integrated over 400 days (this approximates the inner two planets of the TRAPPIST-1 system). In both cases the TTV precision reaches a value that is  10-14 of each planet's orbital period. We also find that this precision scales in proportion to the ratio of the masses of the planets to the star, as expected (see discussion under eq. (2)).
+Having demonstrated that the accuracy of the transit times scales as expected, we next examine the numerical precision of the computed times, as well as their derivatives.
+5.5 Precision of transit times and their derivatives
+Given a fixed step size for the algorithm, we next ask the question: how numerically precise are the transit times computed for that step size? And, how precise are the derivatives computed as a function of the initial conditions? These questions involve the control of truncation and round-off errors in the algorithm, which motivated the development of the AHL21 algorithm.
+We check the numerical precision of the algorithm by comparing the transit times and their derivatives computed at both double-precision and extended precision (using the double-precision Float64 type with 64 bits, and the extended-precision BigFloat type with 256 bits in Julia). Figure 5 shows the difference in the times of transit in the TRAPPIST-1 b and c case computed in double-
+MNRAS 000, 1­24 (2020)
+
+14 E. Agol et al.
+
+RMS TTV error [sec]
+
+10 4
+
+Inner planet h4
+
+Outer planet
+
+10 5
+
+h4
+
+10 6
+
+10 7
+
+10 8
+
+10 9
+
+10 10 10 2 Step size [day]
+
+Figure 4. (Left) Variation in the transit times with step size. The absolute value
+of the difference in times between the indicated step size and a step size of /128 is plotted for the inner two planets of TRAPPIST-1 (solid and dashed, respectively) simulated over 400 days with a nominal step size of  = 0.06
+days. The dotted curve shows a linear scaling, while the arrow indicates a 1/24 decrease in timing difference when the step-size is halved. (Right)
+RMS precision of TTVs for the TRAPPIST-1 b/c two-planet system with six stepsizes, compared with an integration which is 1/2 of the shortest stepsize,
+after removing a linear fit from the difference to isolate the comparison to the transit-timing variations. For both planets the TTV errors scale as 4 until double-precision is reached at  10-9 seconds.
+
+precision relative to BigFloat precision. We find that the computational errors grow at a rate that is bounded by  2-523/2, where
+
+ is the number of elapsed time steps (Fig. 5), as expected for phase-errors based on Brouwer's Law (Brouwer 1937). The computation was carried out for 400,000 days for an inner orbital period of 1.5 days, for a total of  107 time steps.
+Next, we carry out tests of the numerical precision of the Jacobians at each substep in the calculation, as well as for the entire integration interval, and for the transit time derivatives. We do this in two ways: 1). by computing finite-difference derivatives in extended precision and 2). by comparing the derivatives in double precision with derivatives computed with extended precision arithmetic. The finite-
+MNRAS 000, 1­24 (2020)
+
+difference test checks that the formulas derived in §4 are valid, while the extended precision test checks that the numerical implementation is precise.
+To compute the finite-difference derivatives, we carry out integrations for each parameter using BigFloat, and compute a finite difference approximation of the partial derivative with parameters perturbed just above and below the nominal value,
+
+
+
+
+
+
+
+=
+
+(,  (1 +
+
+diff ))
+
+-
+
+(,  (1 -
+
+diff )) ,
+
+,  , 
+
+2diff , 
+
+(64)
+
+where  (,  ) indicates the transit time evaluated at initial conditions q0 with the , th initial condition given by ,  . Typically we use diff = 10-18, and we find that the finite-difference derivative is insensitive to this value when rounded back to double-precision. We used these finite differences in writing and debugging each substep of the code, and we have created a suite of tests which can be used when further modifying or developing the code. We found that the finite difference derivatives agree with the derivatives computed from propagating the Jacobian, at a level close to the double-precision limit, which validates our implementation of the algorithm based on the formulae in §4.
+Next, we estimate the fractional numerical errors on the derivatives of the transit times with respect to the initial conditions and masses propagated through the numerical integration (Fig. 5, right panel) by comparing the derivatives computed at double precision with those computed at extended precision. We find that these double-precision numerical errors also shows a growth which is bounded by 2-523/2, according to Brouwer's Law. In this case we filtered the derivatives before computing the fractional error taking the maximum absolute value of each derivative over 20 transit times normalized by the maximum absolute derivative over the same 20 times to avoid the case in which the values of the derivatives approach zero. We did not find that the Brouwer's law limit applied to be the DH17 algorithm - the errors significantly exceeded the Brouwer's law limit for long integrations - which motivated the development of the AHL21 algorithm. We did not carry out longer integrations due to the high computational expense for BigFloat precision.
+We conclude that based on these tests the code is performing as expected: the -body code is fast and as accurate as the algorithm allows; the transit times are precise; the derivative formulae are correct; and the derivatives are precise. With these validations of the code completed, we now turn to compare our code with other publicly-available -body and transit-timing codes.
+
+6 COMPARISON WITH OTHER CODES
+In this section we compare with two existing open-source -body integrators which have been used for transit-timing and -body integration: TTVFast and REBOUND. Although other codes are available, such as SYSTEMIC (Meschiari & Laughlin 2010) and TRADES (Borsato et al. 2014), as well as numerous proprietary codes for modelling transit timing, TTVFast and REBOUND are both widely-used and opensource. These comparisons provide further validation of the accuracy of our code, as well as timing benchmarks of the relative speeds.
+6.1 Comparison of transit times with TTVFast and REBOUND
+The TTVFast approach uses a Wisdom-Holman integrator (Wisdom & Holman 1991) with a central dominant body, appropriate for planetary systems orbiting a single star (or planets orbiting a single star in a wide binary). A third-order corrector is used at the start of each
+
+abs(t|dbl t|big)/h
+
+10 7
+
+Planet b
+
+10 8
+
+Planet c 2 52N3/2
+
+10 9
+
+10 10
+
+10 11
+
+10 12
+
+10 13
+
+10 14 100
+
+101 Time s1in02ce start [da10y3s]
+
+104
+
+10 8
+
+10 10
+
+10 12
+
+maxabs(ddtq|dbl ddtq|big)[i 9 : i + 10] maxabs(ddtq|dbl[i 9 : i + 10]
+
+10 14
+
+10
+
+16
+100
+
+101
+
+102
+
+103
+
+104
+
+Time since start [days]
+
+Figure 5. (Left) Fractional numerical error of transit times computed over
+
+40,000 days for TRAPPIST-1 b and c computed from double and BigFloat
+
+integrations. The error is plotted relative to the time ste, . (Right) Fractional
+
+numerical error on the transit time derivatives with respect to the initial
+
+cartesian coordinates and masses. The dotted green lines in both panels scale
+
+as
+
+2-52
+
+ 3/2
+
+
+,
+
+where
+
+
+
+is
+
+the
+
+number
+
+of
+
+time
+
+steps.
+
+The
+
+maximum
+
+absolute
+
+derivative differences have been taken over 20 steps, and divided by the
+
+maximum absolute derivatives to give the fractional differences.
+
+simulation to transform from real coordinates to symplectic coordiates. Two versions of TTVFast have been developed in FORTRAN and C; here we describe comparisons with the latter.10 The initial conditions may be specified in either Jacobi or heliocentric orbital elements, or heliocentric Cartesian coordinates. We use the initial Cartesian coordinates from NbodyGradient transformed to heliocentric coordinates, and then rotated by 180 about the  axis so that the observer is located along the + axis, the convention adopted in TTVFast.
+The TTVFast algorithm uses an approximate method to find times of transit. When a transit time is found to occur for one of the planets between two timesteps, then two Keplerian integrations between the planet and star are integrated forwards and backwards from the prior and subsequent timesteps, and weighted to approximate the position
+
+10 https://github.com/kdeck/TTVFast
+
+Derivatives of TTVs 15
+of the planet relative to the star. Newton's method is then used to find the time of transit in the same manner described above (§4.11).
+We have made a comparison of the transit times from NbodyGradient with TTVFast using the best-fit initial conditions for the 7-planet TRAPPIST-1 system (Agol et al. 2021). For this comparison we use a time step for TTVFast which is 0.05%11 of the orbital period of planet b (Figure 6) to reduce the difference between the symplectic and real coordinates (we use a larger step of 0.1% for NbodyGradient as this integrator is higher precision). We find that over a timescale of 4532 days (an estimate of the total time between initial and final TRAPPIST-1 observations over the lifetime of JWST), the difference between TTVFast and NbodyGradient is better than a few milliseconds for all seven planets, with better agreement for the inner planets than for the outer. This agreement is quite good, and we attribute the remaining differences, which grow with time, as being due to differences between the initial mapping and real coordinates which cause phase errors to grow with time.
+Although REBOUND is not primarily designed for transit-timing, there is a Python notebook in the REBOUND repository which gives an example of transit-time computation.12 We used the same initial cartesian coordinates as the NbodyGradient computation for TRAPPIST-1, and computed the transit times with a tolerance of 10-12 days for REBOUND. We transform z-x, xy, and y-z to allow for the fact that the REBOUND computation places the observer along the x axis rather than along the -z axis (as assumed in NbodyGradient, Fig. 2). Figure 6 shows that over 4000 days for TRAPPIST-1, the times agree between NbodyGradient and REBOUND at the < 4sec level. This was computed with a time step of 0.0015 days for NbodyGradient, about 1/1000 of the orbital period of the inner planet, TRAPPIST-1b, to reduce the difference between the symplectic and real coordinates.
+Unfortunately TTVFast does not include derivatives, which was part of the motivation for developing the NbodyGradient code. However, given that the transit times compare well, and that we have compared the NbodyGradient derivatives with finite-differences computed at high precision (§5.5), this gives us confidence that the NbodyGradient derivatives are also being computed accurately. We have made scripts available for reproducing this comparison in the NbodyGradient repository.
+Next we compare the run-time of NbodyGradient with REBOUND, with and without gradients.
+6.2 Run-time Comparison with REBOUND
+The REBOUND integrator 15 (Rein & Tamayo 2015) allows for the computation of the variational equations, and may be used to model systems with close encounters and an arbitrary architecture. 13 Figure 7 compares the REBOUND 15 integrator computational speed with our code. We spaced planets by a ratio of semi-major axis of 1.8, and with initial orbital angles separated by 1.4 radians. For the AHL21 integration, we use a step size that is 1/20 of the orbital period of the inner planet and we integrate for 800 orbits of the inner planet. We ran both codes with a range of planets from one
+11 We also had to modify TTVFast to avoid accumulation of numerical errors which occur for such a small timestep. Rather than adding the time step to the elapsed time every time step, we multiply the current number of steps by the time step to obtain the elapsed time. 12 See https://rebound.readthedocs.io/en/latest/ipython/ TransitTimingVariations.html for a description. 13 https://github.com/hannorein/rebound
+MNRAS 000, 1­24 (2020)
+
+16 E. Agol et al.
+
+TTV of inner 3 planets
+
+500
+
+Planet b c
+
+d
+
+0
+
+TTV [minutes]
+
+500
+
+0 500 1000 150T0im2e0[0D0ay2s]500 3000 3500 4000
+TTV of outer 4 planets
+
+500
+
+e
+
+g
+
+f
+
+h
+
+0
+
+TTV [minutes]
+
+500
+
+0 500 1000 150T0im2e0[0D0ay2s]500 3000 3500 4000
+
+Transit time diff [sec]
+
+Transit time diff [sec]
+
+Time difference with TTVFast
+0.005
+
+0.000
+
+0.005
+
+0
+0.000004 0.000002 0.000000 0.000002 0.000004 0
+
+500 1000 150T0im2e0[0D0ay2s]500 3000 3500 4000
+Time difference with REBOUND
+500 1000 150T0im2e0[0D0ay2s]500 3000 3500 4000
+
+Figure 6. Transit-timing comparison for TRAPPIST-1. (Left) TTVs from NbodyGradient (in color), and TTVFast and REBOUND (black dots) for the seven
+TRAPPIST-1 planets over 4000 days. (Right) Timing differences in seconds between NbodyGradient and TTVFast (top) and REBOUND (bottom); the colors are same as in left hand panel. Note that the panel in the upper right has a range which has been expanded by 6 × 106 relative to the left panels, while the lower right panel is expanded by a factor of 1.2 × 1010.
+
+to ten, and we turned off the transit finding to make a fair comparison. We tried two different versions of the AHL21 integrator: with fast kicks for pairs of planets, and with fast kicks turned off. When the fast kicks are used for planet pairs, we find that the AHL21 code compares well to REBOUND 15 algorithm when no gradients are computed, either slightly faster or comparable in wall clock time for 1-10 planets (red and blue dashed lines in Figure 7). However, when the gradient is computed, our code takes a computational time that is  4 - 5 times faster than REBOUND 15 for a large number of planets when fast kicks are turned off. If the fast-kicks are used for planet pairs, then NbodyGradient is an order of magnitude faster than the 15 integrator in REBOUND. Note that both REBOUND gradients and NbodyGradient assume the Newtonian equations of motion when computing gradients.
+We also compare with the WHFast algorithm in REBOUND. This algorithm is also symplectic, but requires a central dominant mass. The WHFast algorithm is by far the speediest of the three: both with and without gradients it is about an order of magnitude faster than either AHL21 or 15. However, as it is a second-order algorithm, it may require the use of a corrector, and/or shorter stepsizes, to obtain similar precision as the AHL21 algorithm with is fourth-order; this may come with extra computational cost, depending on the particular application. From a theoretical standpoint, if the Kepler solver function calls dominate the compute time, WHFast should only be twice as fast as AHL21 with kicks between planets in NbodyGradient (green dashed curve). Since we have not achieved this, it may indicate we have not yet properly optimized our code. Julia, NbodyGradient's language, is believed to be able to achieve speeds comparable to C++, WHFast's language. We plan to continue to optimize NbodyGradient.
+Our primary goal in developing this -body code is for modeling observational data for which the uncertainties are typically dominated by measurement errors rather than model accuracy. Hence, we
+MNRAS 000, 1­24 (2020)
+
+are willing to exchange some accuracy for computational speed by using a symplectic integrator with a large time step. Thus, AHL21 may provide a useful compromise between 15 and WHFast. Note that the integrator is still precise, but the symplectic Hamiltonian only approximates the real Hamiltonian, and we have not been able to derive a corrector to transform between symplectic and real coordinates; see the discussion in Deck et al. (2014) and references therein.
+In sum, the AHL21 algorithm in NbodyGradient may gain some computation time for general N-body problems with the tradeoff of interpreting the initial conditions as symplectic coordinates, not real coordinates. In addition, currently REBOUND (either 15 or WHFast) does not yet implement the gradients of the transit times with respect to the initial conditions, which NbodyGradient was designed to compute from the start.
+7 SUMMARY AND CONCLUSIONS
+The original goal of our development of this paper and code was to make possible the analytic computation of the derivatives of the times of transit with respect to the initial conditions; this is the first time this has been done in an -body code to our knowledge. We have accomplished this with a fast and robust code written in the Julia language. Julia has the advantage of matching compiled C speeds if it is written in an optimum manner, which our benchmarks indicate we have achieved. Yet it allows for interactive usage and high-level coding which makes building and debugging the code more straightforward. In addition, Julia easily allows changing of the variable types, so that higher-precision computations are available simply by calling the -body functions with coordinates and masses initialized with high-precision variables; the functions will be automatically recompiled at the first time being called with different numeric types.
+We have also developed this code with generality in mind; in
+
+Integration time [sec]
+
+102 0
+
+2
+IAS15, gradient
+
+4
+
+6
+
+8
+
+10
+
+102
+
+NBG, tt w/ gradient
+
+NBG, gradient
+
+NBG, gradient, fast kicks
+
+WHFAST, gradient
+
+IAS15, no gradient
+
+NBG, no gradient
+
+101
+
+NBG, no gradient, fast kicks WHFAST, no gradient
+
+101
+
+100
+
+100
+
+10 1
+
+10 1
+
+10 2
+
+10 2
+
+0
+
+2 Num4 ber of 6planets 8
+
+10
+
+Figure 7. Computational time of the NbodyGradient code without (blue), with fast kicks for planet pairs (green), and with transit-time computation (magenta) versus REBOUND 15 (red), with (solid) and without (dashed) computation of the gradient. We also compare with the REBOUND WHFast algorithm (magenta), both with gradients (solid) and without (dashed).
+
+particular, we would like to eventually apply it to hierarchical systems such as circumbinary planets or planets hosting moons, which is why we have based the symplectic splitting on the DH17 algorithm which does not assume a dominant body (or bodies). In addition, the popular Wisdom­Holman (WH) method assumes the perturbed approximation holds, which implies the method breaks down during close encounters. The explanation, using error analysis, is that WH has two-body error terms. However, when DH17 is used without kicks, it only has three-body terms which blow up during strong three-body encounters (Dehnen & Hernandez 2017). So our code can better handle close two-body encounters, as was shown by Dehnen & Hernandez (2017), who used it to simulate a stellar cluster.
+However, a drawback of the DH17 algorithm we found was the lack of precision caused by cancellations between the backward drifts and forward Kepler steps. We have fixed this problem by carrying out analytic cancellation of these expressions with modified versions of Gauss's  and  functions. This fix creates an algorithm which is both numerically stable and precise: energy and angular momentum are conserved well for long integrations. The algorithm is accurate to fourth order in time step, but even for large time steps it will integrate the non-Keplerian perturbations between the bodies with sufficient accuracy for observational data (and the time step can be decreased until the desired precision is reached; this happens rapidly thanks to the fourth-order scaling of the algorithm with time step). This accuracy is higher order than the Wisdom-Holman symplectic integrator or its versions with symplectic correctors, which have error terms scaling as 2. As with any symplectic integrator, the integration coordinates are offset slightly from the real coordinates (Wisdom et al. 1996), which causes a long-term phase shift. However, this shift is small, even for large time steps, and should not affect the interpretation of the state of multi-body dynamical systems. In practice it
+
+Derivatives of TTVs 17
+results in a slight offset of the initial coordinates which is caused by introducing high-frequency terms in the physical Hamiltonian.
+In order to compute the derivatives of the transit times with respect to the initial conditions, we have propagated the Jacobian of the body positions and velocities with respect to the initial conditions and masses throughout each timestep of the -body integration. We have eliminated numerical cancellations in this expansion, and used series expansions for special functions when cancellation of the leading orders occurs. This has given an algorithm which yields precise derivatives and which appears to adhere to Brouwer's law for up to 107 timesteps for the problem we tested. We also find that it compares favorably in run time to the variational equations integrated by 15 (Rein & Tamayo 2016), with a factor of 4-10 speed-up for long time steps in the comparison we tested.
+We have found that the derivatives make possible the optimization of the masses of planets in the TRAPPIST-1 planetary system, and the results compare well with an analysis with the GENGA code (Grimm & Stadel 2014), as reported in Agol et al. (2021). In particular, we were able to use the derivatives to efficiently find the maximum likelihood and to compute the Hessian at the maximum likelihood. We have also used it to find the likelihood profile as a function of the masses of the planets and orbital parameters, as well as to run a Hamiltonian Markov Chain Monte Carlo computation in 35 dimensions to derive the posterior distribution for the system parameters, which agree well with a complementary analysis based on the code described in Grimm et al. (2018). Finally, the derivatives enabled an efficient search for an eighth planet, which required optimization over 40 free parameters; no strong evidence for an eighth planet turned up in this search (Agol et al. 2021).
+These analyses depend on initial conditions which were specified in terms of orbital elements, which we plan to describe in subsequent work. We are also continuing to develop the output options, API, and documentation, and we welcome community contributions to the code repository.14
+There are some limitations to our work. Due to its symplectic nature, our code does not allow for non-conservative effects to be included, such as tidal forces, drag, or general relativity. However, these could be added in future work through the machinery described by Tamayo et al. (2020). We assume that the masses of the bodies are constant. We do not compute second- or third- order derivatives, as has been implemented by Rein & Tamayo (2016). Even so, we expect this code to find application in a wide range of dynamical problems related to observation of exoplanetary systems and beyond.
+ACKNOWLEDGMENTS
+EA acknowledges support from the Guggenheim Foundation, from NSF grant AST-1615315, and from the NASA Astrobiology Institute's Virtual Planetary Laboratory Lead Team, funded through the NASA Astrobiology Institute under solicitation NNH12ZDA002C and Cooperative Agreement Number NNA13AA93A. ZL acknowledges support from the Washington NASA Space Grant Consortium Summer Undergraduate Research Program. We thank Mosé Giordano for advice on optimizing Julia code, and we thank Hanno Rein, Dan Tamayo, and the anonymous referee for comments on the submitted version which greatly improved the paper.
+14 http://github.com/ericagol/NbodyGradient.jl
+MNRAS 000, 1­24 (2020)
+
+18 E. Agol et al.
+DATA AVAILABILITY
+No new data were generated or analysed in support of this research. Simulated data which was used for making the figures will be made available in a github repository.
+REFERENCES
+Agol E., Deck K., 2016, The Astrophysical Journal, 818, 177 Agol E., Fabrycky D. C., 2017, in Deeg H. J., Belmonte J. A., eds,
+, Handbook of Exoplanets. Springer International Publishing, Cham, pp 1­20, doi:10.1007/978-3-319-30648-3_7-1, https://doi.org/10. 1007/978-3-319-30648-3_7-1 Agol E., Steffen J., Sari R., Clarkson W., 2005, MNRAS, 359, 567 Agol E., et al., 2021, The Planetary Science Journal, 2, 1 Bezanson J., Edelman A., Karpinski S., Shah V. B., 2017, SIAM Review, 59, 65 Blackford L. S., et al., 2002, ACM Transactions on Mathematical Software, 28, 135 Borsato L., Marzari F., Nascimbeni V., Piotto G., Granata V., Bedin L. R., Malavolta L., 2014, Astronomy & Astrophysics, 571, A38 Borsato L., et al., 2019, Monthly Notices of the Royal Astronomical Society, 484, 3233 Brouwer D., 1937, The Astronomical Journal, 46, 149 Carter J. A., et al., 2011, Science, 331, 562 Channell P., Scovel J., 1991, Physica D: Nonlinear Phenomena, 50, 80 Deck K. M., Agol E., 2015, The Astrophysical Journal, 802, 116 Deck K. M., Agol E., 2016, The Astrophysical Journal, 821, 96 Deck K. M., Agol E., Holman M. J., Nesvorný D., 2014, The Astrophysical Journal, 787, 132 Dehnen W., Hernandez D. M., 2017, MNRAS, 465, 1201 Doyle L. R., et al., 2011, Science, 333, 1602 Fabrycky D. C., 2010, in Seager S., ed., , Exoplanets. University of Arizona Press: Tucson, AZ, pp 217­238 Freudenthal J., et al., 2018, Astronomy & Astrophysics, 618, A41 Girolami M., Calderhead B., 2011, Journal of the Royal Statistical Society: Series B (Statistical Methodology), 73, 123 Gonçalves Ferrari G., Boekholt T., Portegies Zwart S. F., 2014, MNRAS, 440, 719 Grimm S. L., Stadel J. G., 2014, The Astrophysical Journal, 796, 23 Grimm S. L., et al., 2018, Astronomy & Astrophysics, 613, A68 Hadden S., Lithwick Y., 2016, The Astrophysical Journal, 828, 44 Hadden S., Lithwick Y., 2017, The Astronomical Journal, 154, 5 Hairer E., Lubich C., Wanner G., 2006, Geometric numerical integration: structure-preserving algorithms for ordinary differential equations in Springer Series in Computational Mathematics, vol. 31. Springer Science & Business Media Hairer E., McLachlan R. I., Razakarivony A., 2008, BIT Numerical Mathematics, 48, 231 Hamers A. S., Portegies Zwart S. F., 2016, MNRAS, 459, 2827 Hernandez D. M., 2016, Monthly Notices of the Royal Astronomical Society, 458, 4285 Hernandez D. M., Bertschinger E., 2015, Monthly Notices of the Royal Astronomical Society, 452, 1934 Hernandez D. M., Bertschinger E., 2018, MNRAS, 475, 5570 Hernandez D. M., Dehnen W., 2017, Monthly Notices of the Royal Astronomical Society, 468, 2614 Holman M. J., Murray N. W., 2005, Science, 307, 1288 Holman M. J., et al., 2010, Science, 330, 51 Jontof-Hutter D., 2019, Annual Review of Earth and Planetary Sciences, 47, 141 Jontof-Hutter D., et al., 2016, The Astrophysical Journal, 820, 39 Kahan W., 1965, Communications of the ACM, 8, 40 Laughlin G., Chambers J. E., 2001, ApJ, 551, L109 Linial I., Gilbaum S., Sari R., 2018, The Astrophysical Journal, 860, 16 Lithwick Y., Xie J., Wu Y., 2012, The Astrophysical Journal, 761, 122 Malhotra R., Black D., Eck A., Jackson A., 1992, Nature, 356, 583
+MNRAS 000, 1­24 (2020)
+
+Meschiari S., Laughlin G. P., 2010, ApJ, 718, 543 Mikkola S., Innanen K., 1999, Celestial Mechanics and Dynamical Astron-
+omy, 74, 59 Nesvorný D., Beaugé C., 2010, The Astrophysical Journal, 709, L44 Nesvorný D., Vokrouhlický D., 2014, The Astrophysical Journal, 790, 58 Nesvorný D., Vokrouhlický D., 2016, The Astrophysical Journal, 823, 72 Pál A., 2010, Monthly Notices of the Royal Astronomical Society, 409, 975 Peale S. J., 1993, The Astronomical Journal, 105, 1562 Rasio F. A., Nicholson P. D., Shapiro S. L., Teukolsky S. A., 1992, Nature,
+355, 325 Rein H., Tamayo D., 2015, MNRAS, 452, 376 Rein H., Tamayo D., 2016, MNRAS, 459, 2275 Tamayo D., Rein H., Shi P., Hernandez D. M., 2020, MNRAS, 491, 2885 Wisdom J., Hernandez D. M., 2015, Monthly Notices of the Royal Astronom-
+ical Society, 453, 3015 Wisdom J., Holman M., 1991, The Astronomical Journal, 102, 1528 Wisdom J., Holman M., Touma J., 1996, Fields Institute Communications,
+10, 217 Wolfram Research I., 2019, Mathematica, Version 12.0 Wolszczan A., 1994, Science, 264, 538 Wolszczan A., Frail D. A., 1992, Nature, 355, 145 Yoffe G., Ofir A., Aharonson O., 2021, The Astrophysical Journal, 908, 114
+
+APPENDIX A: DERIVATION OF AHL21 KEPLER + DRIFT STEP
+
+Here we give more detail for the derivation of the combined Kepler
+and Drift steps which were described in §3.3. As a reminder, we start with two bodies  and  with relative coordinates x  = x - x  and v  = v - v  . In this section we drop the subscript  . At the start of the time step, the coordinates are x0 and v0, while at the end of the time step the coordinates are x and v. We propagate these forward
+with either a negative drift followed by a Kepler step, yielding a change in position and velocity of xDK and vDK, or a Kepler step followed by a negative drift, yielding xKD and vKD. In the process we need to solve Kepler's equation 14. The two pathways are shown
+in Figure 1. A1 Drift then Kepler
+
+As discussed in §3, the negative drift is taken first, yielding an intermediate position x^0 = x0 - v0. The resulting change in position and velocity over the time step is given by equation 16,
+
+xDK = x^ - x0 = ( ^ - 1)x0 + (^ -  ^)v0,
+
+vDK = v^ - v0 = ^x0 + (^ -  ^ - 1)v0,
+
+(A1)
+
+where, again, ^, ^, ^, and ^ are all computed in terms of (x^0, v0, , ).
+
+This means that the scalar functions these depend on also need to be
+
+computed
+
+in
+
+terms
+
+of
+
+x^ 0 ,
+
+i.e.,
+
+^0
+
+=
+
+|x^ 0 |,
+
+^
+
+=
+
+2  /^0
+
+- 2,
+0
+
+^0
+
+=
+
+x^ 0
+
+·
+
+v0,
+
+and ^  =  (^, ^), where ^ can be computed with Newton's method
+
+from equation (14) evaluated using ^0, ^0, and ^ , and ^ can be
+
+computed from (13) in the same manner.
+
+The Gauss function terms in equation (16) are given as
+
+ ^ - 1 = - ^0 ^ 2,
+
+ ^ -  ^ =  ^0 ^ 2 - ^ 3 ,
+
+ ^ = - ^^0 ^ 1,
+
+
+
+^ -  ^ - 1 = ^ ^0 ^ 1 - ^ 2 ,
+
+(A2)
+
+where the 1's have been cancelled analytically for more accurate expressions at small time steps.
+
+A2 Kepler then Drift
+
+In the case of a Kepler step followed by a negative drift, the Kepler step is computed in terms of the initial coordinates, x0 and v0, yielding intermediate coordinates (x, v), and then the negative drift is applied resulting in x = x - v (Figure 1). This yields the
+change in position and velocity of:
+
+xKD = x - v - x0 = (  -   - 1)x0 + ( - )v0,
+
+vKD = v - v0 =  x0 + ( - 1)v0,
+
+(A3)
+
+where  , ,  , and  are all computed in terms of (x0, v0, , ), and the "KD" indicates that the Kepler step precedes the negative drift, Kepler-Drift.
+These functions can also be expressed in terms of the Gauss functions as
+
+
+
+
+
+ - -1
+
+=
+
+
+
+2 - 0
+
+2
+2
+
+-
+
+13
+
+,
+
+ - 
+
+=
+
+ 
+
+0 (12 - 03) + 0
+
+2
+2
+
+-
+
+13
+
+,
+
+  = -0 1,
+
+
+
+ - 1 = - 2,
+
+(A4)
+
+
+
+where we have used equations (14) and (13) to transform these equa-
+
+tions. Note that in this case each of these functions depends on
+
+(x0, v0, , ) as the Kepler step is applied before the drift.
+
+Unfortunately these equations can lead to numerical instability for small values of  = ||.15 The offending terms involve difference
+
+of
+
+products
+
+of
+
+
+
+functions:
+
+12
+
+-
+
+03
+
+and
+
+2
+2
+
+-
+
+13.
+
+These
+
+terms have a Taylor series expansion in which the leading order terms
+
+in  cancel; this is also true for the function 3.
+
+So, we define two new functions,
+
+1
+
+=
+
+
+
+2 2
+
+-
+
+
+
+1
+
+3,
+
+2 = 12 - 03,
+
+(A5)
+
+given in Table 1. In terms of these functions we have
+
+
+
+
+
+ -   - 1 =  2 - 0 1 ,
+
+
+
+ -  =  (02 + 01) .
+
+(A6)
+
+For large values of  we evaluate these with the special function
+
+definitions, summarized in Table 1, while for small values of , we
+
+evaluate 3, 1 and 2 in terms of the following Taylor series:
+
+1(, )
+
+=
+
+24
+
+
+
+
+(2) (
+
++
+
+1)
+
+,
+
+2 =0 (2 + 4)!
+
+2(, )
+
+=
+
+23
+
+
+
+
+(2) (
+
++
+
+1)
+
+,
+
+| |3/2 =0 (2 + 3)!
+
+3
+
+
+
+
+(2)
+
+3(, )
+
+=
+
+. | |3/2 =0 (2 + 3)!
+
+(A7) (A8) (A9)
+
+where  = -1 for  > 0 (elliptic) and  = 1 for  < 0 (hyperbolic)
+
+cases. Note that in evaluating these series expansions we compute
+
+each term recursively, and terminate the series expansion when the
+
+function matches one of the two prior partial sums (indicating that
+
+the series is converged to machine precision). The fact that these functions have leading terms  3 and 
+
+15 Note that in the elliptic Kepler's equation,  is equal to the change in eccentric anomaly over the time step.
+
+Derivatives of TTVs 19
+
+4 is due to cancellation of lower order terms in the trigonometric representation. This cancellation can lead to round-off errors for small values of , which are commonly encountered when there are a wide range of orbital timescales in a system. We find that higher precision is obtained by evaluating the series expressions for  < 1/2 out to  6 terms in double-precision, while for  > 1/2, higher precision is obtained from the full trigonometric expression.
+The other  functions (0, 1 and 2) we evaluate with the stable trigonometric and hyperbolic function transforms discussed in Wisdom & Hernandez (2015), also given in Table 1. With the combination of the drift and Kepler steps, it turns out that we no longer need the drift of the center-of-mass coordinates in each Kepler step as these cancel exactly. APPENDIX B: DERIVATION OF DERIVATIVES OF KEPLER+DRIFT STEPS
+
+In this appendix we give more detail on the derivation of the derivatives of the combined Kepler and drift steps, as well as formulae for the derivatives of the scalar quantities in equations 19, 20, 21, and 22. B1 Differential of intermediate quantities
+
+The differentials of 0, , 0 are given by
+
+0
+
+=
+
+x0 · x0 , 0
+
+(B1)
+
+
+
+=
+
+ 0
+
+-
+
+x0 · x0
+3
+0
+
+- 2v0
+
+· v0,
+
+(B2)
+
+0 = v0 · x0 + x0 · v0.
+
+(B3)
+
+Note that these quantities are constant over a time step, and so there is no dependence upon .
+Taking the differential of the Universal Kepler equation, 14, we find
+
+| |-1/2
+
+=
+
+  +  0 - 3
+
+-
+
+x0 ·
+
+  + 102
+
+x0 3
+
++ 2v0
+
+0
+
+- v0 · [v0 + 2x0] ,
+
+(B4)
+
+ = -1 [ + 02 + 23] .
+
+(B5)
+
+Note that the v0 · x0 and x0 · v0 have the same derivative terms; this is due to both of these terms deriving from 0.
+Taking the differential of the radial equation, (13), we find
+
+
+
+
+
+ = | |1/2 (00 +  1) + 0 (0 -  - 2)
+
++
+
+x0 ·
+
+ + 22 - 00
+
+x0  3
+
++ 1v0
+
+0
+
++ v0 · (01 + 22) v0 + 1x0 ,
+
+(B6)
+
+
+
+where we define
+
+ =  - 0.
+
+(B7)
+
+The functions  (, ) have derivatives in terms of  and , which we can combine with the foregoing differentials for these quantities to obtain the derivatives with respect to the basis (x0, v0, , ). These intermediate derivatives of  (in both the elliptic and hyperbolic cases) are given by
+
+  +1 
+
+=
+
+ | |1/2
+
+(  0),
+
+(B8)
+
+0 = - 1 ,
+
+
+
+| |1/2
+
+(B9)
+
+MNRAS 000, 1­24 (2020)
+
+20 E. Agol et al.
+
+and
+
+
+
+=
+
+ - .
+
+
+
+2
+
+(B10)
+
+With these intermediate derivatives in hand, we can compute the full differentials of the Gauss functions in the combined drift and Kepler terms. Since these formulae differ in the two cases, we consider each separately in turn in the following two subsections. B2 Differential of drift-then-Kepler step
+
+The differential of the scalar quantities ( ^ - 1), (^ -  ^), ( ^), and (^ -  ^ - 1) should also be scalars, and can be expressed in
+terms similar to the  and  terms given above. Note, however, that as the Kepler step takes place after the negative drift, all of these functions are to be computed in terms of x^0 substituted for x0, and so we need to add an extra step in the derivation to find the differentials in terms of x0 in lieu of x^0.
+The differential of these functions in terms of intermediate scalar
+quantities is given by
+
+( ^ - 1)
+
+=
+
+ - ^0 + ^ 1
+
+^
+
+ ^ -,
+
+^ - 1
+
+ ^0 ^ 2 | ^|1/2 ^
+
+(B11)
+
+(^ -  ^) =
+
+ (^ -  ^) + 
+
+
+ - ^0 ^0 ^02
+
+^ 2
+
++
+
+^
+1
+|^| 2
+
+
+
+ ^
+
+^0 ^ 1 - ^ 2 - ^
+
+
+
+^0
+
+-
+
+3 2
+
+^ 3
+
+(,B12)
+
+ ^ 
+
+=
+
+ - ^0 - ^ + ^ 0
+
+^
+
+-
+
+1
+
+ ^ ,
+
+ ^0 ^ ^ 1 |^|1/2 2 ^
+
+(B13)
+
+(^ -  ^ - 1) =
+
+ - ^0 - ^
+
+^0^
+
+^2^
+0
+
+^0^2
+
+^ 1 - ^0^ 2
+
++
+
+ ^0^
+
+^ 1
+
+-
+
+^0^ 2
+
+-
+
+1 2
+
+ ^ ^
+
+^ 1 - 2^0^ 2
+
++
+
+^ 0 - 0^ 1
+
+^ | ^|1/2
+
+.
+
+(B14)
+
+In this equation we have used the `^' symbol to indicate that each of
+
+these quantities is a function of x^0 rather than x0 (with the exception
+
+of  and ). Into these differentials we can substitute our expressions
+
+for ^, ^, ^0, ^0, and ^ given above, keeping in mind that these
+
+need to be computed in terms of x^0 and x^0 substituted for x0 and
+
+x0. Then, we need to replace the differential x^0 by x0-v0-v0.
+
+The v0 term leads to dot products of v0 · x^0 = ^0 and v0 · v0 =
+
+2 ^0
+
+-
+
+^.
+
+The
+
+algebraic
+
+computation
+
+of
+
+these
+
+operations
+
+was
+
+aided
+
+by Mathematica (Wolfram Research 2019), yielding the following
+
+results:
+
+( ^ - 1) ^ - 1
+
+=  A + A + x0 · x0A
+
++ (x0 · v0)A + v0 · v0A  ,
+
+A = 1 - 2 + 11 ,  0 02
+
+A = 1 2 -  + 1 - 240,
+
+ 0
+
+2
+
+A = 24,
+
+A
+
+=
+
+-
+
+24 
+
++
+
+1 
+
+,
+
+A  = 1  6 - 02 +  (21 + 24) , (B15)  2
+
+(^ -  ^) = B + B + x0 · x0B MNRAS 000, 1­24 (2020)
+
++ (x0 · v0)B + v0 · v0B  ,
+
+B
+
+=
+
+- 9  + 113  + 2 - 30 ,
+
+2 2
+
+0
+
+0
+
+0
+
+B = 2 + 13 + 213 2 -  - 010,
+
+0 0
+
+0 0
+
+B = 10,
+
+B
+
+=
+
+-
+
+10 
+
++
+
+132  0
+
+,
+
+B 
+
+=
+
+2   2 13 0
+
++
+
+2  10
+
++
+
+ 0
+
+2
+0
+
+8
+
+-
+
+
+
+0
+
+2 2
+
++
+
+(
+
++
+
+00 ) 6
+
+(B, 16)
+
+ ^ =  C + C + x0 · x0C
+^
+
++ (x0 · v0)C + v0 · v0C  ,
+
+C
+
+=
+
+1 - 1 - 17 - 1 (12 - 0) ,
+
+ 0 0
+
+201
+
+C
+
+=
+
+22
+
+2 -  0
+
+-
+
+2 2
+
++
+
+210
+
++
+
+0 1
+
+,
+
+C = 21,
+
+C = 22 - 21 , C  = 34 - 222 + 221,
+
+(B17)
+
+(^ -  ^ - 1) =  D + D + x0 · x0D
+
++ (x0 · v0)D + v0 · v0D  ,
+
+D
+
+=
+
+1 0
+
+-
+
+ (13 - 20) 0
+
++
+
+13
+
+- 1317 + 112 - 1213 ,
+
+0
+
+0
+
+20
+
+D
+
+=
+
+1 + 12 - 132 0 20 30
+
+-
+
+26
+
+2 -  0
+
+- 250,
+
+D = 25,
+
+D = 26 - 25 ,
+
+D  = 33 + 252 - 226,
+
+(B18)
+
+with auxiliary quantities defined as
+
+1 =  - 03,
+
+2 = 00 + 1,
+
+3 =   + 102,
+
+4 = 01 + 200,
+
+5
+
+=
+
+0 - 2 , 1
+
+6
+
+=
+
+00 - 2 , 
+
+7
+
+=
+
+2
+
+1 + 2 1 
+
+,
+
+8
+
+=
+
+ -3
+0
+
+(6
+
++
+
+0
+
++
+
+35)
+
+,
+
+9 = 22 - 303,
+
+10
+
+=
+
+ 4
+
+-20 +
+
+9 
+
+-
+
+ 3  13 
+
+,
+
+0
+12 = 0 - 10,
+
+13 = 1 - 20,
+
+17 = 0 -  - 2,
+
+18 = 01 + 22,
+
+20 =  (2 + ) - 00 ,
+
+21
+
+=
+
+(2 - 0)(3 - 1)
+
++ 01
+
+-
+
+2 ,
+
+ 2  03  1
+
+2 2
+
+0
+
+0
+
+22
+
+=
+
+1 
+
+- 1
+
+-
+
+02 1
+
++
+
+22 
+
+,
+
+24
+
+=
+
+1
+3
+0
+
+0
+
+2 - 1 - 13
+
+0
+
+2
+
+,
+
+25
+
+=
+
+
+2
+0
+
+- 2
+
++
+
+ (13 - 20)
+ 2
+0
+
+-
+
+13 0
+
+-
+
+ 12  3
+2
+0
+
++ 1323 - 13 ( (2 + ) - 00 ) ,
+
+22
+
+  2
+
+0
+
+0
+
+26
+
+=
+
+ 20
+
+-212 - 113 + 2132 
+
+,
+
+2 33 = 30 (2 - 03)
+
++
+
+  20
+
+-
+
+0
+
+
+
+1
+
+2 2
+
+-
+
+
+
+1
+
+2
+
+3
+
+
+
+2
+
+-
+
+00
+
+
+
+1
+
+2 2
+
+-
+
+0   1 2
+
+-
+
+ 22  0  02
+
+,
+
+34
+
+=
+
+1  2
+
+- (02 + 01)2 - 0 8 - 62
+
++
+
+(
+
+2 2
+
+-
+
+3 1
+
+
+
+3)
+
+
+
+0
+
++ 022 +  8 , 1 1
+
+(B19)
+
+where we have dropped the ^ superscript on the right hand side of equations B15-B19 for legibility, but note that all scalar quantities in these equations which are a function of x0 must be evaluated as a function of x^0 in lieu of x0. In these equations, we have taken care to analytically cancel terms to leading order in  by defining the
+following functions
+
+3 = 12 - 33,
+
+4 = -1,
+
+5 = 12 - (2 + 0)3,
+
+6 = 222 - 313,
+
+7
+
+=
+
+12
+
+-
+
+2 0  1  2
+
++
+
+3
+
+2
+0
+
+3
+
+=
+
+
+
+1
+
+2 2
+
+-
+
+ 0 8 ,
+
+8 = 12 - 303 = -23 + 35.
+
+(B20)
+
+These functions are tabulated in Table 1. As with 3, 1 and 2, for small values of  we evaluate these with a series expansion:
+
+3(, )
+
+=
+
+- 45
+
+
+
+
+(2) (4+1
+
+-
+
+1)
+
+,
+
+| |1/2 =0
+
+(2 + 5)!
+
+5(, )
+
+=
+
+- 25
+
+
+
+
+(2) (
+
++
+
+1)
+
+,
+
+| |1/2 =0 (2 + 5)!
+
+(B21) (B22)
+
+6(, )
+
+=
+
+26
+
+
+
+
+(2)
+
+4+2 - 3 - 7
+
+,
+
+2 =0
+
+(2 + 6)!
+
+(B23)
+
+where  = -1 for  > 0 (elliptic) and  = 1 for  < 0 (hyperbolic) cases. The coefficients of these series are computed recursively for efficiency. Note that we found expressions for 4, 7, and 8 in terms of the other  and  functions. B3 Differential of Kepler then drift step
+
+The Kepler step followed by a negative drift is slightly simpler as the Gauss functions can be expressed in terms of x0 rather than x^0. The differential of the scalar functions are given by
+
+(  -  -1) =  E + E + x0 · x0E
+
++ (x0 · v0)E + v0 · v0E  ,
+
+E =  - 1417 - 22 + 41 
+
+0 0  0
+
+-
+
+ 1  14  2 20
+
++
+
+1 (10 - 2) 0
+
++
+
+14 
+
+- 1
+
+,
+
+Derivatives of TTVs 21
+
+E
+
+=
+
+ 2
+
+- 142 0
+
++ 1
+
+-
+
+2  0
+
+,
+
+E
+
+=
+
+
+ 3 4
+0
+
+3 (142 + 23) + 1 20
+
+ - 2 0
+
++ 14 00 +  ( - 2 ) ,
+
+E
+
+=
+
+ 20
+
+ 14  2  2 
+
++  (11 + 22) - 2120
+
+,
+
+ E  = 20 20  (23 - 11)
+
++ (332 - 412)2 + 20 (31  - 20)
+
++
+
+14 
+
+- (2 + 10)2 + 0  (203 - 2)
+
++  0 (1 - 213) - 6 2 ,
+
+(B24)
+
+( - ) =  F + F + x0 · x0F
+
++ (x0 · v0)F + v0 · v0F  ,
+
+F
+
+=
+
+ 15 - 1517 - 19 - 1152 + 116 ,
+
+  0 0 20
+
+0
+
+ F = 3 [16 - 152] ,
+
+F =  - 15 ( (2  + ) - 00 ) + 19 
+
+0
+
+  2
+
+ 2
+
+0
+
+0
+
++
+
+ 15  2  3 22
+
+-
+
+ 16  3 2
+
++ 2
+
+,
+
+0
+
+0
+
+F 
+
+=
+
+ 2
+
+ 15  2  2 
+
+- 151 - 162
+
++ 1
+
+,
+
+F 
+
+=
+
+  2
+
+202 (11 - 23) + 0  (421 - 323)
+
++ 00 (401 - 213)
+
++ 30  (1 + 3)1 - 32
+
++
+
+ 0 8
+
+-
+
+1
+
+(2
+2
+
++ 13)
+
+2
+0
+
+-
+
+15 
+
+22
+20
+
++
+
+0 8
+
++
+
+6
+
+2
+
++
+
+22
+10
+
++
+
+20  1  2
+
+-
+
+
+
+(2
+2
+
+-
+
+3 1  3 )
+
+0
+
+,
+
+(B25)
+
+ =  G + G + x0 · x0G
+
+
++ (x0 · v0)G + v0 · v0G  ,
+
+G
+
+=
+
+1 + 1 (0 - 2) -  + 17 ,
+
+
+
+021
+
+0
+
+G
+
+=
+
+0 - 2 , 21
+
+G = 1 -  (2 - 0) + 23 - 30
+
+2
+0
+
+0
+
+20 10
+
++ 01 - 2 , 
+
+G = - 1 02 + 01 + 02 ,
+
+ 1
+
+
+
+G 
+
+=
+
+1  2
+
+(0
+
+2
+2
+
+
+
++
+
+ 8)(00 1
+
++
+
+2)
+
+-
+
+6  2
+
++
+
+0
+
+( (1
+
+-
+
+2 1  3 )
+
+-
+
+20  1  2 )
+
+-
+
+22
+10
+
+(,B26)
+
+( - 1) = H + H + x0 · x0H + (x0 · v0)H + v0 · v0H  ,
+MNRAS 000, 1­24 (2020)
+
+22 E. Agol et al.
+
+H
+
+=
+
+1 2  (-2  +  + 0) + 122 
+
+0
+
+
+
+2
+
+-
+
+11 
+
+- 20
+
+,
+
+ H = 3 [22 - 1] ,
+
+H =  2( (2 - ) - 00)
+
+23
+
+
+
+0
+
++ 3(02 + 10) , 
+
+H
+
+=
+
+2 3
+
+[1
+
++ 01
+
++ 02] ,
+
+H 
+
+=
+
+  3
+
+2
+0
+
+3
+2
+
+-
+
+0
+
+  2 3
+
++
+
+300
+
+
+
+1
+
+2 2
+
++ 0 (3123 - 06)
+
++
+
+2
+
+02
+
++
+
+2
+1
+
+2
+0
+
+,
+
+(B27)
+
+with additional auxiliary definitions,
+
+14 = 02 -  1,
+
+15 16
+
+= =
+
+0 1 0 2
+
++ +
+
+20, 10
+
+| |-1/2,
+
+17 = 0 -  - 2,
+
+19 = 401 + 320,
+
+23 =  2 - 01.
+
+(B28)
+
+Note that in this case, as the Kepler step takes place first, all of the scalar quantitites in this equation are defined in terms of x0. APPENDIX C: KEPLER + DRIFT MASS DERIVATIVE
+EXPRESSIONS
+
+Here are the functions 1 - 4 used in computing the mass derivatives in equations 25 and 26:
+
+1 = ^0^4 +  ^6, 2 = ^6^ 3 2 + ^0^0 (^6 + ^ 2^4) + ^02^ 0^5 + ^0^ 2^6
++ (^ 1^6 + ^ 3^4)^0, 3 = -(^ 2  - ^0) (^^0 (^ 3 - ^ 1^ 2) - ^^0^ 22 +  ^3),
+
+4
+
+=
+
+
+
+-
+
+^^02
+
+^ 4
+2
+
++
+
+^0^
+
+2
+
+(^
+
+1^
+
+2 2
+
++
+
+^ 2
+1
+
+^ 3
+
+-
+
+5^ 2^ 3)
+
++
+
+^ 2^ 3^3
+
+2
+
++
+
+2^0^0
+
+^^
+
+2 2
+
+(^
+
+3
+
+-
+
+^ 1^ 2)
+
++ (4^ 3 - ^ 0^ 3 - ^ 1^ 2) (^ 3 - ^ 1^ 2)^0 
+
+- ^(^ 3 - ^ 1^ 2)2^02 ,
+
+(C1)
+
+and the functions 5 - 8 used in computing the mass derivatives in equations 27 and 28:
+
+5 =  20  (11 - 32) + (421 - 332)2
+
+-
+
+00
+
+ 1 1
+
++
+
+( 3 2
+
+-
+
+421) 0
+
++
+
+ 2 1
+
+22
+0
+
+-
+
+14
+
+-
+
+2
+0
+
+2
+2
+
+-
+
+ 0 8
+
+-
+
+00
+
+(12
+
++
+
+03)
+
++
+
+2(1
+
+-
+
+13)0
+
+-
+
+ 2 6
+
+-
+
+(2
+
+-
+
+1
+
+
+
+3)
+
+ 2
+0
+
+,
+
+6 = 0 202 (32 - 11) + 0  (332 - 421)
+
++ 00 3 (12 + 03) - 206 + - 6 (1 + 3) + 2 (23 - 2) 0 
+
++
+
+7
+
+-
+
+2
+
+1
+
+
+
+2 3
+
+2
+0
+
+-
+
+ 0  15
+
+-
+
+22
+02
+
++
+
+0 
+
+(-2
+
++
+
+2 0  3 )
+
+-
+
+6  2
+
+-
+
+00  2 + 203
+
++
+
+2
+
+21
+
+- 2
+2
+
+0
+
++
+
+
+
+13 - 2
+
+2
+0
+
+,
+
+MNRAS 000, 1­24 (2020)
+
+7
+
+=
+
+(0
+
+-
+
+
+
+2)
+
+(-0
+
+
+
+2 2
+
++
+
+3 
+
++
+
+(3
+
+-
+
+12)
+
+0),
+
+8
+
+=
+
+ 1 ( 3
+
+-
+
+ 1  2 )  02
+
+-
+
+23
+02
+
++
+
+0   2 3
+
++ 00 2 (3 - 212) + (6 - 32)0  .
+
+(C2)
+
+APPENDIX D: TABLE OF NOTATION Table D1 lists the mathematical symbols used throughout this paper.
+
+Derivatives of TTVs 23
+
+Table D1: Symbols used in this paper
+
+Symbol a a   
+A , A, A, ..., H , H AU
+sky,   1 - 34
+
+
+
+ , 0  , ,  ,  ^, ^, ^, ^ sky,ij
+
+ ^ 
+
+
+,  1 - 8
+,  1 - 8
+Jkep Jsubstep,Jsubstep
+Jcurrent,Jprior JD
+JAHL21 J
+J4th JDK,ij, JKD,ij
+
+ 
+
+  m 
+
+
+ q () q() q qcurrent,qprior, q 0, ,   ^0, ^
+
+ init, 
+0 
+ 
+
+Definition
+Instantaneous acceleration of body . Difference in acceleration between bodies  and . Set of pairs of bodies interacting via fast kicks. Set of pairs of bodies interacting drift + Keplerian (complement of ). Terms used in derivatives. Astronomical unit. The impact parameter at the th time of transit of body  in front of body . Quantities defined for computing derivatives of drift+Kepler. Constant in correction term. Distance to observer. Orbital eccentricity. Constant used in computing derivatives. Energy error and initial total energy. Gauss's Kepler propagation functions.
+Gauss's functions for drift-then-kepler. Sky plane velocity dotted w/ position between bodies  and . Newton's constant. Functions used in universal Kepler solver. Functions used in universal Kepler solver after initial drift. Symplectic integrator time step (days). Hamiltonian. Integrable Hamiltonians in symplectic splitting. Combinations of  functions used in combined Kepler-drift step and derivatives. Label for bodies  and . Intermediate variables used in mass derivatives. Jacobian of Kepler/drift step between two bodies (7x7 matrix). Jacobian of any substep is Jsubstep = I + Jsubstep. Jacobians of the current and prior steps. Jacobian of drift step is I + JD. Jacobian of single symplectic step. Jacobian after th step. Jacobian of fourth-order correction I + J4th. Jacobian of Kepler+drift substep for bodies  and . Central force constant (=  ( +   )). Keplerian for pair of bodies  and . Mass of th body. Sum of masses of bodies  and . Vector of masses. Solar mass. Number of time steps elapsed. Number of bodies in system. Number of time steps Coordinates of the th body at time t Position, velocity, mass vector of all bodies (system state at time ). q() at th time step. System state at current and prior substep, and the difference: q = qcurrent - qprior Initial/final separation between bodies  and  for Kepler solver. Initial/final separation between bodies  and  for drift+Kepler solver. Independent variable in universal Kepler step. Current simulation time. Initial and final fraction of a timestep to transit time. Initial time of integration (days). Time after th step:  = 0 + . The th time of transit of body  in front of body .
+
+Reference (39) §4.8 §4.7, Alg. 2 §4.7, Alg. 2 (B15)-(B27) §4.2 §4.11 (B19),(B28) §4.8 §4.3 §5.1 (B4) §5.2 §3.2 §3.3.1 (49) (4) Table 1 §A1 §2 (1) (2) Table 1, (A5), (B20) (1) (C1),(C2) §4.4 (45) (45) §4.6 §4.9 §4.12 §4.8 §4.5 (4) (1) §4.1 §3.2 §4.1 §4.2 §4.11 §4.1 §5.2,§5.5 (18) §4.3 §4.11 §4.10 §3.2 §A1 §3.2 §2, Alg. 1,2 §4.11 §2, Alg. 1,2 §4.11 §4.11
+
+MNRAS 000, 1­24 (2020)
+
+24 E. Agol et al.
+Symbol max T  
+  v 0,  sky,   v = (, , ) 
+  w  x = (, , ) x  , v  x0, v0 x^ 0 x^, v^ x , v x, v x  , v  x,  , v,  x, , v, obs 0, 0 
+ ^
+
+^ ^0 
+err diff
+
+
+
+
+Table D1 ­ continued from previous page Definition
+Duration of simulation (days). Correction tensor. Total kinetic energy. Kinetic energy of bodies  and . Pairwise velocity kick or correction of th body (instead of Kepler step). Initial/final relative speed in Kepler problem. The sky velocity at the th time of transit of body  in front of body . Cartesian velocities of th body Total potential energy. Potential energy of bodies  and . Intermediate quantity for kick derivative. Cartesian coordinates of th body Relative position and velocity of bodies  and  (x, v in §3.2). Relative position and velocity of bodies  and  at start of universal Kepler step Intermediate position in DK step. Final position and velocity in DK step. Change in position and velocity for DK step between bodies  and . Intermediate position and velocity in KD step. Change in position and velocity for KD step between bodies  and . Change in position and velocity for KD step for body . Change in position and velocity for DK step for body . Observer position. Quantities used in Kepler solver. Factor from DH17 algorithm(set to zero). Dimensionless energy for Kepler step. Dimensionless energy for drift+Kepler step. Variable used in defining  functions. = ||1/2 Value of  computed after an initial drift. Dot product of velocity and position after an initial drift. Small parameter in Hamiltonian splitting for general symplectic integrator. Numerical error. Fractional change in parameters for finite difference. Sign of . Intermediate variable. Longitude of periastron.
+
+Reference §2, Alg. 1,2 (38) (1) (1) (33), (37), (43) §3.2 §4.11 (3),§4.3 (1) (1) (34) (3), §4.3 (4) §3.2 (15) §3.3.1 (16),(A2) §3.3.2 (17),(A3) (23) (23) §4.3 §3.2 §2, §4.8 (7) (A1) Table 1 §A1 §A1 (2) §5.2 (64) (A7-A9),(B21-B23) (B7) §5.1
+
+This paper has been typeset from a TEX/LATEX file prepared by the author.
+
+MNRAS 000, 1­24 (2020)
+
+

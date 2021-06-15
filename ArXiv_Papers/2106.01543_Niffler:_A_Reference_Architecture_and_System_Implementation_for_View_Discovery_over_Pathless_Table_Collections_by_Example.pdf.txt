@@ -1,0 +1,1216 @@
+Niffler: A Reference Architecture and System Implementation for View Discovery over Pathless Table Collections by Example
+
+arXiv:2106.01543v1 [cs.DB] 3 Jun 2021
+
+Yue Gong*, Zhiru Zhu*, Sainyam Galhotra, Raul Castro Fernandez
+The University of Chicago [yuegong, zhiru, sainyam, raulcf ]@uchicago.edu
+
+ABSTRACT
+Identifying a project-join view (PJ-view) over collections of tables is the first step of many data management projects, e.g., assembling a dataset to feed into a business intelligence tool, creating a training dataset to fit a machine learning model, and more. When the table collections are large and lack join information--such as when combining databases, or on data lakes--query by example (QBE) systems can help identify relevant data, but they are designed under the assumption that join information is available in the schema, and do not perform well on pathless table collections that do not have join path information.
+We present a reference architecture that explicitly divides the end-to-end problem of discovering PJ-views over pathless table collections into a human and a technical problem. We then present Niffler, a system built to address the technical problem. We introduce algorithms for the main components of Niffler, including a signal generation component that helps reduce the size of the candidate views that may be large due to errors and ambiguity in both the data and input queries. We evaluate Niffler on real datasets to demonstrate the effectiveness of the new engine in discovering PJ-views over pathless table collections.
+PVLDB Reference Format: Yue Gong*, Zhiru Zhu*, Sainyam Galhotra, Raul Castro Fernandez. Niffler: A Reference Architecture and System Implementation for View Discovery over Pathless Table Collections by Example. PVLDB, 14(1): XXX-XXX, 2020. doi:XX.XX/XXX.XX
+1 INTRODUCTION
+At the beginning of many data management tasks, there is a dataset produced by a Project-Join query over a collection of tables that may originate from the combination of disparate databases [15], from data lakes [35], open data portals [24], and from cloud repositories [1] or any combination of the above. These datasets, henceforth called Project-Join views (PJ-views), may be the training dataset that machine learning engineers need to train a new model, or the dataset that citizen journalists want to find in open data repositories to answer a question of interest, or the combination of tables from different databases a data analyst wants to feed into a business intelligence tool to build a new dashboard for the organization.
+This work is licensed under the Creative Commons BY-NC-ND 4.0 International License. Visit https://creativecommons.org/licenses/by-nc-nd/4.0/ to view a copy of this license. For any use beyond those covered by this license, obtain permission by emailing info@vldb.org. Copyright is held by the owner/author(s). Publication rights licensed to the VLDB Endowment. Proceedings of the VLDB Endowment, Vol. 14, No. 1 ISSN 2150-8097. doi:XX.XX/XXX.XX
+*Yue Gong and Zhiru Zhu contributed equally.
+
+Discovering the right PJ-view is crucial to the performance of these tasks, but hard for two reasons: i) large data volumes make it difficult to determine which tables are relevant; ii) these collections of tables are pathless, i.e., lack join paths, so it is hard to combine tables with each other. Query-by-example (QBE) approaches identify PJ-views over tables without requiring schema knowledge to produce the examples. But QBE systems are designed for scenarios where the underlying join paths are known, and they do not work well over pathless table collections.
+Many data discovery approaches are designed to find relevant data in pathless table collections. Systems and approaches such as Aurum [9], Goods [20], Auctus [12], Juneau [54], Josie [55], Table-Union [36], D3L [4] and libraries such as LSHEnsemble [56], Lazo [18] and others help with identifying data that satisfies some relevance criteria. However, none of these approaches implement a QBE interface, which has been shown to be useful to navigate collections of tables when the schema is not known to the users [45, 57]. In summary, QBE systems help when the schema is not known to the users but the system knows the correct join paths. Data discovery approaches help navigate pathless table collections but do not provide a QBE interface.
+Discovering a relevant PJ-view over pathless table collections requires solving a human problem and a technical problem. Solving the human problem involves understanding what users need, and assisting them in taming ambiguity in the results, e.g., selecting between `work address' and `home address'. We do not address the human problem in this paper. The technical problem consists of retrieving relevant data among the many existing tables, identifying strategies to combine those tables into PJ-views, and sort through the candidates to reduce the number of candidate PJ-views.
+In this paper, we introduce a reference architecture to address the problem of PJ-view discovery over pathless table collections by example (PPE). The architecture divides the problem into components geared towards addressing the human problem, and components to address the technical problem. The explicit separation divides the problem into smaller challenges for which we can engineer new solutions and adapt existing ones. Our main contribution is an engine, Niffler, that implements the components necessary to deal with the technical challenge. Niffler implements four components. First, it uses a discovery system to find approximate paths in pathless table collections. Paths are approximate because we cannot identify correct join paths without human intervention and the scale of the problem means that human intervention would be too expensive. Second, the engine performs efficient column retrieval, identifying a set of candidate tables relevant to the input query. Third, it identifies strategies to combine the candidate tables together based on the approximate join paths. Finally, the engine will identify many candidate PJ-views. This is because some join paths
+
+will be unavoidably wrong and, even if correct, they may not fit user's relevance criteria. The engine alone cannot determine which PJ-views used a correct join path and match the user's relevance criteria, so its only option is to produce all of them. To help navigate the candidate PJ-views, Niffler implements a signal generation component that post-processes the candidate PJ-views according to a 4C (compatible, contained, complementary, contradictory) classification that helps reduce the size of the candidate PJ-views, hence facilitating the job of downstream consumers.
+The contributions of our paper are a reference architecture to divide-and-conquer the PPE problem, and Niffler, an open-source and scalable engine implementation to solve the technical component of the problem. A non-goal of our paper is to address the human problem.
+The rest of this paper is organized as follows. Section 2 presents the problem statement and challenges. We introduce the architecture in Section 3 and the engine implementation in Section 4. The evaluation results in Section 5 are followed by related work (Section 6) and conclusions.
+2 PATHLESS DATA DISCOVERY OVERVIEW
+In this section, we define the problem of constructing PJ-views over Pathless table collections by Example (PPE) (Section 2.1). We discuss the origin of pathless table collections in Section 2.2, and the challenges they introduce in Section 2.3.
+
+of the output and provides accurate examples to query the system. However, pathless table collections contain many tables and it is impossible for an individual to specify accurate examples that are present in the table collection.
+Definition 2.3 (Noisy query). The input query  is a noisy structured table consisting of  example tuples  = {1, . . . ,  } where each  is a noisy tuple denoting example values that are expected to be present in the desired output. The different columns in the examples  are denoted by  .,   {1, . . . ,  }.
+The user's table requirements are more complex than the input examples  and depending on user's knowledge some of the examples may be incorrect. Given a query , there may be many tables in the data collection that contain the input examples, and many combinations of these may satisfy , resulting in a large number of candidate PJ-views. A big challenge of navigating pathless table collections is to reduce the size of the set of candidate PJ-views
+Problem 1 (Project-Join View Discovery over Pathless Table Collections). Consider a Pathless Table Collection D and a query  that contains a set of examples . The goal is to construct a small candidate set of PJ-views D that satisfy the user requirements.
+Because many PJ-views may partially satisfy , the problem is defined as identifying a set of candidate PJ-views. We want the set to contain PJ-views relevant to  while minimizing the number of non-relevant ones.
+
+2.1 Definitions and Problem Statement
+Let R (1, . . . , ) denote a relation schema over  attributes, where  denotes the  attribute. A clean structured table  comprises of a schema R (1, . . . , ) and a set of tuples  where each tuple    is a specific instance of the schema.
+In practice, tables do not look like the ideal defined above because they may lack header information, have ambiguous names and contain dirty and noisy data. More formally,
+Definition 2.1 (Noisy structured data). A noisy dataset  collected from a pathless table collection is characterized by an incomplete schema information R (1, . . . , ) where  =  for missing header values and tuples  such that each tuple    contains at most  values.
+Even in settings where a dataset schema is complete, a pathless collection may contain datasets with contradictory values. For example, two different census tables containing different population count for the same states of the country.
+Definition 2.2 (Pathless Table Collection). A pathless table collection over sources S contains a set of noisy structured tables D = {1, . . . ,  } where each  is a noisy structured table generated by a source   S, and datasets ,   may contain contradictory values.
+Sources may contain overlapping tables and have varied degrees of quality--some sources generating accurate data while others containing noisy, ambiguous, and incorrect values.
+PJ-example-query A PJ-query (hereafter called query) contains example tuples indicating what kind of data should appear in the desired output. In an ideal setting, a knowledgeable expert is aware
+
+2.2 What is a Pathless Table Collection?
+Pathless table collections arise in a wide variety of scenarios discussed below. Multi-source data integration. Organizations use multiple databases to accomplish their goals, e.g., human resources, product, marketing, etc. While each individual database may be well designed and contain a rich schema, there is no join path information across databases, and combining disparate databases is a demand of modern workloads. For example, consider an ML engineer who wants to combine data from the product database with the marketing database to assemble a training dataset. When attempting to do so, the ML engineer faces a PPE problem: understanding what tables to use and how to combine them is challenging. Data lakes and cloud storage. To facilitate access to datasets, many organizations use data lakes, which serve as central repositories. Cheap storage means there is a tendency to hoard datasets in the lakes if they hold any promise to be useful in the future. These datasets do not have join path information, and data lakes do not have a discovery function. As a result, despite the potential upsides, finding relevant datasets in data lakes becomes a bottleneck. This challenge explains the rise of data discovery solutions [9, 12, 20, 36, 54]. Open data repositories. Recently, many government websites like data.gov in the Unites States, data.gov.uk in UK have openly shared datasets. Web data commons (WDC) has also shared a corpus of around 200M web tables crawled from more than 15M web domains. The datasets available from these different sources use different naming conventions and have varied representations. For example, date in UK vs US date format. Furthermore, these datasets are usually created by independent agencies and pushed to the
+
+2
+
+Technique
+
+Supports
+
+Handles
+
+Output
+
+Type
+
+Pathless Example Noise Interface
+
+QBE
+
+QRE
+
+MWeaver [40]
+
+S
+
+Shen et al. [31] A
+
+S4:FastTopK [39] S
+
+Bonifati et al. [5] A
+
+SQuID [17]
+
+S
+
+DuoQuest [2]
+
+S
+
+TALOS [45]
+
+S
+
+Sarma et al. [13] A
+
+SQLSynthe[51] S
+
+Zhang et al. [49] A
+
+Li et al. [31]
+
+A
+
+PALEO-J [38]
+
+S
+
+SCYTHE [47]
+
+A
+
+REGAL [43]
+
+A
+
+REGAL+ [44]
+
+S
+
+FastQRE [28]
+
+A
+
+Niffler
+
+S
+
+N
+
+N
+
+Top-k
+
+Uses string
+
+N
+
+All
+
+fuzzing matching
+
+Uses a
+
+N
+
+Top-k
+
+scoring model
+
+1
+
+
+N
+
+Top-1
+
+N
+
+N
+
+Top-1
+
+Uses natural
+
+N
+
+Top-k
+
+language queries
+
+N
+
+N
+
+Top-k
+
+N
+
+N
+
+Top-1
+
+2
+
+N
+
+Top-k
+
+N
+
+N
+
+All
+
+N
+
+N
+
+Top-1
+
+N
+
+N
+
+Top-k
+
+N
+
+N
+
+Top-k
+
+N
+
+N
+
+All
+
+N
+
+N
+
+All
+
+N
+
+N
+
+Top-1
+
+Top-k
+
+Y
+
+Y
+
+& signals
+
+Table 1: Comparison of prior techniques based on the different challenges addressed. (S = System, A = Algorithm,  1 =
+
+supports pathless through doing Cartesian product on relevant tables,  2 = supports pathless through joining columns
+
+of the same name or type)
+
+repository, so naturally there is no join path information, and that leads to PPE problem.
+
+2.3 Challenges of Pathless Table Collections
+In this section, we present the challenges that PPE problem statement (Problem 1) introduces, while summarizing how state of the art work approaches those challenges.
+Challenge 1: Noise in input examples. The input examples provided by the user are a demonstration of the desired output. As the user may not be aware of the different tables available in the repository, not all provided examples need to be present in the same table in the repository. Additionally, some of the values provided by the user may be outdated or incorrect. Although there are mechanisms to help users ameliorate noise in their input query--such as by interacting with partial results--building a general QBE-overpathless system requires addressing the challenge of noise in the input queries.
+The capability of handling example noise of previous approaches is shown in the Handles Example Noise column of Table 1. Query reverse engineering approaches identify a SQL query that produces the exact user-provided examples. Consequently, these approaches are not compatible with noisy input examples. In contrast, QBE systems are designed to find output that contains the input. When strictly applied, they will not work well with noisy input queries. Finally, approaches that rank output views approximately based on the input-output match are more appropriate (e.g., S4 [39]).
+Challenge 2: Pathless table collections. Without join path information we cannot find PJ-views. With large volumes of data and lack of domain knowledge we cannot ask humans to provide join path information manually. An alternative is to compute join paths automatically. This is challenging due to the following reasons. Automatic join discovery algorithms rely on detecting candidate
+
+keys and then candidate inclusion dependencies between those candidate keys. Because data is noisy, candidate key detection is a noisy process. Because of the scale of the problem, approximate inclusion dependency methods may be more appropriate than exact methods. Even if exact methods are possible, inclusion dependencies are an approximation to real join paths only, so more noise will be naturally introduced. As a consequence, automatically extracted join path information will include spurious join paths.
+Query-By-Example systems [2, 17, 39, 40, 42] and Query-ReverseEngineering systems [13, 31, 37, 45] are designed to perform on a database with well-defined path information and integrity constraint as indicated in the Supports Pathless column of Table 1. They explore join paths between tables through looking at the primary key/foreign key relationship and all join paths are ensured to be correct. Spurious join paths are not considered in their techniques. When introducing wrong join path information to their algorithms, they could generate incorrect queries. Bonifati et al. [5] focuses on helping users learn join predicate without assuming any integrity constraint, which is similar to the pathless table collection setting. However, this approach needs to perform a Cartesian product on relevant tables, which will introduce a scalability challenge.
+Challenge 3: Join Path Space. Noisy query input (Challenge 1) and join path information (Challenge 2) mean that to find an appropriate PJ-view the engine needs to 'cast a wide net' over any potentially relevant table, and consider all possible join paths. Many candidate PJ-views will be inadequate for at least two different reasons: i) they are combined using a wrong join path (Challenge 2); ii) they use a correct join path, but one that leads to a semantically different table that the one the user requires and that is not possible to disambiguate automatically due to the noisy query input (Challenge 1). Because there is no way of telling what join paths are correct before identifying them, Challenge 3 consists of dealing with the resulting large join path space.
+Existing approaches like S4 [39] and MWeaver [39] utilize user examples to prune candidate join paths or apply early termination in the process of materializing PJ-views. However, the correctness of pruning is based on the "high-quality" of user-given examples. When user examples are noisy, example-overlap based pruning can cause the missing of right views.
+Challenge 4. Multiplicity of views. A direct consequence of Challenge 3 is that a QBE-over-pathless system may produce a large number of PJ-views. A naive strategy presents the user with each of the PJ-views, one by one, until the user selects the right one. But users' knowledge is noisy, and they may not be able to tell the difference between two large PJ-views. At the same time, after going over the entire process of using a user query to find a collection of candidate PJ-views, the engine has a lot of information about these PJ-views that may help users identify an adequate view. Challenge 4 consists of exploiting this knowledge to create signals, use the signals to reduce the size of the candidate PJ-views, and expose candidates and signals to downstream components, hence easing the effort of navigating the candidate results.
+Prior techniques deal with the multiplicity of views through returning a list of top-k queries and their corresponding outputs. Queries are typically ranked by their overlap score with user-given
+
+3
+
+Algorithm 1: PPE Design Overview
+Input : Pathless table collection D, Discovery Index  Output : PJ-views V
+
+C2
+
+Discovery
+
+Index
+
+Construction
+
+Column Retrieval
+
+C1 View
+Specification
+
+1   View-Specification(D) /* Input QBE-style query */
+
+2 Cand  
+
+/* Initialize candidate columns */
+
+3 for  .  Columns( ) do
+/* Iterate over all columns in input query */
+4 Cand( )  Column-Retrieval(  ., D,  ) /* Identify
+
+matching columns */
+
+5 if Mode==Interactive then
+
+6
+
+Cand( )  Query Cand( )
+
+/* Interactively
+
+prune incorrect candidates */
+
+7 Cand  Cand  Cand( )
+
+8 V   Join-Graph-Search(Cand, ) /* Construct candidate
+
+PJ-views */
+
+9 S  Signal-Generation(V  )
+
+/* Compute signals over
+
+candidate views */
+
+10 if Mode==Interactive then 11 V  View-Presentation(C, S)
+
+12 else 13 V  Rank V  based on overlap score 14 return V [1 : ]
+
+examples. However, when there is noise in user examples (Challenge 1) and many join paths are spurious (Challenge 2), ranking models based on example overlapping can become unreliable. For example, there could be many views generated through wrong join paths but have a high overlap with user examples.
+
+3 A REFERENCE ARCHITECTURE
+In this section, we present a reference architecture to address the PPE problem.
+Why a Reference Architecture? From a system engineering perspective, a reference architecture is the materialization of a `divide and conquer' strategy that splits complex engineering problems into smaller parts. Thus, a reference architecture describes a collection of components and their interactions. In making a reference architecture concrete, we state our understanding of the problem and represent it as a concrete artifact that the community can scrutinize and improve.
+
+3.1 Design Overview
+Addressing the PPE problem requires solving a human and a technical problem. We present an architecture that contains components for both problems, and focus on the implementation of an engine, called Niffler, to address the technical problem. The individual components are designed to tackle the different challenges discussed in previous sections.
+Overview. Algorithm 1 presents the pseudo-code of the proposed Niffler pipeline. Niffler performs an offline indexing (Discovery index creation) of the tables to construct path information (to address challenge 2). This path information is then made available online to the other components. In addition to this index, the PPE problem requires the user to specify the input examples . Users use the
+
+data.gov illinois.data.gov
+WTC
+
+Materializer
+
+Discovery Engine
+
+C3
+Join Graph Search
+
+Signal Generation
+
+View Presentation
+C4
+
+Figure 1: Reference Architecture for View Discovery over Pathless Table Collections. Green components are contributions of this paper. Yellow components are provided. Shaded yellow and green components indicate we adapted existing components to work on PPE problems with Niffler.
+view specification component to design and submit queries, which may contain noisy values (Challenge 1). The QBE-style examples along with the index are then considered by the column retrieval component to shortlist a subset of the pathless table collection that contains input example values (lines 3-7). This component can run with or without human guidance. When guidance is available, it helps to narrow down the candidate columns and tables relevant for the desired view. Column retrieval outputs a collection of tables and respective columns that contain input examples (Cand).
+The candidate columns are then processed by the join graph search component (line 8) to enumerate and materialize candidate views (addresses Challenge 3). Due to noise of datasets and input query, the join graph search component may generate many candidate PJ-views (Challenge 4). Designing a ranking criteria for the views is hard because users' differing criteria and quality of join path information. The signal generation component (line 9) identifies different properties of candidate views--called signals--that help in two ways: i) they reduce the size of the candidate views; ii) they guide the search for the desired output, which takes place within the view presentation stage.
+Note that it is possible to implement the engine to rank candidate PJ-views and return the top-1, concluding query processing. However, it is hard to design a ranking strategy that works for all query needs and users' relevance criteria. Furthermore, in practice, users feel more confident if they understand how the final PJ-view was constructed. For this reason, our architecture introduces a signal generation component and a view presentation stage (lines 10-13); both geared towards generating and using information efficiently. Niffler focuses on the technical challenges of identifying signals and does not explore different ways to interact with the user.
+
+3.2 Component Description
+We follow the lifecycle of query processing using the architecture in Fig. 1 that shows the human components on the right hand side and the engine's components in the enclosed dashed rectangle. View Specification (human). Users and programs use this component to define and submit queries to the system. The design space
+
+4
+
+of components to describe queries is large and include Spreadsheetstyle, API, natural language, and combinations of these. For QBEbased interfaces, the output of this stage is a set of example attributes and values. This specification can help reduce ambiguity in the search process by interacting with a knowledgeable user. Column Retrieval (technical). A component that analyzes the input query and identifies filter criteria to identify a subset of relevant datasets from all available ones. This component must be designed to identify relevant data even when the input query is noisy, addressing Challenge 1 above. The output of this component is a collection of candidate tables and columns. Discovery Index Creation (technical) and Engine (technical). The index creation works offline to build discovery indexes over pathless table collections. This component must identify useful discovery indexes on pathless table collection. In particular, it needs to identify join paths (addressing Challenge 2) and other indexes used by the column retrieval component. The Discovery engine provides online access to the discovery indexes. Join Graph Search (technical). Given a set of candidate tables and an input query, this component identifies all possible join graphs that, when materialized, produce a candidate PJ-view. The main goal of this component is to address the large join path space (Challenge 3). To materialize candidate PJ-views, the join graph search component uses a Materializer, which is a data processing component with the capacity to execute PJ queries. View Presentation (human). The goal of view presentation is to help users select an adequate PJ-view. There are many possible implementations of the view presentation component [29, 46, 48]. To inform this component, Niffler's implementation focuses on providing signals that help navigate the space of PJ-views. Signal generation (technical). The engine produces many signals while processing a query. The role of the signal generation component is to collect, package, and offer these signals to the view presentation stage, hence helping reduce the number of candidate PJ-views, facilitating the presentation's job and thus addressing Challenge 4. We show in the next section how it is possible to reduce the size of the candidate PJ-views even before humans are involved by using this information carefully.
+4 ENGINE IMPLEMENTATION
+In this section, we explain the implementation details of Niffler. Our design follows the reference architecture and we propose novel algorithms for the different components of the architecture.
+4.1 Discovery Index Construction
+This component must identify approximate join paths on pathless table collections, and through a Discovery Engine (see Fig. 1) retrieve data that satisfies a query filter. In this paper, we use Aurum [9], which we briefly introduce here for completeness.
+During an offline stage, Aurum reads each   D and produces a profile for each column in . The profile includes common statistics as well as sketches, constructed specifically to identify relationships between columns and tables. After reading the data once, Aurum produces a full-text search index over attributes and data values, and a hypergraph. In the hypergraph, nodes represent columns,
+
+hyperedges represent columns of the same table. Edges are directed and weighted. Each relationship is represented with a different edge type. The hypergraph is constructed efficiently (e.g., no allpairs comparison are involved) using LSH-based indexes for the relationships of interest, which in this paper are content-similarity, and inclusion-dependency [18]. During the online stage, we use the following subset of Aurum's API to satisfy the requirements of the QBE-over-pathless query. Any alternative system to Aurum implementing the Discovery Engine should implement these primitives: Search-Keyword(target, fuzzy). Given an input string, it returns columns that contain the string in either the attribute name, or in the values, as specified by target. Match can be exact or fuzzy, after specifying a maximum Levenshtein distance.
+Neighbors(threshold). Given an input column (i.e., node in the graph), this function returns all neighbors with a Jaccard containment above the input threshold. Generate-Join-Paths. Given two tables, 1, 2 as input, this function returns all paths in the graph that connect any column in 1 with any column in 2, via the inclusion dependency edge type. Paths have a maximum number of hops,  . As an extension, it allows any set of tables as input and returns join paths between every pair of input tables.
+4.2 Column Retrieval
+Given a column of example values as input ( . ), this component generates a small set of columns Cand( ) that contain these values. Many QBE systems [2, 17] follow the strict assumption that the columns containing all example values are only considered as candidates for subsequent stages of the pipeline. However, the noisy QBE-style query may not contain all values from the ground truth PJ-view (Challenge 1), thereby affecting its ability to identify adequate PJ-views. In contrast, a relaxed approach to construct Cand( ) is to enumerate all columns that have a nonempty overlap with the input examples. This approach ensures that the ground truth view is always present in Cand( ) but is highly inefficient when a token is present in several tables. Our column retrieval algorithm provides the flexibility to vary the strictness of the assumption by grouping columns identified by relaxed methodology and selecting the top  (an input parameter) clusters for the subsequent components. Varying the value of  simulates varying degrees of strictness. For example,  = 1 is equivalent to considering the cluster that contains the column having maximum overlap with the input example whereas  =  considers all columns that have non-empty overlap with the input examples. The identified clusters help to summarize the set of candidate columns Cand and prioritize the clusters in non-increasing overlap with input examples
+Algorithm 2 presents the pseudo-code of our column retrieval algorithm. As a first step it identifies all columns that have a nonempty overlap with the input examples (lines 2-4). These columns are then clustered by identifying connected components over the hypergraph constructed by the discovery engine (line 5). Each cluster is then assigned a score, which is equal to the maximum number of examples contained in any column in the cluster (line 7).
+This stage supports both automatic mode and interactive mode. In the automatic mode, top- clusters are selected based on their scores (line 8).
+
+5
+
+User interaction. Users can inspect different clusters identified by column retrieval via the view specification component, and then choose those that capture the intent of the input query. The clusters identified by our algorithm help the user to inspect a small set of representative columns. Identifying the best interactive policy to present clusters is outside the scope of this work; we focus on providing the mechanism.
+
+Algorithm 2: Column Retrieval
+
+Input : A set of example values  . for a column  ,
+
+Discovery Index  , Clustering threshold  Output : C( ) Candidate columns containing values
+
+from the column  . and respective scores.
+
+1 Cand( )   /* Initialize the set of candidate
+
+columns */
+
+2 for    . do 3 Cand()  Search-Keyword()
+
+/* Query
+
+Discovery engine to get all columns containing
+
+the example value  */
+
+4 Cand( )  Cand( )  Cand()
+
+5 C  Connected-Component(Cand( ),  ) /* Cluster candidate columns using connected component
+
+algorithm */
+
+6 for   C do 7 Score( ) = max  (   . )
+/* Score each cluster based on overlap with
+
+input examples */
+
+8 C  top- clusters in C based on Score
+
+9 Cand( )   /* Combine all columns in top-
+ C
+clusters */
+
+10 return Cand( )
+
+means that Niffler runs standalone without reliance on the source systems having a processing engine. An improved version of the materializer would use a processing engine with the external table feature [8]. A database would exploit table statistics to choose a good join ordering when materializing the join graph.
+
+Algorithm 3: Join Graph Search and Materialize
+
+Input : QBE-style query , Column Retrieval output
+
+Cand, expected number of output PJ-views 
+
+Output : V  : list of candidate PJ-views
+
+/* Step 1: Join Path enumeration
+
+*/
+
+1   |Columns(  ) | /* Number of columns in input examples
+
+*/
+2   {(1, . . . ,  ) :   Cand( )}
+
+/* Construct all
+
+combinations of candidate columns */
+3    4 for   (1, . . . ,  )   do 5   Generate-Join-Paths(, 2)
+
+/* Use Discovery
+
+engine to generate 2-hop join paths between column
+
+pairs */
+
+6 if ,     |  (,   ) =  then
+
+7
+
+Remove all candidates    containing columns
+
+ and   such that  (,   ) =  /* Prune out
+
+combinations that do not have a join path */
+
+8
+
+Continue
+
+9 else
+
+10
+
+    
+
+/* Step 2: Ranking and Materialization
+
+*/
+
+11   Select top  join candidates based on join score
+
+
+generated by the discovery engine.
+
+12
+
+V 
+
+ materialize-views( )
+
+
+13 return V 
+
+4.3 Join Graph Search and Materializer
+Our join graph search and materializer component joins the tables identified in the column retrieval stage to construct candidate PJ-views. Algorithm 3 presents the pseudo-code of our join graph enumeration algorithm. It operates in two steps. First, Join Path enumeration (lines 1-10) enumerates all tables returned by column retrieval and identifies joinable groups of tables. In the second step, Ranking and Materialization (lines 11-12) component ranks these join paths based on their quality estimated by the discovery engine and materializes top-k join paths. (1) Join Path enumeration phase first enumerates all possible com-
+binations of the columns returned by column retrieval. These candidates are then processed to iteratively remove the combination which can not be constructed by joining tables through the constructed index. Note that if columns  and   can not join then any combination of columns involving  and   can not be joined. This phase uses this optimization along with a cache to efficiently prune out incorrect combinations.
+(2) Ranking and Materialization phase ranks the views based on the join score generated by the discovery engine and then ma-
+
+4.4 Signal Generation
+The goal of the signal generation component is to collect and generate signals that help view presentation choose the right candidate PJ-view among the hundreds that may be generated after Join Graph Search. Collected signals include column headers, source of constituent tables, join paths and their similarity with input examples. In addition to these signals, the signal generation component generates a class of novel signals, called 4C, that help reduce the size of the candidate PJ-views.
+4C Signals. The 4C signals first classify the output views into four categories: Compatible, which means that views are identical; Contained, which means that the values of one view subsume others; Complementary, which means that the set difference of tuples of views is not empty; and Contradictory, which means that certain tuples are incompatible across views. Whether a pair of views is complementary or contradictory depends upon the candidate key it's comparing to. To define these signals more formally, we refer to a view  as a set of tuples in the dataset with  ( ) denoting the set of values corresponding to its candidate key.
+
+terializes the top- views. The materializer is built on top of
+
+Definition 4.1 (Candidate key). A candidate key, , is a set of
+
+Pandas [32]. Although this comes with a cost in performance, it attributes in an output view,  , that can uniquely identify each row
+
+6
+
+in  . We can refer to a row,    , with its candidate key value,  , which we can use to obtain the row;  (,  ) =  . There can be multiple candidate keys in  that satisfy this property.
+Definition 4.2 (Compatible views). Two candidate views, 1 and 2, are compatible if they have the same set of tuples (1  2) = 1 = 2.
+Definition 4.3 (Contained views). A view, 1, contains another view, 2, when 2  1, that is, when all rows of 2 are contained in 1.
+Definition 4.4 (Complementary views). Two views, 1 and 2 are complementary if the two views have the same candidate key, , and |(1 \ 2)| > 0 and |(2 \ 1)| > 0, where 1 and 2 are the set of candidate key values for 1 and 2 respectively. That is, each view has candidate key values not contained in the other view.
+Definition 4.5 (Contradictory views). Two views, 1 and 2 are contradictory if the two views have the same candidate key, , and a key value that exists in both views,   1, 2, yields distinct rows,  (1;  )   (2;  ). Two rows are distinct when any value of any of their attributes is different.
+Using this formalism, our 4C classification algorithm iterates over pairs of candidate views to partition them into the four above categories. To avoid cell level comparison of values and efficient comparison of views, we construct a hash for each row.
+Since the contradictory views are inherently discriminative, we can construct contradictory signals from the contradictory views by leveraging the transitive relationships of contradictory rows among those views. For each pair of contradictory views, we can generate contradictory signals consisting of rows with contradictory values and their respective contradictory sets. Signals can include all contradictory rows or a sample of them.
+Using 4C signals to reduce candidate PJ-view space. The 4C signals can be sent downstream or used within the signal generation component to reduce the size of the candidate PJ-view space. We explain how to leverage them for the latter goal.
+Compatible views are summarized into one. When there is a group of contained views, the view with the largest cardinality pervades. When views are complementary, they are unioned. Finally, it is not possible to make an automated decision for contradictory views. Contradictory views usually arise for two reasons: i) view was produced using a wrong join path; ii) the original data is contradictory. A user may be able to tell apart the right view, thus selecting a join path a posteriori. Without a user, we cannot automatically make a decision on what view in each contradictory pair is correct, but it is possible to determine if the signal is useful or not, based on how discriminative it is, and consequently decide whether to send them downstream or not--with the intention of avoiding sending non-discriminatory and hence useless signals. Contradictory signals can be sorted according to their degree of discrimination, which is defined as the expected number of views it would prune after a selection is made.We will show the effectiveness of this approach in the evaluation section.
+
+· Qualitative Study (QS). State-of-the-art QBE systems over pathless table collections
+· RQ1: Do column-retrieval and join graph search find a PJ-view given a noisy input query over pathless table collections?
+· RQ2: Are the 4C-based signals useful for reducing the view choice space?
+· Microbenchmarks. We explore the effect of various query and data parameters on Niffler's performance.
+The research questions focus on evaluating the degree to which the engine helps identify relevant PJ-views over pathless table collections given a notion of relevant PJ-view which we describe in the next section. In particular, we do not solve the problem endto-end. That requires humans to tune input queries in the view specification stage and to resolve semantic ambiguity in the view presentation stage. Implementing these components is a major challenge that requires designing the right kind of user interaction.
+
+5.1 Experimental Setup
+5.1.1 Noisy User Workload. The workload consists of a collection of 2-column, 3-row example queries (we experiment with vary-
+ing number of rows and columns in Section 5.5). To generate the
+workload, we first find a PJ-query that produces a result we call
+the ground truth PJ-view. Columns in the ground truth PJ-view are called ground truth columns. Then, we generate the 2 × 3 input queries according to three strategies, Zero Noise, Medium Noise, and
+High Noise. Zero noise means we sample values from the ground
+2
+truth columns. In Medium noise we sample values from the ground
+3
+truth columns and 1 from a noise column, which is a column with a
+3
+Jaccard Containment of more than 0.8 with respect to the ground truth column. Finally, in High noise we sample 1 values from the
+3 2
+ground truth column and from the noise columns.
+3
+
+5.1.2 Datasets and Workload. We use 2 real-world large scale
+
+datasets in the end-to-end evaluation. Detailed statistics of these
+
+two datasets are shown in Table 2.
+
+Dataset
+
+#Tables #Columns
+
+#Approx. Joinable Columns
+
+Avg #Rows
+
+ChEMBL 70 WebTable 10000
+
+446
+
+435 2 million
+
+39939 11.6 million 14
+
+Table 2: Characteristics of Datasets
+
+· ChEMBL: ChEMBL [19] is a database of bioactive molecules with drug-like properties. ChEMBL is large in terms of total data size. However, it has a relatively small number of tables and joinable columns.
+· Web Tables [30] data collection is a subset of the WDC corpus containing 10K tables crawled from the web. It has more than 10 million pairs of joinable columns.
+
+5 EVALUATION
+In this section, we address four points including the main research questions of the paper RQ1 and RQ2:
+
+We generate 5 ground truth queries on each dataset, 5 noisy user queries for each ground truth view and for each of the 3 noise levels. This results in a total of 150 noisy user queries across both datasets and noise levels.
+
+7
+
+5.1.3 Setup. We run all experiments on a CentOS server with 128GB memory and a Intel(R) Xeon(R) CPU with 12 cores and 2.3GHz speed each. We built the reference implementation using python3.6. The reference implementation uses Aurum as the implementation of the Discovery Index Construction and Discovery Engine. Niffler uses Aurum's Jaccard Containment via the Neighbors(threshold) function with a threshold of 0.8--we experiment with other thresholds in Section 5.5. When searching for join paths, Niffler uses by default a maximum of two hops.
+5.2 QS: Analysis of existing QBE systems
+Existing QBE systems were not designed for pathless table collections so we cannot compare them directly to Niffler. Still, we report here a qualitative study describing the challenges of running QBE systems on pathless table collections.
+SQuID. SQuID consists of an offline module that precomputes the abduction-ready database (DB) and an online module that receives example input from the user and infers the result query by consulting the DB. The DB introduces a large storage footprint. For example, for two tables in ChEMBL, target_dictionary and component_sequences, of size 5M and 5.9M respectively, the storage footprint of each entity-attribute pair can range from 3.6M to 8.1M. In order to populate the DB, SQuID requires: (1) Entity attribute (key) and attribute of interest for each table that may be involved on a query. (2) The schema and join information of the input dataset. Without knowing the exact key/entity information (1), and the attributes on which users would submit queries, we would need to include all plausible ones, for each table. This is impractical for two reasons: first, it requires a large upfront human cost. Second, the already large storage footprint of a single entity/attribute would multiply to accommodate querying attributes of many different entities. To make matters worse, wrong join paths (2) would lead to more combinations of tables for which we would need to create spurious DB. For these reasons, we were only able to test SQuID on a dataset containing a handful of tables. Without a deep understanding of the input dataset--which we lack in pathless table collections--we can only provide limited information to the system to compute the DB, thus resulting in potentially poor query performance. A more reasonable use of SQuID is to employ it as a downstream component to Niffler, where the input is an already narrowed down version of candidate PJ-views.
+Duoquest. Duoquest uses dual-specification which lets the user specify both a natural language query (NLQ) and an input table containing example tuples and additional information about the attributes (Table Sketch Query). It output candidate SQL queries ordered from highest to lowest confidence based on the user's input queries. The user can then preview the query result and select the query they prefer. However, in pathless table collections, manually going through each candidate query may present challenges to the user, since the candidate query may consist of incorrect join tables or keys due to noise in data, or the result of one query can have contradictory information with another query. Therefore, it is difficult for the user to manually inspect the query results and find which queries are correct. An additional presentation phase is necessary to navigate the user among the candidate queries. A more reasonable use of Duoquest is to employ it as an implementation of
+
+Ground Truth Hit Ratio
+
+Select-All
+1.0 0.8 0.6 0.4 0.2
+0.0 Zero Noise
+
+Select-Best
+
+Column-Retrieval
+
+Mid Noise
+
+High Noise
+
+Figure 2: Ground truth hit ratio over 150 queries in input workload for the three baselines and split by noise level in the input query
+the view specification component, giving users alternative ways of describing their queries.
+
+5.3 RQ1: Column Retr. and Join Graph Search
+In this section, we evaluate the ability of column retrieval and join graph search to identify the ground truth view among the candidate PJ-views. We present results for column-retrieval and for other two baselines that represent retrieval strategies used by state of the art systems and that we implement in our engine.
+Retrieval Baselines. Select-All. This baseline selects any column that contains at least an example from the input query. This is the retrieval strategy implemented by S4 [39].
+Select-Best This baseline selects the column that contains the highest number of examples from the input query. This is the retrieval strategy implemented by SQuID [17].
+The third baseline is our implementation, column-retrieval. After running each of these configuration, we feed the candidate columns to the join-graph-search component that finds the candidate join paths, identifies join graphs, and materializes them to produce the set of candidate PJ-views.
+Experiment and Metrics. We obtain the output set of candidate PJ-views for each of the 150 input queries in the workload. We consider two metrics. First, whether the ground truth view is part of the candidate PJ-views, i.e., the system finds the ground truth view. In particular, we measure the Ground Truth Hit Ratio that determines the ratio of input queries for which the system finds the ground truth view. Second, we measure the size of the set of candidate PJ-views. Given two systems that find the ground truth view, we prefer the one producing the smaller set of candidate PJviews. Smaller candidate PJ-views indicate lower runtime (as we will demonstrate later) and more importantly, facilitates the job of the view presentation stage, e.g., consider a human who needs to look at each view in the candidate set to select the right one.
+Results. Figure 2 shows the Ground Truth Hit Ratio across the 150 queries, for each baseline, and grouped by different input query noise levels in the X-axis. When there is no noise in the input query, that is, when the query perfectly reflects the data in the repository, then all baselines perform well and find the ground truth view. As
+
+8
+
+No. of Generated Views No. of Join Graphs No. of Candidate Groups
+
+Zero Noise
+60
+
+Mid Noise
+
+50
+
+80
+
+40
+
+60
+
+30
+
+40
+
+20
+
+10
+
+20
+
+0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5
+
+Zero Noise
+
+Mid Noise
+
+120
+
+80
+
+100
+
+High Noise
+60 50 40 30 20 10
+0 Q1 Q2 Q3 Q4 Q5 High Noise
+80
+
+60
+
+80
+
+60
+
+40
+
+60
+
+40
+
+40
+
+20
+
+20
+
+20
+
+0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5
+
+160 Zero Noise
+
+Mid Noise
+
+High Noise
+
+140
+
+300
+
+200
+
+120
+
+250
+
+100
+
+200
+
+150
+
+80 60
+
+150
+
+100
+
+40
+
+100
+
+20
+
+50
+
+50
+
+0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5
+
+Ground Truth Not Found
+
+Select-All
+
+Select-Best
+
+Column-Retrieval
+
+Figure 3: Number of candidate groups, join graphs and generated views on ChEMBL
+
+No. of Generated Views No. of Join Graphs No. of Candidate Groups
+
+Zero Noise
+1600
+
+Mid Noise 350 High Noise
+
+1400
+
+350
+
+300
+
+1200
+
+300
+
+250
+
+1000 800 600
+
+250 200 150
+
+200 150
+
+400
+
+100
+
+100
+
+200
+
+50
+
+50
+
+0 Q1 Q2 Q3 Q4 Q5 Zero Noise
+160 140 120 100 80 60 40 20
+
+0 Q1 Q2 Q3 Q4 Q5 Mid Noise
+50 40 30 20 10
+
+0 Q1 Q2 Q3 Q4 Q5 High Noise
+50 40 30 20 10
+
+0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5
+
+Zero Noise
+
+Mid Noise
+
+High Noise
+
+140
+
+120
+
+50
+
+40
+
+100
+
+40
+
+80
+
+30
+
+30
+
+60 40 20
+
+20 10
+
+20 10
+
+0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5
+
+Ground Truth Not Found
+
+Select-All
+
+Select-Best
+
+Column-Retrieval
+
+Run Time (s)
+
+Run Time on ChEMBL
+
+Zero Noise
+
+Mid Noise
+
+High Noise
+
+120
+
+250
+
+150
+
+100
+
+200
+
+125
+
+80
+
+150
+
+100
+
+60 40
+
+100
+
+75 50
+
+20
+
+50
+
+25
+
+0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5 0 Q1 Q2 Q3 Q4 Q5
+
+Zero Noise
+250 200 150 100 50
+0 Q1 Q2 Q3 Q4 Q5
+
+Run Time on WDC Mid Noise
+80 60 40 20
+0 Q1 Q2 Q3 Q4 Q5
+
+60 High Noise
+50 40 30 20 10
+0 Q1 Q2 Q3 Q4 Q5
+
+Ground Truth Not Found
+
+Select-All
+
+Select-Best
+
+Column-Retrieval
+
+Run Time (s)
+
+Figure 5: Run time of column-retrieval + join-graph-searchmaterialize on ChEMBL and WDC
+grid shows the size of the set of candidate PJ-views at the top for the
+three noise levels. The results clearly indicate that for all queries
+across both datasets and noise levels, the set of the candidate PJviews is always significantly larger in the case of Select-All than in the case of column-retrieval. Since both baselines find the ground truth view, the smaller sets are preferred.
+The Select-All retrieval strategy selects too many columns. This produces much larger candidate groups than necessary (see No.
+of Candidate Groups in Figure 3 and Figure 4). Larger candidate
+groups, in turn, lead to a larger number of join paths--sometimes up to 4× more, see No. of Join Graphs in Figure 3 and Figure 4)--which results in many more candidate PJ-views.
+Fig. 5 shows that larger sets of candidate PJ-views leads to higher runtime. The runtime of column-retrieval + join graph search is an order of magnitude lower than the Select-All strategy. Conclusion. Select-Best is not robust to input query noise, which is expected in pathless table collections where users will not have full knowledge of the data they need. Both Select-All and columnretrieval are robust to noisy input queries (addressing Challenge 1), but Niffler produces a smaller candidate set of PJ-views and is
+much faster than the other baseline, addressing Challenge 3.
+
+5.4 RQ2: Signal Generator
+In this section, we evaluate the ability of the 4C-signals to reduce the size of the set of candidate PJ-views after using the strategy offered in Section 4.4. The ability depends on data characteristics. Along with the quantitative results, we offer examples to illustrate the insights brought by the signals.
+
+Figure 4: Number of candidate groups, join graphs and generated views on WDC
+the noise in the input query increases, however, the Select-Best strategy crumbles because of its over-reliance on columns that contain all values in the input query. This result demonstrates that in pathless table collections, when input queries contain noise, the Select-Best strategy is not adequate.
+With both Select-All and column-retrieval consistently finding the ground truth view, the next question is at what cost. Fig. 3 and Fig. 4 show results for ChEMBL and WDC respectively. Each 3 × 3
+
+5.4.1 Compatible and Contained (C1 and C2). Each group of compatible views is reduced to a single view. When views are contained, we keep the larger one. The 1 and 2 columns in Table 3 show the number of views left after pruning compatible views and contained views.
+Insights of C1. Approximately 50% of candidate PJ-views in Q3 of ChEMBL are compatible. By diving in the output views we found two reasons. Sometimes, compatible views are materialized using the same join tables and join keys, but the two projected columns are in opposite order, and since the two attributes actually represent the same entity, They can be projected interchangeably. Other times,
+
+9
+
+Query
+
+Noise
+
+3 3
+
+Original 1 2 worst best level
+
+case case
+
+Zero 38 36 36 13 7 ChEMBL
+Mid 20 18 18 5 1 Q1
+High 33 31 31 9 3
+
+Zero 59 58 54 25 7 ChEMBL
+Mid 32 32 30 16 3 Q2
+High 41 38 35 17 3
+
+Zero 58 33 29 16 4 ChEMBL
+Mid 44 21 17 8 3 Q3
+High 44 21 17 8 3
+
+Zero 23 17 14 13 7 ChEMBL
+Mid 83 74 69 41 8 Q4
+High 83 74 69 41 8
+
+Zero 24 18 15 14 8 ChEMBL
+Mid 64 57 52 28 8 Q5
+High 33 23 20 19 13
+
+Zero 44 39 25 8 4 WDC
+Mid 42 37 23 5 3 Q2
+High 39 34 20 6 5
+
+WDC Zero 20 20 20 20 1
+
+Q3 Mid 15 15 15 15 1
+
+Table 3: Original number of views, followed by number of views left after pruning compatible views, contained views, and union complementary views in the worst case and best case. We excluded queries that have less than 10 original number of views.
+
+Number Of Views Left
+
+ChEMBL Q4
+
+40
+
+20
+
+30
+
+15
+
+20
+
+10
+
+10
+
+5
+
+0 0 1 2 3 4 5 6 7 8 9 10 0 Step
+
+WDC Q3
+Zero (worst case) Zero (best case) Mid (worst case) Mid (best case) High (worst case) High (best case)
+12345 Step
+
+Figure 6: Number of views left at each step after pruning views using contradictory signals.
+Insights of C3. The reason WDC Q2 can union many complementary views even in the worst case is that all candidate PJ-views that share the same list of attributes, State and Newspaper Title, are joined by two tables using the join key State; one join table containing the attribute Newspaper Title is the same for all the views, while the other containing the attribute State is different for each view. The join tables that are different have different coverage of State values. Therefore, a lot of candidate PJ-views are complementary based on the candidate key State (the worst case).
+For ChEMBL queries, typically one pair of views does not share their contradictory rows with any other pair of views, so no matter which candidate key we choose, it can always lead to many unionable complementary views since the contradictory relationships are not transitive across views.
+
+different but equivalent join keys are used. For example, one pair of compatible views are being materialized using the same join tables: assays and cell_dictionary, but one view's join key is cell_name and the other's join key is cell_description; since there is a one-to-one mapping between cell_name and cell_description, the views they produced are identical.
+Insights of C2. Q2 of WDC pruned 14 contained views for each noise level. The majority of the output views in WDC Q2 share the same list of attributes: State and Newspaper Title. We found that each pair of contained views are joined using different tables but the same join key, State. The join key values of one join path are subsumed by the join key values of another join path, thus the resulting view is contained in another view.
+5.4.2 Complementary (C3). We union all complementary views. The complementarity of views depends on their key, as explained in Section 4. In this experiment we consider the key that leads to the least reduction (worst case) and the key that leads to the largest reduction (best key).
+Table 3 shows that in the best case, all the queries have many complementary views that can be unioned together, thus dramatically reducing the size of view choice space. In the worst case, all WDC queries, except Q2, do not have complementary views that can be unioned together, since the corresponding candidate key only yields contradictory views; the ChEMBL queries however can union a significant portion of complementary views no matter which candidate key we chose.
+
+5.4.3 Contradictory (C4). Given a contradictory signal, we do not have an automated way of choosing a view--this is a task a view presentation stage would implement. However, we are interested in understanding the value of these signals, and we can calculate that by measuring the worst case and best case expected reduction in the candidate set size after a signal selection.
+To conduct this experiment, we sort signals in descending order according to their degree of discrimination--the number of views that agree with one side of the contradiction. Then we select the top signal and consider two cases, the case where the selection leads to the largest reduction of the view space (best-case) and the case where it leads to the least reduction of the view space (worst-case). After the selection, we recompute signals based on the remaining views and repeat the process.
+Figure 6 shows the number of remaining views after each step (for a maximum of 10 steps) for a selection of queries that present discriminative and non-discriminative signals. As expected, when signals are not discriminative, the reduction is limited, such as in mid/high noise queries of ChEMBL Q4 in the worst case. However, there are cases where signals are quite discriminative and the signal proves effective in reducing the set size fast, such as in the worst case queries of WDC Q3.
+Insights of C4. In ChEMBL Q4 mid/high noise queries, the original number of candidate PJ-views is large; they are joined by various join tables and different join keys. After pruning and unioning views, there are two types of views left: views that have unique schemas so they cannot be classified into 4C with other views, and
+
+10
+
+views that are contradictory on some values. Specifically, the contradictions in ChEMBL Q4 are mainly due to wrong join paths. For example, one view that is partly joined by the two tables component_sequences and component_class on the shared attribute component_id, while the other view is joined by the two tables component_sequences on attribute description and target_dictionary on attribute pref_name, when projecting the final attributes, organism and pref_name, these two views have contradictions. component_id is a better join key than description. However, as we do not know the join information of the input data, we can only perform join operations using all the attributes, such as description, that are being considered as valid join keys by the discovery engine. Then we can use additional signals, such as the contradictory signals to help distinguishing spurious views joined by wrong join keys from the views that are joined correctly.
+Moreover, since the contradictions in ChEMBL mainly arise due to different join paths, they typically do not share the same contradictions across more than two views. Each contradictory signal only contains two views; one for each option. Therefore, the maximum number of views we can prune at each step is 1. For WDC queries, however, we are able to prune multiple views in Q3, since the contradictory views have many shared contradictory rows, thus each contradictory signal can contain many views. And since we prioritize presenting the more discriminatory signals first, we can prune multiple views even in the worst case.
+Conclusion. In the process of searching for a PJ-view, Niffler mines much information that is useful to reduce the size of the candidate PJ-views before delivering them to the view presentation stage. The 4C-signals help even without prior information about the correct join paths, and the correct view among multiple overlapping tables: they are useful to navigate pathless table collections.
+
+2000
+
+No. of Join Graphs
+
+1500
+
+1000
+
+500
+
+0
+
+Q1
+
+Q2
+
+Q3
+
+Q4
+
+Q5
+
+t=0.8
+
+t=0.7
+
+t=0.6
+
+t=0.5
+
+Figure 7: Number of join graphs under different  on ChEMBL. Aurum produces 435 (0.8), 582 (0.7), 2143 (0.6), and 2947 (0.5) joinable column pairs.
+
+No. of Candidate Groups No. of Join Graphs No. of Views
+
+25 20 15 10 5
+0 2 4 6 8 10 No. of Example Rows
+
+40 35 30 25 20 15 10 5
+0 2 4 6 8 10 No. of Example Rows
+
+80 70 60 50 40 30 20 10
+0 2 4 6 8 10 No. of Example Rows
+
+Figure 8: Number of candidate group, join graphs, generated views of different sample size queries
+
+5.5 Microbenchmarks
+In this section, we investigate the effect of varying the inputs to our system. First, the effect of varying the quality of the inferred schema. Next, the effect of varying the number of rows and columns provided in the input queries.
+5.5.1 Varying Discovery Index Quality. The quality of the discovery indexes built by the Discovery Index Construction component has an effect on the set of candidate PJ-views generated by Niffler (Challenge 2). We study its effect here by modifying the default threshold Aurum uses to compute the hypergraph. In particular, we use thresholds 0.8 (the default), 0.7, 0.6, and 0.5. These thresholds lead to 435, 582, 2143, and 2947 joinable column pairs, respectively. As the thresholds lower, the schema quality worsens, leading to more spurious join paths. These configurations let us understand the effect of schema quality on the discovery of PJ-views over pathless table collections, i.e., Challenge 2.
+As expected, Fig. 7 shows that the number of join graphs increases as the schema quality worsens. As shown in the previous section, this leads to a higher number of join graphs, and consequently, higher runtimes.
+Conclusion. When no join path information is available in the schema, inferring the join paths automatically leads to noisy and incorrect ones, which in turn, has an effect on the scalability of
+
+the problem (Challenge 2). In conclusion, i) discovering PJ-views on pathless table collections is strictly more difficult than on settings with perfect schemas and; ii) investment in better join path discovery algorithms would highly benefit this problem as well.
+5.5.2 Vary the number of Rows. In this experiment, we increase the number of rows inside one query view and observe its effect on the number of candidate groups, join graphs and views (i.e. the search space).
+As shown in Figure 8, the relationship between the number of rows and the search space is not monotonous. Increasing the number of rows in a query view can cause the search space to shrink or grow. This is because there are two factors affecting the search space conversely when the number of rows in a query increases.
+Enlarge the search space. As shown in Figure 9, the total number of columns before clustering will keep increasing as the number of rows increase and the number of clusters will increase as well.
+Shrink the search space. Figure 9 also indicates that the number of clusters that column-retrieval selects will decrease as the number of examples increases. This is because the score of the ground truth column and its corresponding cluster increases.
+Conclusion. Intuitively, more rows should lead to fewer candidate PJ-views at the end, and previous work has demonstrated this when schemas are well-formed. But in pathless table collections this is not the case as demonstrated here.
+
+11
+
+QRE QBE
+
+Technique
+SQuID [17] S4: Fast TopK [39]
+MWeaver [40] DuoQuest [2] TALOS [45]
+PALEO-J [38]
+SQLSynthesizer [51] REGAL+ [44] Aurum [9] Josie [55]
+TableUnion [36] Lazo [18]
+LSHEnsemble [56] Voyager [48] SeeDB [46] NorthStar [29]
+Niffler
+
+View Specification Input Type Handles Noise
+
+Relational
+
+N
+
+Relational
+
+Y
+
+Relational
+
+N
+
+Natural language
+
+Y
+
+N
+
+Ranked list
+N of tuples
+
+Relational
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+Relational
+
+Y
+
+Column Retrieval
+Automatic Automatic Automatic Automatic Automatic
+Automatic
+Automatic Automatic
+N N N N N N N N
+Automatic & Interactive
+
+Discovery Engine
+Require PK/FK
+Y Y Y Y Y
+Y
+Y Y N, Offline indexing N, Offline indexing N, Offline indexing N, Offline indexing N, Offline indexing N N N Offline indexing, No integrity constraint
+
+Join Graph Search
+Online Online Online Online Online
+Online
+Online Online Online Online Online Online Online
+N N N
+Online
+
+Signal Generation
+N Individual signal Individual signal Individual signal Individual signal
+Individual signal
+Individual signal N N N N N N N N N
+Individual, Dependent signals
+
+View Presentation
+N N N N N
+N
+N N N N N N N Y Y Y
+N
+
+VP Data Disc.
+
+Table 4: Assumptions and properties of prior systems. VP denotes View Presentation and Data Disc. denotes data discovery techniques. N is used where the system does not implement the respective component. Individual signals correspond to the statistics estimated from individual candidate views like overlap with input examples while dependent signals consider dependence between candidate views like 4C signals.
+
+Total No. of Columns
+
+32 30 28 26 24 22 20
+2 4 6 8 10 No. of Example Rows
+5.0 4.5 4.0 3.5 3.0 2.5 2.0
+2 4 6 8 10 No. of Example Rows
+
+No. of Columns Selected
+
+No. of Clusters
+
+18
+16
+14
+12
+10
+8 2 4 6 8 10 No. of Example Rows
+15 14 13 12 11 10 9
+2 4 6 8 10 No. of Example Rows
+
+No. of Clusters Selected
+
+Figure 9: Number of columns, clusters, selected clusters and selected columns of different sample size queries
+5.5.3 Vary the number of Columns. We study the effect of larger columns, when this corresponds to larger join graphs, i.e., because columns originate from different tables. In this experiment, we choose query views with 2, 3 and 4 columns on ChemBL. Unlike varying the number of rows, the results of this experiment are intuitive: higher number of columns in the input query lead to higher number of join graphs, candidate PJ-views, and runtime.
+
+problems, the OpenII system [41], the Orchestra system [25], Data Civilizer [14] and Big Gorilla [10] have presented architectures as well. We believe that presenting architectures let other researchers criticize and improve components for the ever-changing challenges of discovery and integration problems in data management.
+Data Lake Exploration. Several lines of work complement and improve our reference architecture for exploration of pathless table collection. Many of these works refer to the problem as 'data lake exploration'. For example, work on identifying data transformations can help with increasing the joinability of tables [21, 27, 50]. Improvements to discovery engines [4, 9, 36, 54], and key detection approaches [7, 11] help with inferring higher quality schemas.
+There is a lot of work on designing effective vizualizations to assist users in exploring pathless data collections [3, 23] and view recommendations [52, 53]. These techniques can be useful to implement the human components of Niffler. Table 4 summarizes some of the representative vizualization techniques.
+QBE and QRE. The table in Section 2 presents only the most relevant work to Niffler. Table 4 presents a summary of representative data discovery, QBE, QRE and view presentation systems along with their respective assumptions for the different components. There is more literature on using QBE interfaces, but either they assume a different data format, such as knowledge bases [26], or their contribution is complementary to our work, such as exemplar queries in [6, 33, 34] that defines a more general notion of queries that query-by-example.
+
+6 RELATED WORK
+We discuss several relevant areas to the work we presented here: Reference architectures in data management. Reference architectures help conceptualize problems and have been influential in advancing the field. For example, [22] for disk-based relational databases and [16] for in-memory databases. In data integration
+
+7 CONCLUSIONS
+We presented a reference architecture for the discovery of PJ-views over pathless table collections, and a system, Niffler, that addresses the technical aspects of the problem. Niffler efficiently addresses the challenges of pathless table collections by using a column retrieval, join graph search, and signal generation component, which, together, produce small sets of candidate PJ-views.
+
+12
+
+REFERENCES
+[1] Michael Armbrust, Ali Ghodsi, Reynold Xin, and Matei Zaharia. 2021. Lakehouse: A New Generation of Open Platforms that Unify Data Warehousing and Advanced Analytics. CIDR.
+[2] Christopher Baik, Zhongjun Jin, Michael Cafarella, and H. V. Jagadish. 2020. Duoquest: A Dual-Specification System for Expressive SQL Queries (SIGMOD '20). 2319­2329.
+[3] Nikos Bikakis and Timos Sellis. 2016. Exploration and visualization in the web of big linked data: A survey of the state of the art. arXiv preprint arXiv:1601.08059 (2016).
+[4] Alex Bogatu, Alvaro A. A. Fernandes, Norman W. Paton, and Nikolaos Konstantinou. 2020. Dataset Discovery in Data Lakes. In ICDE. 709­720. https: //doi.org/10.1109/ICDE48307.2020.00067
+[5] Angela Bonifati, Radu Ciucanu, and Slawek Staworko. 2016. Learning Join Queries from User Examples. ACM Trans. Database Syst. 40, 4, Article 24 (Jan. 2016), 38 pages. https://doi.org/10.1145/2818637
+[6] Angela Bonifati, Ugo Comignani, Emmanuel Coquery, and Romuald Thion. 2019. Interactive mapping specification with exemplar tuples. ACM Transactions on Database Systems (TODS) 44, 3 (2019), 1­44.
+[7] Leon Bornemann, Tobias Bleifuß, Dmitri V Kalashnikov, Felix Naumann, and Divesh Srivastava. 2020. Natural Key Discovery in Wikipedia Tables. In Proceedings of The Web Conference 2020. 2789­2795.
+[8] Mengchu Cai, Martin Grund, Anurag Gupta, Fabian Nagel, Ippokratis Pandis, Yannis Papakonstantinou, and Michalis Petropoulos. 2018. Integrated Querying of SQL database data and S3 data in Amazon Redshift. IEEE Data Eng. Bull. 41, 2 (2018), 82­90.
+[9] R. Castro Fernandez, Z. Abedjan, F. Koko, G. Yuan, S. Madden, and M. Stonebraker. 2018. Aurum: A Data Discovery System. In 2018 IEEE 34th International Conference on Data Engineering (ICDE). 1001­1012. https://doi.org/10.1109/ICDE.2018.00094
+[10] Chen Chen, Behzad Golshan, Alon Y Halevy, Wang-Chiew Tan, and AnHai Doan. 2018. BigGorilla: An Open-Source Ecosystem for Data Preparation and Integration. IEEE Data Eng. Bull. 41, 2 (2018), 10­22.
+[11] Zhimin Chen, Vivek Narasayya, and Surajit Chaudhuri. 2014. Fast foreign-key detection in Microsoft SQL server PowerPivot for Excel. PVLDB 7, 13 (2014), 1417­1428.
+[12] Fernando Chirigati, Rémi Rampin, Aécio S. R. Santos, Aline Bessa, and Juliana Freire. 2021. Auctus: A Dataset Search Engine for Data Augmentation. CoRR abs/2102.05716 (2021). arXiv:2102.05716 https://arxiv.org/abs/2102.05716
+[13] Anish Das Sarma, Aditya Parameswaran, Hector Garcia-Molina, and Jennifer Widom. 2010. Synthesizing View Definitions from Data. In Proceedings of the 13th International Conference on Database Theory (Lausanne, Switzerland) (ICDT '10). Association for Computing Machinery, New York, NY, USA, 89­103. https: //doi.org/10.1145/1804669.1804683
+[14] Dong Deng, Raul Castro Fernandez, Ziawasch Abedjan, Sibo Wang, Michael Stonebraker, Ahmed K Elmagarmid, Ihab F Ilyas, Samuel Madden, Mourad Ouzzani, and Nan Tang. 2017. The Data Civilizer System.. In Cidr.
+[15] AnHai Doan, Alon Halevy, and Zachary Ives. 2012. Principles of data integration. Elsevier.
+[16] Franz Faerber, Alfons Kemper, Per-Åke Larson, Justin Levandoski, Thomas Neumann, Andrew Pavlo, et al. 2017. Main memory database systems. Now Publishers.
+[17] Anna Fariha, Sheikh Muhammad Sarwar, and Alexandra Meliou. 2018. SQuID: Semantic Similarity-Aware Query Intent Discovery (SIGMOD '18). 1745­1748.
+[18] Raul Castro Fernandez, Jisoo Min, Demitri Nava, and Samuel Madden. 2019. Lazo: A cardinality-based method for coupled estimation of jaccard similarity and containment. In 2019 IEEE 35th International Conference on Data Engineering (ICDE). IEEE, 1190­1201.
+[19] Anna Gaulton, Louisa J. Bellis, A. Patricia Bento, Jon Chambers, Mark Davies, Anne Hersey, Yvonne Light, Shaun McGlinchey, David Michalovich, Bissan AlLazikani, and John P. Overington. 2011. ChEMBL: a large-scale bioactivity database for drug discovery. Nucleic Acids Research 40, D1 (09 2011), D1100­D1107. https://doi.org/10.1093/nar/gkr777 arXiv:https://academic.oup.com/nar/articlepdf/40/D1/D1100/16955876/gkr777.pdf
+[20] Alon Halevy, Flip Korn, Natalya F Noy, Christopher Olston, Neoklis Polyzotis, Sudip Roy, and Steven Euijong Whang. 2016. Goods: Organizing google's datasets. In Proceedings of the 2016 International Conference on Management of Data. 795­ 806.
+[21] Yeye He, Xu Chu, Kris Ganjam, Yudian Zheng, Vivek Narasayya, and Surajit Chaudhuri. 2018. Transform-data-by-example (TDE) an extensible search engine for data transformations. VLDB 11, 10 (2018), 1165­1177.
+[22] Joseph M Hellerstein, Michael Stonebraker, and James Hamilton. 2007. Architecture of a database system. Now Publishers Inc.
+[23] Kevin Hu, Snehalkumar'Neil'S Gaikwad, Madelon Hulsebos, Michiel A Bakker, Emanuel Zgraggen, César Hidalgo, Tim Kraska, Guoliang Li, Arvind Satyanarayan, and Çaatay Demiralp. 2019. Viznet: Towards a large-scale visualization learning and benchmarking repository. In Proceedings of the 2019 CHI Conference on Human Factors in Computing Systems. 1­12.
+
+[24] Noor Huijboom and Tijs Van den Broek. 2011. Open data: an international comparison of strategies. European journal of ePractice 12, 1 (2011), 4­16.
+[25] Zachary G Ives, Nitin Khandelwal, Aneesh Kapur, and Murat Cakir. 2005. ORCHESTRA: Rapid, Collaborative Sharing of Dynamic Data.. In CIDR. 107­118.
+[26] Nandish Jayaram, Arijit Khan, Chengkai Li, Xifeng Yan, and Ramez Elmasri. 2015. Querying knowledge graphs by example entity tuples. IEEE Transactions on Knowledge and Data Engineering 27, 10 (2015), 2797­2811.
+[27] Zhongjun Jin, Yeye He, and Surajit Chauduri. 2020. Auto-transform: learning-totransform by patterns. PVLDB 13, 12 (2020), 2368­2381.
+[28] Dmitri V. Kalashnikov, Laks V.S. Lakshmanan, and Divesh Srivastava. 2018. FastQRE: Fast Query Reverse Engineering (SIGMOD '18). Association for Computing Machinery, New York, NY, USA, 337­350. https://doi.org/10.1145/3183713. 3183727
+[29] Tim Kraska. 2018. Northstar: An interactive data science system. PVLDB 11, 12 (2018), 2150­2164.
+[30] Oliver Lehmberg, Dominique Ritze, Robert Meusel, and Christian Bizer. 2016. A large public corpus of web tables containing time and context metadata. In Proceedings of the 25th International Conference Companion on World Wide Web. 75­76.
+[31] Hao Li, Chee-Yong Chan, and David Maier. 2015. Query from Examples: An Iterative, Data-Driven Approach to Query Construction. 8, 13 (Sept. 2015), 2158­2169. https://doi.org/10.14778/2831360.2831369
+[32] Wes McKinney et al. 2011. pandas: a foundational Python library for data analysis and statistics. Python for High Performance and Scientific Computing 14, 9 (2011), 1­9.
+[33] Davide Mottin, Matteo Lissandrini, Yannis Velegrakis, and Themis Palpanas. 2014. Exemplar queries: Give me an example of what you need. PVLDB 7, 5 (2014), 365­376.
+[34] Davide Mottin, Matteo Lissandrini, Yannis Velegrakis, and Themis Palpanas. 2019. Exploring the data wilderness through examples. In Proceedings of the 2019 International Conference on Management of Data. 2031­2035.
+[35] Fatemeh Nargesian, Erkang Zhu, Renée J Miller, Ken Q Pu, and Patricia C Arocena. 2019. Data lake management: challenges and opportunities. PVLDB 12, 12 (2019), 1986­1989.
+[36] F. Nargesian, Erkang Zhu, K. Pu, and R. Miller. 2018. Table Union Search on Open Data. Proc. VLDB Endow. 11 (2018), 813­825.
+[37] Kiril Panev, Sebastian Michel, Evica Milchevski, and Koninika Pal. 2016. Exploring databases via reverse engineering ranking queries with PALEO. PVLDB 9 (09 2016), 1525­1528. https://doi.org/10.14778/3007263.3007300
+[38] Kiril Panev, Nico Weisenauer, and Sebastian Michel. 2017. Reverse Engineering Top-k Join Queries. In Datenbanksysteme für Business, Technologie und Web (BTW 2017), Bernhard Mitschang, Daniela Nicklas, Frank Leymann, Harald Schöning, Melanie Herschel, Jens Teubner, Theo Härder, Oliver Kopp, and Matthias Wieland (Eds.). Gesellschaft für Informatik, Bonn, 61­70.
+[39] Fotis Psallidas, Bolin Ding, Kaushik Chakrabarti, and Surajit Chaudhuri. 2015. S4: Top-k Spreadsheet-Style Search for Query Discovery (SIGMOD '15). 2001­2016.
+[40] Li Qian, Michael J. Cafarella, and H. V. Jagadish. 2012. Sample-Driven Schema Mapping (SIGMOD '12). Association for Computing Machinery, New York, NY, USA, 73­84. https://doi.org/10.1145/2213836.2213846
+[41] Len Seligman, Peter Mork, Alon Halevy, Ken Smith, Michael J Carey, Kuang Chen, Chris Wolf, Jayant Madhavan, Akshay Kannan, and Doug Burdick. 2010. Openii: an open source information integration toolkit. In Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 1057­1060.
+[42] Yanyan Shen, Kaushik Chakrabarti, Surajit Chaudhuri, Bolin Ding, and Lev Novik. 2014. Discovering Queries Based on Example Tuples (SIGMOD '14). Association for Computing Machinery, 493­504.
+[43] Wei Chit Tan, Meihui Zhang, Hazem Elmeleegy, and Divesh Srivastava. 2017. Reverse Engineering Aggregation Queries. Proc. VLDB Endow. 10, 11 (Aug. 2017), 1394­1405. https://doi.org/10.14778/3137628.3137648
+[44] Wei Chit Tan, Meihui Zhang, Hazem Elmeleegy, and Divesh Srivastava. 2018. REGAL<sup>+</sup>: Reverse Engineering SPJA Queries. Proc. VLDB Endow. 11, 12 (Aug. 2018), 1982­1985. https://doi.org/10.14778/3229863.3236240
+[45] Quoc Trung Tran, Chee-Yong Chan, and Srinivasan Parthasarathy. 2009. Query by Output. In Proceedings of the 2009 ACM SIGMOD International Conference on Management of Data (Providence, Rhode Island, USA) (SIGMOD '09). Association for Computing Machinery, New York, NY, USA, 535­548. https://doi.org/10. 1145/1559845.1559902
+[46] Manasi Vartak, Aditya Parameswaran, Neoklis Polyzotis, and Samuel R Madden. 2014. SEEDB: automatically generating query visualizations. (2014).
+[47] Chenglong Wang, Alvin Cheung, and Rastislav Bodik. 2017. Synthesizing Highly Expressive SQL Queries from Input-Output Examples. SIGPLAN Not. 52, 6 (June 2017), 452­466. https://doi.org/10.1145/3140587.3062365
+[48] Kanit Wongsuphasawat, Zening Qu, Dominik Moritz, Riley Chang, Felix Ouk, Anushka Anand, Jock Mackinlay, Bill Howe, and Jeffrey Heer. 2017. Voyager 2: Augmenting visual analysis with partial view specifications. In Proceedings of the 2017 CHI Conference on Human Factors in Computing Systems. 2648­2659.
+[49] Meihui Zhang, Hazem Elmeleegy, Cecilia M. Procopiuc, and Divesh Srivastava. 2013. Reverse Engineering Complex Join Queries. In Proceedings of the 2013 ACM
+
+13
+
+SIGMOD International Conference on Management of Data (New York, New York, USA) (SIGMOD '13). Association for Computing Machinery, New York, NY, USA, 809­820. https://doi.org/10.1145/2463676.2465320 [50] Shuo Zhang and Krisztian Balog. 2020. Web table extraction, retrieval, and augmentation: A survey. ACM Transactions on Intelligent Systems and Technology (TIST) 11, 2 (2020), 1­35. [51] Sai Zhang and Yuyin Sun. 2013. Automatically Synthesizing SQL Queries from Input-Output Examples. In Proceedings of the 28th IEEE/ACM International Conference on Automated Software Engineering (Silicon Valley, CA, USA) (ASE'13). IEEE Press, 224­234. https://doi.org/10.1109/ASE.2013.6693082 [52] Xiaozhong Zhang. 2020. Interactive View Recommendation. In Proceedings of the 2020 ACM SIGMOD International Conference on Management of Data. 2849­2851.
+
+[53] Xiaozhong Zhang, Xiaoyu Ge, Panos K Chrysanthis, and Mohamed A Sharaf. 2019. ViewSeeker: An Interactive View Recommendation Tool.. In EDBT/ICDT Workshops.
+[54] Yi Zhang and Zachary G Ives. 2019. Juneau: data lake management for Jupyter. PVLDB 12, 12 (2019).
+[55] Erkang Zhu, Dong Deng, Fatemeh Nargesian, and Renée J Miller. 2019. Josie: Overlap set similarity search for finding joinable tables in data lakes. In Proceedings of the 2019 International Conference on Management of Data. 847­864.
+[56] Erkang Zhu, Fatemeh Nargesian, Ken Q Pu, and Renée J Miller. 2016. LSH Ensemble: Internet-Scale Domain Search. PVLDB 9, 12 (2016).
+[57] Moshé M Zloof. 1975. Query by example. In Proceedings of the May 19-22, 1975, national computer conference and exposition. 431­438.
+
+14
+
+

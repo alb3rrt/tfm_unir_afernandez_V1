@@ -1,0 +1,788 @@
+arXiv:2106.01151v1 [cs.LG] 2 Jun 2021
+
+Towards Deeper Deep Reinforcement Learning
+Johan Bjorck1, Carla P. Gomes 1, Kilian Q. Weinberger 1 1Cornell University
+Abstract
+In computer vision and natural language processing, innovations in model architecture that lead to increases in model capacity have reliably translated into gains in performance. In stark contrast with this trend, state-of-the-art reinforcement learning (RL) algorithms often use only small MLPs, and gains in performance typically originate from algorithmic innovations. It is natural to hypothesize that small datasets in RL necessitate simple models to avoid overfitting; however, this hypothesis is untested. In this paper we investigate how RL agents are affected by exchanging the small MLPs with larger modern networks with skip connections and normalization, focusing specifically on soft actor-critic (SAC) algorithms. We verify, empirically, that naïvely adopting such architectures leads to instabilities and poor performance, likely contributing to the popularity of simple models in practice. However, we show that dataset size is not the limiting factor, and instead argue that intrinsic instability from the actor in SAC taking gradients through the critic is the culprit. We demonstrate that a simple smoothing method can mitigate this issue, which enables stable training with large modern architectures. After smoothing, larger models yield dramatic performance improvements for state-ofthe-art agents -- suggesting that more "easy" gains may be had by focusing on model architectures in addition to algorithmic innovations.
+1 Introduction
+In computer vision and natural language processing (NLP), competitive models are growing increasingly large, and researchers now train billion-parameter models [13, 35]. The earliest neural networks were often shallow [39] with performance dropping for excessively deep models [28]. However, ever since the introduction of batch normalization [30] and residual connections [28], performance has improved more or less monotonically with model scale [62]. As a result, competitive models in computer vision and NLP are growing ever larger [10, 55], and further architectural innovations are continuously researched [14].
+In stark contrast with this trend, state-of-the-art (SOTA) reinforcement learning (RL) agents often rely on small feedforward networks [34, 36, 38] and performance gains typically originate from algorithmic innovations such as novel loss functions [57, 60, 66] rather than increasing model capacity. It is natural to suspect that high-capacity models might overfit in the low-sample regime common in RL evaluation. Imagenet contains over a million unique images whereas RL is often evaluated in contexts with fewer and more redundant environment samples. Additionally, a recent large-scale study has shown that large networks can harm performance in RL [2]. However, to date, this overfitting hypothesis remains largely untested.
+To address this, we study the effects of using larger modern architectures in RL. By modern architectures we mean networks with high capacity, facilitated by normalization layers [6, 30] and skip connections [28]. We thus depart from the trend of treating networks as black-box function approximators. To limit the scope and compute requirements we focus on a single setting, continuous control from pixels [63] with the soft actor-critic (SAC) algorithm [24]. This popular agent forms the basis of many SOTA algorithms [34, 37, 38]. As can be expected, we demonstrate that naïvely
+Preprint. Under review.
+
+adopting modern architectures leads to poor performance, supporting the idea that RL might overfit with models that are too large. However, by dissecting the learning dynamics we show that the issue is not necessarily overfitting, but instead, that training becomes unstable with deeper modern networks. We hypothesize that SAC taking the gradient of the actor through the critic network creates exploding gradients [52] for deeper networks, and motivate this argument mathematically. We connect this setup with generative adversarial networks (GAN) [21], and propose to use a simple smoothing technique from the GAN literature named spectral normalization [46] to stabilize training.
+We demonstrate that this simple strategy allows the training of larger modern networks in RL without instability. With these fixes, we can improve upon state-of-the-art RL agents on competitive continuous control benchmarks, demonstrating that improvements in network architecture can dramatically affect performance in RL. We also provide performance experiments showing that such scaling can be relatively cheap in terms of memory and compute time for RL from pixels. Our work suggests that network scaling is complementary with algorithmic innovations and that this simple strategy should not be overlooked. Further, one may argue that resource consumption should become a part of the evaluation protocol in RL, as it already is within computer vision and NLP. We summarize our contributions as follows:
+· We verify empirically that large modern networks fail for SAC. We demonstrate dramatic instabilities during training, which casts doubt on overfitting being responsible.
+· We argue that taking the gradients through the critic is the cause of this instability, and provide mathematical motivation for this. To combat this problem we propose to adopt spectral normalization [46] from the GAN literature.
+· We demonstrate that this simple smoothing method enables the use of large modern networks and leads to large improvements on SOTA methods for hard continuous control tasks. We further provide evidence that this strategy is computationally cheap in RL from pixels.
+
+2 Background
+
+2.1 Reinforcement Learning
+Reinforcement learning tasks are often formulated as Markov decision processes (MDPs), which can be defined by a tuple (S, A, P, r) [61]. For continuous control tasks the action space A and the state space S are continuous and can also be bounded. Each dimension of the action space might for example correspond to one joint of a humanoid walker. At time step t, the agent is in a state st  S and takes an action a  A to arrive at a new state st+1  S. The transition between states given an action is random with transition probability P : S × S × A  [0, ). The agent receives a reward rt from the reward distribution r at each timestep t. The goal is typically to find a policy  : S  A that maximizes expected discounted reward E[ t trt], where 0 <  < 1 is a pre-determined constant. In practice, it is common to measure performance by the cumulative rewards t rt.
+
+2.2 Soft Actor-Critic (SAC)
+
+Soft actor-critic (SAC) [24] is an algorithm for continuous control with roots in q-learning [67],
+forming the backbone of many recent state-of-the-art algorithms [34, 37, 38]. Due to its popularity and performance, we focus on this algorithm throughout the paper. Given some features (s) that can be obtained from every state s  S, the actor-network maps each state-feature (s) to a distribution (s) over actions. The action distribution is known as the policy. For each dimension, the actornetwork outputs an independent normal distribution, where the mean µ(s) and the standard deviation (s) come from the actor-network. The action distribution is then obtained as
+
+(s) = tanh(µ(s) + (s)),
+
+ N (0, 1).
+
+(1)
+
+The tanh non-linearity is applied elementwise, which bounds the action space to [-1, 1]n for n = dim(A). Sampling allows us to sample actions a from the policy (s). To encourage exploration, SAC adds the entropy of the policy distribution H((st)) times a parameter  to the rewards.  can be a fixed hyperparameter or be updated dynamically to encourage the entropy to
+match some predefined value. The critic network outputs a q-value Q(a, s) for each state s and action a. In practice, one can simply concatenate the feature (s) with the action a and feed the
+
+2
+
+result to the critic. The critic network is trained to minimize the soft Bellman residual:
+
+2
+
+min E Q(a, st) - rt + E[Q^(at+1, st+1) + H()]
+
+(2)
+
+
+
+Here, rt is the obtained reward and E[Q^(at+1, st+1)] is the q-value estimated by the target critic ­ a network whose weights are the exponentially averaged weights of the critic. The loss (2) is computed
+by sampling transitions from a replay buffer [47]. Since the q-values that the critic outputs measure
+expected discounted rewards, the actor should simply take actions that maximize the output of the critic network. Thus, to obtain a gradient step for the actor, SAC samples an action a from (st) and then takes derivatives of Q(a, s) with respect to . As the critic is a differentiable neural network, the derivatives are taken through the q-values Q(a, s). In practice, the features (s) can be obtained from a convolutional network trained by backpropagating from (2).
+
+3 Motivating Experiments
+3.1 Experimental Setup
+For experimental evaluation, we focus on continuous control from pixels, a popular setting relevant to real-world applications [32, 33]. Specifically we evaluate on the DeepMind control suite [63], which has been used in [25, 26, 34, 38]. We use the 15 tasks considered in Kostrikov et al. [34] and evaluate after 500,000 samples, which has become a common benchmark [34, 38, 40]. If learning crashes before 500,000 steps (this occasionally happens for modern networks), we report the performance before the crash. As is now common we use image augmentations on the raw images; this idea has been proposed independently by Laskin et al. [36] and Kostrikov et al. [34]. We start from the SAC from pixels implementation of Kostrikov et al. [34] (also known as DRQ) and adopt the default hyperparameters which are listed in Appendix B. The network consists of a common convolutional encoder that processes the image into a fixed-length feature vector. Such feature vectors are then processed by the critic and actor-network, which are just feedforward networks. We will refer to these networks as the heads. The convolutional encoder consists of four convolutional layers followed by a linear layer and layer normalization [6] and the heads consist of MLPs with two hidden layers that concatenate the actions and image features; see Appendix C for details. In the experiments, we only vary the head architecture. This reduces the computational burden and suffices to illustrate our arguments. Changing encoder is deferred to future work. Evaluation is done over ten seeds (cyclic permutations of "0123456789" mod 232 - 1), with images showing the mean and standard error.
+3.2 Testing Modern networks
+Two crucial architectural innovations which have enabled deep supervised models are residual connections [28] and normalization [30]. We test if adopting such modern techniques allows us to successfully scale networks in SAC. Specifically, we use the feedforward network (and not the attention module) found in a Transformer block [65], and will refer to this architecture as modern.
+
+Figure 1: Performance of SAC when using a modern network architecture with skip connections [28] and normalization [6], averaged across ten seeds. Using modern architectures does not enable deeper networks for SAC; instead, performance often decreases -- sometimes catastrophically -- while increasing for a handful of tasks. This is in stark contrast with supervised learning where performance typically improves monotonically with model capacity.
+3
+
+Each unit consists of two linear transformations w1, w2 with a ReLu between and layer normalization [6] that is added to a residual branch, i.e. the output of a layer is x + w2Relu w1norm(x) . Compared to the original architecture, normalization is applied before the feedforward blocks instead of after, which is now strongly favored in practice [49, 68]. We use four transformer blocks for the critic, which is responsible for learning the environment rewards, and two for the actor. Results from these experiments are shown in Figure 1, and we see that these modifications typically decrease performance. Thus, SAC has seemingly not reached the level where model capacity improves performance monotonically, and tricks used in supervised learning do not seem to suffice. This is perhaps not very surprising as state-of-the-art RL agents typically use simple feedforward networks.
+3.3 Testing Deeper Networks
+Whereas naively adopting modern networks failed, we now investigate if simply making the feedforward networks deeper is a competitive strategy. To do this, we increase the number of layers in the actor and critic -- from two to four hidden layers -- while keeping the width constant. Results for the two configurations are shown in Figure 2. We see that for some tasks, the performance improves, but for many others, it decreases. Simply scaling the network does not monotonically improve performance, as typically is the case in supervised learning. For practitioners, the extra computational burden might not make it worthwhile to increase network scale for such dubious gains. As we shall see, it is possible to improve the performance of these deep networks by just stabilizing training, which suggests that there indeed is some instability.
+Figure 2: The performance of SAC when making the networks deeper. Performance is averaged across ten seeds and plotted for 15 tasks from the DeepMind control suite [63]. Making the network deeper does not monotonically improve performance as is typically the case in supervised learning. Instead, some tasks benefit, and some tasks suffer. As we shall see later, it is possible to improve the performance by stabilizing training, suggesting that there indeed is some instability.
+3.4 Is it overfitting?
+Both making the networks deeper and adopting modern methods such as normalization and residual connections do not monotonically improve performance, and can occasionally lead to catastrophic drops in performance. It is natural to think that the small sample sizes simply lead to overfitting, which is known to be harmful in RL [73]. This hypothesis is relatively easy to probe. As per eq. (2), the critic is trained to minimize the soft Bellman residual. If overfitting truly was the issue, we would expect the loss to decrease when increasing the network capacity. We now investigate this by comparing a modern network against a smaller MLP in an environment where the former performs poorly -- cartpole-swing-up. First, we study the critic loss as measured over the replay buffer -- which plays the role of training loss in supervised learning. Results averaged over five runs are shown in Figure 3. The losses initially start on the same scale, but the modern network later has losses that increase dramatically -- suggesting that overfitting is not the issue. Instead, training stability could be the culprit, as stable training should enable the network to reach lower training loss. To probe this, we simply plot the scale of the gradients for the critic and actor networks and see that they indeed are much larger for the large modern networks. Furthermore, the gradient magnitude increases during training and shows large spikes, especially for the actor. This suggests that training stability, rather than overfitting, is the issue.
+4
+
+critic <latexit sha1_base64="nHyGGEG3MhL1YjtAGSK9K27nZ9o=">AAAB9HicbVBNSwMxEJ2tX7V+VT16CRbBU9kVQY9FLx4r2A9ol5JNs21oNrsms8Wy9Hd48aCIV3+MN/+NabsHbX0w8HhvJpl5QSKFQdf9dgpr6xubW8Xt0s7u3v5B+fCoaeJUM95gsYx1O6CGS6F4AwVK3k40p1EgeSsY3c781phrI2L1gJOE+xEdKBEKRtFKfhf5E2ZMCxRs2itX3Ko7B1klXk4qkKPeK391+zFLI66QSWpMx3MT9DOq7WuST0vd1PCEshEd8I6likbc+Nl86Sk5s0qfhLG2pZDM1d8TGY2MmUSB7YwoDs2yNxP/8zophtd+JlSSIlds8VGYSoIxmSVA+kJzhnJiCV1cTtiQasrQ5lSyIXjLJ6+S5kXVc6ve/WWldpPHUYQTOIVz8OAKanAHdWgAg0d4hld4c8bOi/PufCxaC04+cwx/4Hz+AIYzkpM=</latexit> actor <latexit sha1_base64="n8dtHMcE78nOLC3Wib5KcFvI6zM=">AAAB83icbVBNS8NAEJ3Ur1q/qh69LBbBU0lE0GPRi8cK9gOaUDbbTbt0swm7E7GE/g0vHhTx6p/x5r9x2+agrQ8GHu/NMDMvTKUw6LrfTmltfWNzq7xd2dnd2z+oHh61TZJpxlsskYnuhtRwKRRvoUDJu6nmNA4l74Tj25nfeeTaiEQ94CTlQUyHSkSCUbSS7yN/wpwyTPS0X625dXcOskq8gtSgQLNf/fIHCctirpBJakzPc1MMcqpRMMmnFT8zPKVsTIe8Z6miMTdBPr95Ss6sMiBRom0pJHP190ROY2MmcWg7Y4ojs+zNxP+8XobRdZALlWbIFVssijJJMCGzAMhAaM5QTiyhTAt7K2Ejqm0GNqaKDcFbfnmVtC/qnlv37i9rjZsijjKcwCmcgwdX0IA7aEILGKTwDK/w5mTOi/PufCxaS04xcwx/4Hz+AMLWkiQ=</latexit>
+
+Figure 3: Training dynamics when using a small MLP or a deeper network with normalization and residual connections. Top left. The loss, as per eq. (2), of the critic during training. The loss does not decrease when making the network larger, suggesting that overfitting is not the issue. Top right. The rewards obtained. The deeper network fails to learn and improve its performance. Bottom left & right. The gradient of the actor and critic during training. For the deeper network, training becomes unstable with occasional spikes and large and growing gradients. Notice the logarithmic scale.
+
+4 The Importance of Smoothness
+
+4.1 Taking Gradients Through the Critic
+
+To understand why the actor might be more unstable for high-capacity networks, let us consider a
+simple model. We will assume that the action space has only one degree of freedom, i.e. A = R. We also assume that we have some fixed features  which maps states to n-dimensional vectors, i.e. (S) = Rn. The critic and actor are both modeled as MLPs with N layers each using a non-linearity f (e.g. ReLu) elementwise after each layer. The weights are given as matrices wia or wic for layer i and the actor and critic respectively, and we thus have yi = f (wixi) for layer i. The case with bias
+is similar and discussed in Appendix D. If we let the functions representing the actor and critic be
+denoted by A and Q, and let denote vector concatenation, we have:
+
+A(s) =
+
+i
+
+f  wia  (s) Q(s) = Q(A(s), (s)) =
+
+Recall that the Lipschitz constant of a function f is the smallest constant C such that f (x)-f (y)  C x - y for all x, y. It is straightforward to bound the Lipshitz constant of the critic, as it is made
+up of function transformations that individually have bounded Lipschitz constants wi , where wi is the operator norm of matrix wi, equal to its largest singular value max. We thus have:
+
+Q(s)  A(s) + (s)
+
+Here f is the Lipschitz constant of the function f . For bounding the gradients of the actor, one can
+use an inductive strategy to bound the gradients of a layer with respect to its output. This gives us the following bound for wa Q , the Frobenius norm of the gradient of the actor weights:
+
+Proposition 1 Under the model given above, one can bound the actor gradients wa Q as follows
+
+log kr`k
+<latexit sha1_base64="OhObytwGsTDZ20X1JJaE6kP0tLw=">AAAB/3icbVDLSgMxFL3js9bXqODGTbAIrsqMCLosunFZwT6gM5RMmmlDM8mQZIQy7cJfceNCEbf+hjv/xrSdhbYeuHByzr3k3hOlnGnjed/Oyura+sZmaau8vbO7t+8eHDa1zBShDSK5VO0Ia8qZoA3DDKftVFGcRJy2ouHt1G89UqWZFA9mlNIwwX3BYkawsVLXPQ647KNgjAKBI45RQDm3z65b8areDGiZ+AWpQIF61/0KepJkCRWGcKx1x/dSE+ZYGUY4nZSDTNMUkyHu046lAidUh/ls/wk6s0oPxVLZEgbN1N8TOU60HiWR7UywGehFbyr+53UyE1+HORNpZqgg84/ijCMj0TQM1GOKEsNHlmCimN0VkQFWmBgbWdmG4C+evEyaF1Xfq/r3l5XaTRFHCU7gFM7BhyuowR3UoQEExvAMr/DmPDkvzrvzMW9dcYqZI/gD5/MHxDeVSA==</latexit>
+
+log ` <latexit sha1_base64="V/Uemno0trW4LfVBcWqFqlmUZ8Y=">AAAB8HicbVDLSgNBEOyNrxhfUY9eBoPgKeyKoMegF48RzEOyS5idzCZD5rHMzAphyVd48aCIVz/Hm3/jJNmDJhY0FFXddHfFKWfG+v63V1pb39jcKm9Xdnb39g+qh0dtozJNaIsornQ3xoZyJmnLMstpN9UUi5jTTjy+nfmdJ6oNU/LBTlIaCTyULGEEWyc9hlwNUUg571drft2fA62SoCA1KNDsV7/CgSKZoNISjo3pBX5qoxxrywin00qYGZpiMsZD2nNUYkFNlM8PnqIzpwxQorQradFc/T2RY2HMRMSuU2A7MsveTPzP62U2uY5yJtPMUkkWi5KMI6vQ7Hs0YJoSyyeOYKKZuxWREdaYWJdRxYUQLL+8StoX9cCvB/eXtcZNEUcZTuAUziGAK2jAHTShBQQEPMMrvHnae/HevY9Fa8krZo7hD7zPH3UikCs=</latexit>
+
+wa Q
+
+
+
+
+
+N (maxi wia
+
+)
+
+(s)
+
+5
+
+log kr`k
+<latexit sha1_base64="OhRXhPfgO+pub6elyL1jtraVwU5fGf1hs2SoTd1bD3pPZtJr2Zq00a3WXlIg1dwAJqFGJaoNaQV9EQzT6vGPkEaxPKfQ0MustX59LyGKwoM=">AAAB/293XHicbVZDBCLN7STgwsMxwFLIH3XjvKs1+q9LK5b8yRX61qVaAOqnID1XmGrhFTNxb8kaAE2JIiwCruCYsCKqqo7MzKSCbjFLnBhoQtgspdruCWnHmBF5iZcLwVRTbrB6ZA9gCPSMO6E5A1RzUMl3m5Trmkptl4pNDbpaMmQd8szemkPzQMJIZykdIRGpQ2SCyhEq7DMtcHuAJ03OfBC/cFvwe2+sN5LICEGAEfhQbCSqf9Lz+38hvFBjonhv3ft/p+xzGgr09SJPtdbHmhDQgbwlJYQse+PjuzBXHkEeBn7yIO4zvSnrScH3cjvkuNl3lFehL20OQe+lUCnBGcGN+qn9vaje7Neb35dW93/d70O3G7yb5pu/tbr+bXag21+fzjsumcZg52mfptaNr8af7nuzxZ8jflvkOZb9T3ONgd7m8vtoq/+2h88f5AezX9H0WPDgkGajbp1slpzimBlrSSzIlhlmCD5VmSjU0KnLR5mpyVFTqOpoT0XyoIUGRa2C8CSMqV5ZJoC0Ap3E38IDLrDgWKzCfyetLTdVFDFfNGbNFcjYIR6sIJfHky0Y72i8bo7u0u7peH+vhtg121s75GTSr8Lec9XmfUTDqqzVdWQfJZryMFM0iAMYg9r4cm4zlWFTNMqmItUmwU4YwCkXkDE37zCBOhwY6FmkoKBay2EwaLsreVVatuLAXqXdT5PLUJQMKw6WgG42BX7ICAKVSxNxcgDkMjClcA9BCKYgABaLgINJ44bCo5+EARGTDQSwyDSmrm71l3K79zD196DZt5UpybJfq8x9Va+/r0cPedimDh6wGEyKiFZvZBYE+UmLAch0WUogpNsVQS1FIaeWFhj6wV017v3/g8K09K+KL+geioLpwn0JUnmkXKWCUpRzKGW7UEGCIcgjBKUe6xPk21NG7xMfv/7mpdRaeSRjaEtAM+RrAZxXdYzlGzVUiLOY6BF4dp0nkOWZ7cgSAwkD0NyTNyN+5VM5CUoOgkYcIykMxHvCju36Q09zr4kq6upUlKMCAZmEi9YqdbmrUOKDhs+f/tfLljx7sdT//zcFwDuJkhG96NSbs7Pp0GkYoam9P2UjxMdqVPkWL/twZLaJEBMggik+bW9fNl/q1t37N1y48EgkTlwcOdNEUVWq6Ea30ScHHaxSiruWWH5QR6k77KiEUCnzy0ZBwVoDGoVve5rhwtzFtZNbd+xymFPra/++JX85Nzb3CWmUh1byIiEz61Rxz+xVBHwcnOYZIRarsNSl0pblMZlkFqYiWgk4TgJex8NSU41nZ/yJxiQBxjarbC8MZISj3ze0HGhTYKQSTHMbP71GNTG2aFO9NFKDWiE7j+s7JNNo1gHdBSlBqImurIC3mriwbZmMlXNYdT0AEV6hZknagQMqgFMTJWFimXIbBESGgEsQbI7VWNCGd3M4mAHKGHq/4DlfC9P+CdIeBNqvL6aEg6Vyho3aIeWF4+f1BPKX/fegmqvw3/Y3rncv3SVl5n+5nMkX2E0as5RTuXRRqExFpImH5AdC61oU93j7LANgOL0F49gMI9X7+CxB8A0hzJyxleu8Cro4YwxDRIAj3ouVU48Qo<wEQ/bxElvEa30xt7QveLcAx1/Mi6ortHF/>wbDt0mc5PGTD98k6vSLz28rw+vn5z8MkLWfF9fpd5LcATY1jqhFZvzIkj/9Pg47D=A5<+/fMlwHaBxtwDevexViStRA>==</latexit>
+
+reward <latexit sha1_base64="Z8+uiuObr0q1nshzGW/IrRYnZXg=">AAAB9HicbVBNS8NAEN34WetX1aOXxSJ4KokIeix68VjBfkAbymYzbZduNnF3Ui2hv8OLB0W8+mO8+W/ctjlo64OBx3szzMwLEikMuu63s7K6tr6xWdgqbu/s7u2XDg4bJk41hzqPZaxbATMghYI6CpTQSjSwKJDQDIY3U785Am1ErO5xnIAfsb4SPcEZWsnvIDxhpuGR6XDSLZXdijsDXSZeTsokR61b+uqEMU8jUMglM6btuQn6GdMouIRJsZMaSBgfsj60LVUsAuNns6Mn9NQqIe3F2pZCOlN/T2QsMmYcBbYzYjgwi95U/M9rp9i78jOhkhRB8fmiXiopxnSaAA2FBo5ybAnjWthbKR8wzTjanIo2BG/x5WXSOK94bsW7uyhXr/M4CuSYnJAz4pFLUiW3pEbqhJMH8kxeyZszcl6cd+dj3rri5DNH5A+czx+Q+pKa</latexit>
+
+f 2N
+
+i
+
+N
+
+j=1
+
+i
+
+f wic
+
+wja
+
+agent <latexit sha1_base64="OSqsYfvNPTaV61+dEGY0WuYBJBE=">AAAB83icbVDLSgMxFL1TX7W+qi7dBIvgqsyIoMuiG5cV7AM6Q8mkmTY0kxmSO2IZ+htuXCji1p9x59+YtrPQ1gOBwzn3JDcnTKUw6LrfTmltfWNzq7xd2dnd2z+oHh61TZJpxlsskYnuhtRwKRRvoUDJu6nmNA4l74Tj25nfeeTaiEQ94CTlQUyHSkSCUbSS7yN/wpwOucJpv1pz6+4cZJV4BalBgWa/+uUPEpbFNswkNabnuSkGOdUomOTTip8ZnlI2ttf3LFU05ibI5ztPyZlVBiRKtD0KyVz9nchpbMwkDu1kTHFklr2Z+J/XyzC6DnKh0gy5YouHokwSTMisADIQmjOUE0so08LuStiIasrQ1lSxJXjLX14l7Yu659a9+8ta46aoowwncArn4MEVNOAOmtACBik8wyu8OZnz4rw7H4vRklNkjuEPnM8fs5GSGg==</latexit> critic <latexit sha1_base64="nHyGGEG3MhL1YjtAGSK9K27nZ9o=">AAAB9HicbVBNSwMxEJ2tX7V+VT16CRbBU9kVQY9FLx4r2A9ol5JNs21oNrsms8Wy9Hd48aCIV3+MN/+NabsHbX0w8HhvJpl5QSKFQdf9dgpr6xubW8Xt0s7u3v5B+fCoaeJUM95gsYx1O6CGS6F4AwVK3k40p1EgeSsY3c781phrI2L1gJOE+xEdKBEKRtFKfhf5E2ZMCxRs2itX3Ko7B1klXk4qkKPeK391+zFLI66QSWpMx3MT9DOq7WuST0vd1PCEshEd8I6likbc+Nl86Sk5s0qfhLG2pZDM1d8TGY2MmUSB7YwoDs2yNxP/8zophtd+JlSSIlds8VGYSoIxmSVA+kJzhnJiCV1cTtiQasrQ5lSyIXjLJ6+S5kXVc6ve/WWldpPHUYQTOIVz8OAKanAHdWgAg0d4hld4c8bOi/PufCxaC04+cwx/4Hz+AIYzkpM=</latexit>
+
+f  wic  A(s) (s) (3)
+
+N
+
+k=1
+
+wkc
+
+(4)
+
+(proof in Appendix D). In practice, the non-linear function f is typically a Relu function for which f = 1, so that the above expression simplifies to essentially be the product of the spectral norms of the layers of the critic and actor, divided by the norm of one layer. If all layers have approximately the same norm, we would expect that gradient magnitude to grow larger with deeper models, as we empirically observe in Figure 3.
+
+4.2 Enforcing Smoothness
+
+Motivated by eq. (4), we would like to enforce smoothness in both the critic and actor. This should
+then ensure that the gradient of the actor could not explode. Fortunately, the problem of ensuring
+network smoothness has been studied extensively in the literature of generative adversarial networks
+(GANs) [21]. When training GANs, one updates the weight of a generator network by taking
+the gradient through the discriminator network, similar to how the actor is updated in SAC by
+taking gradients through the output of the critic network. Similarly, in SAC, the agent outputs an action a aiming to maximize Q(a, s), whereas in GANs, the generator outputs an image i aiming to maximize the confidence P (i) of the discriminator. Within the GAN literature, many ideas for ensuring network smoothness have been proposed, e.g., constraining weight norms [56], clipping
+weights [5], biasing networks towards orthogonal weights [9], and penalizing sharp gradients [23]. One technique especially relevant here is spectral normalization [46], where the weight W for each layer is divided by its largest singular value max. This ensures that all layers have operator norm 1 and should directly constrain the gradient of the actor as per eq. (4). The singular value can be expensive to compute in general, and to this end, one can obtain two vectors u and v ­ approximately equal to the right and left vectors of the largest singular value, and then approximate max  uT W v. This gives us the following forward pass:
+
+y
+
+=
+
+Wx max(W )
+
+
+
+Wx uT W v
+
+For this to work properly, the vectors u and v should be close to the vectors corresponding to the largest singular value. This can easily be achieved via the power method [45, 46] by taking:
+
+u  W T u/ W T u
+
+v  W v/ W v
+
+If we assume that we can apply this method directly to each layer of our theoretical model above, and
+
+that f = 1 as is the case for ReLu, we obtain from eq. (4)
+
+
+
+w A(x)
+
+
+
+N (maxi wia
+
+)
+
+(s)
+
+N
+
+N
+
+f 2N
+
+wka
+
+wkc
+
+k=1
+
+k=1
+
+  N (s)
+
+This bounds the gradient update of the actor-network, which we already suspect might drive the poor performance of the deeper networks. In the following sections, we evaluate experimentally whether this idea enables deeper networks to be used on RL.
+
+5 Experiments
+5.1 Smoothness Enables Larger Networks
+We first want to investigate whether smoothing with spectral normalization [46] allows us to use deeper modern networks in SAC. To do this, we simply compare SAC using the modern network defined in Section 3.2 without and with spectral normalization applied to each layer. Otherwise, the setup follows Section 3.1. As before, when learning crashes, we simply use the performance recorded before crashes for future time steps. Learning curves for individual environments are given in Figure 4, again over 10 seeds. We see that after smoothing with spectral normalization, SAC is relatively stable across tasks, even when using a deep network with normalization and skip connections. On the other hand, without smoothing, learning is slow and sometimes fails. These results are in line with the simple model of Section 4. Note that the improvements differ by tasks, but performance essentially improves monotonically when making the network deeper -- just as in supervised learning. The only exception is walker walk, where the smoothed strategy is narrowly beat, however, this might be a statistical outlier. In Appendix A, we also show that smoothing with spectral normalization improves performance when using the 4-layer MLPs. Thus, we conclude that enforcing smoothness allows SAC to utilize deeper networks.
+
+6
+
+Figure 4: Learning curves for SAC using deep modern networks, with and without smoothing by spectral normalization [46]. We see that smoothing enables the deep network to learn effectively across all tasks, whereas naively using such a deep network often leads to slow learning and sometimes no learning at all.
+5.2 Comparing to Other Agents
+After demonstrating that smoothing with spectral normalization [46] allows SAC to use larger modern networks and improve its performance, we now see if these gains allow us to improve upon other agents. We compare against two state-of-the-art methods for continuous control: Dreamer [25] and SAC with augmentations and the original 2-hidden-layer MLP architecture, corresponding to the DRQ agent in [34]. We use the code open-sourced by the authors and show scores at step 500,000, averaged across 10 seeds (cyclic permutations of "0123456789" mod 232 - 1), in Table 1. For most tasks, the agent using deep modern networks with smoothing outperforms the other agents, although for a handful of tasks it is narrowly beaten. Note that the improvements that are obtained from scaling the network differ significantly between tasks, likely as some tasks are more complex and thus more amenable to high-capacity models. It is also interesting to note that performance on some sparse tasks improves, where artificial curiosity is often employed [53, 59], suggesting that such tasks might not always require specialized solutions. We note that these gains are comparable to those of algorithmic innovations, e.g. the improvement for changing architecture is larger than the difference between Dreamer and DRQ shown here, see Appendix E for details. Appendix E also compare against learning curves reported in [25, 34] which does not necessarily use more than 5 seeds. Here, deeper modern networks with smoothing again outperforms the two alternatives. We conclude that by enforcing smoothness and simply scaling the network, it is possible to improve upon state-of-the-art methods without any algorithmic innovations.
+5.3 Performance Cost
+We have shown how scaling networks can improve performance without algorithmic innovations, but larger networks can substantially increase GPU memory footprint and compute time. Thus, we
+7
+
+Table 1: Comparison of algorithms across tasks from the DeepMind control suite. We compare SAC with a modern architecture and spectral normalization [46] against two state-of-the-art agents: SAC with two hidden layers and image augmentations [34] (MLP), and Dreamer [25]. By using spectral normalization the modern network outperforms the other methods. This demonstrates that simply stabilizing larger network can achieve gains comparable to those of algorithmic innovations.
+
+MLP Modern+smooth Dreamer
+MLP Modern+smooth Dreamer
+MLP Modern+smooth Dreamer
+MLP Modern+smooth Dreamer
+
+ball in cup catch
+884.6 ± 262.0 968.9 ± 13.3 767.1 ± 63.3
+finger spin
+851.7 ± 156.8 882.5 ± 149.0 466.8 ± 42.1
+hopper stand
+743.1 ± 280.5 854.7 ± 63.5 663.7 ± 70.3
+swingup sparse
+148.7 ± 299.3 620.8 ± 311.0 267.8 ± 25.4
+
+swingup
+805.7 ± 64.9 862.3 ± 15.2 592.4 ± 31.3
+reacher hard
+674.7 ± 332.0 875.1 ± 75.5 65.7 ± 16.5
+walker walk
+754.3 ± 356.7 902.2 ± 67.4 863. ± 27.2
+reacher easy
+753.9 ± 205.0 814.0 ± 85.8 830.4 ± 31.4
+
+cheetah run
+502.8 ± 315.5 708.9 ± 46.2 630.7 ± 23.3
+pendulum swingup
+297.8 ± 352.6 586.4 ± 381.3 494.3 ± 98.9
+balance
+981.5 ± 39.6 984.8 ± 29.4 938.2 ± 13.0
+walker stand
+696.9 ± 329.4 953.0 ± 19.8 955.3 ± 8.7
+
+walker run
+419.2 ± 170.5 501.0 ± 57.0 466.2 ± 21.1
+hopper hop
+196.1 ± 72.0 254.2 ± 67.7 136.0 ± 28.5
+balance sparse
+910.5 ± 268.6 968.1 ± 72.3 935.2 ± 22.5
+
+now measure the memory consumption and compute time for SAC across four architectures; MLPs and modern networks (specified in Section 3.2) with two or four layers. Recall that we only modify the head networks, which share features processed by a common convolutional network that is not modified. We consider both training with batch size 512 and interacting with the environment, the latter setup models deployment after training. We use Tesla V100 GPUs and measure time with CUDA events and measure memory with PyTorch native tools. For a single run, we average time across 500 iterations with warm-start. The results averaged across 5 runs are given in Table 2. The memory consumption during training changes relatively little, increasing roughly 17%. The reason for this is of course that memory footprint comes both from the convolutional layers, which we do not modify, and the head networks, which we increase in size. As the convolutional activations are spread across spatial dimensions, these dominate the memory consumption, and increasing the scale of the head networks becomes relatively cheap. The memory consumption during acting, which is dominated by storing the model weights, changes dramatically in relative terms but is less than 200 MB in absolute terms. For compute time, we see similar trends. Increasing the scale of the head network is relatively cheap as processing the images dominates computation time. During acting, however, the increase in time is smaller, likely as the time is dominated by Python computation overhead on the CPU rather than GPU compute. This demonstrates that simply scaling the head networks can be relatively cheap for end-to-end RL from pixels while dramatically improving performance.
+6 Related Work
+Early work on deep RL primarily used simple feedforward networks, possibly processing images with a convolutional network [47, 48]. This is still a common strategy [34, 36, 38], and the setting we have focused on. For environments with sequential information, it can be fruitful to incorporate memory into the network architecture via RNNs [31] or Transformers [50, 51]. There is also work on how to utilize, but not necessarily scale, neural networks in RL, e.g. dueling heads [66] or double q-learning [64]. The proposition that too-large networks perform poorly has been verified for policy gradient methods in the systematic study of Andrychowicz et al. [2]. There is also ample systematic work on generalization in RL. Cobbe et al. [11] performs a large-scale study on generalization in RL and finds that agents overfit to surprisingly large training sets, perhaps as the training set and test set overlap. Zhang et al. [71] studies procedurally generated mazes and find that RL agents can overfit
+8
+
+Table 2: We compare memory and compute requirements for using SAC on Tesla V100 GPUs with four different architectures for the heads. For training, increasing the capacity of the head incurs a relatively small cost in both memory and compute since convolutional processing is the bottleneck. Thus, the improvements of Table 1 come at a relatively cheap price. During acting, memory cost increases a lot in relative terms, but less in absolute terms. Compute cost during acting changes little, likely as it is dominated by CPU rather than GPU computations.
+
+train mem (GB) act mem (MB)
+train time (ms) act time (ms)
+
+mlp2
+4.05 ± 0.0 50.16 ± 0.0
+98.14 ± 0.15 1.19 ± 0.09
+
+mlp4
+4.19 ± 0.0 93.26 ± 0.0
+104.1 ± 0.14 1.26 ± 0.02
+
+modern 2
+4.27 ± 0.0 112.66 ± 0.0
+105.76 ± 0.23 1.4 ± 0.1
+
+modern4
+4.73 ± 0.0 247.04 ± 0.0
+125.21 ± 0.1 1.35 ± 0.02
+
+by memorizing levels and that common techniques to avoid overfitting (e.g., sticky actions [18]) fail to do so. Other relevant large-scale studies include [15, 29, 73]. Spectral normalization has been used to regularize model-based reinforcement learning by Yu et al. [69], however, the effects of this seem to not be studied by the authors. There are many proposed ideas for enforcing smoothness in neural networks, especially for GANs [5, 9, 21, 23, 56]. The idea of directly constraining the singular value has been investigated by multiple authors [19, 22, 46].
+7 Discussion
+The Importance of Architecture. Research on neural network architecture is arguably less popular nowadays as compared to the late 2010s. Within RL, it is common to abstract the neural network as function approximators and instead focus on algorithmic questions such as loss functions. As we have shown, scaling up the network can have a dramatic effect on performance, which can be larger than the effects of algorithmic innovations. Our results highlight how such low-level design decisions should not be overlooked. There is likely further progress to be made by optimizing the architectures. Within supervised learning, there is ample systematic work on the effects of architectures [49, 62], and similar studies could be fruitful in RL. Such large-scale studies on network architecture in RL could be as impactful as theoretical innovations, and we encourage more focus on network architecture. Whereas larger architecture requires more compute resources, this can potentially be offset by asynchronous training or other methods designed to accelerate RL [8, 16, 17, 44, 54].
+Evaluation in RL. Supervised learning has already reached the state where performance seems to monotonically improve with network capacity [62]. As a consequence, it is common the compare methods with similar compute resources. We have demonstrated how architectural modifications can enable much larger networks to be used successfully in RL. If such benefits can be extended across agents, fair comparisons in RL should require listing the amount of compute resources used for novel methods. This is especially important for compute-intensive unsupervised methods [1, 38, 43, 58, 70, 72] or model-based learning [4, 12, 20, 27, 41]. There are two common approaches for ensuring fair comparisons: using a standard architecture across algorithms or listing the amount of compute/memory consumption and compare methods on this basis. The second one seems most suitable for RL as the objectives can differ between agents, which necessitates architectural changes.
+Limitations. For compute reasons we have only studied the effects of networks on the SAC algorithm -- which is a state-of-the-art algorithm for continuous control underlying many popular algorithms ­ nonetheless, there are plenty of other algorithms. The idea of obtaining gradients through subnetworks is common and algorithms such as DDPG [42] and Dreamer [25] might also benefit from smoothing. Spectral normalization [46] is a relatively straightforward smoothing strategy and many alternatives which might perform better are known. We emphasize that the goal of our paper is to demonstrate that enabling large networks is an important and feasible problem, to not provide a solution for every conceivable RL algorithm. Finally, there are also further environments to try out. We have focused on continuous control from pixels as it is a setting relevant for real-world applications, but other common benchmarks such as Atari games [7] and board games [3] are also important.
+Conclusion. We have investigated the effects of using modern networks with normalization and residual connections on SAC [24]. Naively implementing such changes does not necessarily improve performance, and they can lead to unstable training. To resolve this issue, we have proposed to
+
+9
+
+enforce smoothing via spectral normalization [46], and provided theoretical justification for this. We show that this fix enables stable training of modern networks, which can outperform state-of-theart methods on a large set of continuous control tasks. This demonstrates that changing network architecture can be competitive with algorithmic innovations in RL.
+Acknowledgement
+This research is supported in part by the grants from the National Science Foundation (III-1618134, III-1526012, IIS1149882, IIS-1724282, and TRIPODS- 1740822), the Office of Naval Research DOD (N00014- 17-1-2175), Bill and Melinda Gates Foundation. We are thankful for generous support by SAP America Inc. This material is based upon work supported by the National Science Foundation under Grant Number CCF-1522054. We are also grateful for support through grant AFOSR-MURI (FA9550-18-1-0136). Any opinions, findings, conclusions, or recommendations expressed here are those of the authors and do not necessarily reflect the views of the sponsors. We thank Rich Bernstein, Joshua Fan and Ziwei Liu for help with the manuscript.
+References
+[1] R. Agarwal, M. C. Machado, P. S. Castro, and M. G. Bellemare. Contrastive behavioral similarity embeddings for generalization in reinforcement learning. arXiv preprint arXiv:2101.05265, 2021.
+[2] M. Andrychowicz, A. Raichuk, P. Stan´czyk, M. Orsini, S. Girgin, R. Marinier, L. Hussenot, M. Geist, O. Pietquin, M. Michalski, et al. What matters in on-policy reinforcement learning? a large-scale empirical study. arXiv preprint arXiv:2006.05990, 2020.
+[3] T. Anthony, T. Eccles, A. Tacchetti, J. Kramár, I. Gemp, T. C. Hudson, N. Porcel, M. Lanctot, J. Pérolat, R. Everett, et al. Learning to play no-press diplomacy with best response policy iteration. arXiv preprint arXiv:2006.04635, 2020.
+[4] A. Argenson and G. Dulac-Arnold. Model-based offline planning. arXiv preprint arXiv:2008.05556, 2020.
+[5] M. Arjovsky, S. Chintala, and L. Bottou. Wasserstein generative adversarial networks. In International conference on machine learning, pages 214­223. PMLR, 2017.
+[6] J. L. Ba, J. R. Kiros, and G. E. Hinton. Layer normalization. arXiv preprint arXiv:1607.06450, 2016.
+[7] M. G. Bellemare, Y. Naddaf, J. Veness, and M. Bowling. The arcade learning environment: An evaluation platform for general agents. Journal of Artificial Intelligence Research, 47:253­279, jun 2013.
+[8] J. Bjorck, X. Chen, C. De Sa, C. P. Gomes, and K. Q. Weinberger. Low-precision reinforcement learning. arXiv preprint arXiv:2102.13565, 2021.
+[9] A. Brock, T. Lim, J. M. Ritchie, and N. Weston. Neural photo editing with introspective adversarial networks. arXiv preprint arXiv:1609.07093, 2016.
+[10] T. B. Brown, B. Mann, N. Ryder, M. Subbiah, J. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam, G. Sastry, A. Askell, et al. Language models are few-shot learners. arXiv preprint arXiv:2005.14165, 2020.
+[11] K. Cobbe, O. Klimov, C. Hesse, T. Kim, and J. Schulman. Quantifying generalization in reinforcement learning. In International Conference on Machine Learning, pages 1282­1289. PMLR, 2019.
+[12] B. Cui, Y. Chow, and M. Ghavamzadeh. Control-aware representations for model-based reinforcement learning. arXiv preprint arXiv:2006.13408, 2020.
+[13] J. Devlin, M.-W. Chang, K. Lee, and K. Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805, 2018.
+10
+
+[14] A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn, X. Zhai, T. Unterthiner, M. Dehghani, M. Minderer, G. Heigold, S. Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929, 2020.
+[15] L. Engstrom, A. Ilyas, S. Santurkar, D. Tsipras, F. Janoos, L. Rudolph, and A. Madry. Implementation matters in deep policy gradients: A case study on ppo and trpo. arXiv preprint arXiv:2005.12729, 2020.
+[16] L. Espeholt, H. Soyer, R. Munos, K. Simonyan, V. Mnih, T. Ward, Y. Doron, V. Firoiu, T. Harley, I. Dunning, et al. Impala: Scalable distributed deep-rl with importance weighted actor-learner architectures. In International Conference on Machine Learning, pages 1407­1416. PMLR, 2018.
+[17] L. Espeholt, R. Marinier, P. Stanczyk, K. Wang, and M. Michalski. Seed rl: Scalable and efficient deep-rl with accelerated central inference. arXiv preprint arXiv:1910.06591, 2019.
+[18] J. Farebrother, M. C. Machado, and M. Bowling. Generalization and regularization in dqn. arXiv preprint arXiv:1810.00123, 2018.
+[19] F. Farnia, J. M. Zhang, and D. Tse. Generalizable adversarial training via spectral normalization. arXiv preprint arXiv:1811.07457, 2018.
+[20] J. Fu and S. Levine. Offline model-based optimization via normalized maximum likelihood estimation. arXiv preprint arXiv:2102.07970, 2021.
+[21] I. J. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley, S. Ozair, A. Courville, and Y. Bengio. Generative adversarial networks. arXiv preprint arXiv:1406.2661, 2014.
+[22] H. Gouk, E. Frank, B. Pfahringer, and M. J. Cree. Regularisation of neural networks by enforcing lipschitz continuity. Machine Learning, 110(2):393­416, 2021.
+[23] I. Gulrajani, F. Ahmed, M. Arjovsky, V. Dumoulin, and A. Courville. Improved training of wasserstein gans. arXiv preprint arXiv:1704.00028, 2017.
+[24] T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine. Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor. arXiv preprint arXiv:1801.01290, 2018.
+[25] D. Hafner, T. Lillicrap, J. Ba, and M. Norouzi. Dream to control: Learning behaviors by latent imagination. arXiv preprint arXiv:1912.01603, 2019.
+[26] D. Hafner, T. Lillicrap, I. Fischer, R. Villegas, D. Ha, H. Lee, and J. Davidson. Learning latent dynamics for planning from pixels. In International Conference on Machine Learning, pages 2555­2565. PMLR, 2019.
+[27] J. B. Hamrick, A. L. Friesen, F. Behbahani, A. Guez, F. Viola, S. Witherspoon, T. Anthony, L. Buesing, P. Velickovic´, and T. Weber. On the role of planning in model-based deep reinforcement learning. arXiv preprint arXiv:2011.04021, 2020.
+[28] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 770­ 778, 2016.
+[29] P. Henderson, R. Islam, P. Bachman, J. Pineau, D. Precup, and D. Meger. Deep reinforcement learning that matters. arXiv preprint arXiv:1709.06560, 2017.
+[30] S. Ioffe and C. Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In International conference on machine learning, pages 448­456. PMLR, 2015.
+[31] S. Kapturowski, G. Ostrovski, J. Quan, R. Munos, and W. Dabney. Recurrent experience replay in distributed reinforcement learning. In International conference on learning representations, 2018.
+11
+
+[32] B. R. Kiran, I. Sobh, V. Talpaert, P. Mannion, A. A. Al Sallab, S. Yogamani, and P. Pérez. Deep reinforcement learning for autonomous driving: A survey. IEEE Transactions on Intelligent Transportation Systems, 2021.
+[33] J. Kober, J. A. Bagnell, and J. Peters. Reinforcement learning in robotics: A survey. The International Journal of Robotics Research, 32(11):1238­1274, 2013.
+[34] I. Kostrikov, D. Yarats, and R. Fergus. Image augmentation is all you need: Regularizing deep reinforcement learning from pixels. 2020.
+[35] Z. Lan, M. Chen, S. Goodman, K. Gimpel, P. Sharma, and R. Soricut. Albert: A lite bert for self-supervised learning of language representations. arXiv preprint arXiv:1909.11942, 2019.
+[36] M. Laskin, K. Lee, A. Stooke, L. Pinto, P. Abbeel, and A. Srinivas. Reinforcement learning with augmented data. arXiv:2004.14990.
+[37] M. Laskin, K. Lee, A. Stooke, L. Pinto, P. Abbeel, and A. Srinivas. Reinforcement learning with augmented data. arXiv preprint arXiv:2004.14990, 2020.
+[38] M. Laskin, A. Srinivas, and P. Abbeel. Curl: Contrastive unsupervised representations for reinforcement learning. In Proceedings of the 37th Annual International Conference on Machine Learning (ICML), 2020.
+[39] Y. LeCun, B. Boser, J. S. Denker, D. Henderson, R. E. Howard, W. Hubbard, and L. D. Jackel. Backpropagation applied to handwritten zip code recognition. Neural computation, 1(4): 541­551, 1989.
+[40] A. X. Lee, A. Nagabandi, P. Abbeel, and S. Levine. Stochastic latent actor-critic: Deep reinforcement learning with a latent variable model. arXiv preprint arXiv:1907.00953, 2019.
+[41] B.-J. Lee, J. Lee, and K.-E. Kim. Representation balancing offline model-based reinforcement learning. In International Conference on Learning Representations, 2021.
+[42] T. P. Lillicrap, J. J. Hunt, A. Pritzel, N. Heess, T. Erez, Y. Tassa, D. Silver, and D. Wierstra. Continuous control with deep reinforcement learning. arXiv preprint arXiv:1509.02971, 2015.
+[43] G. Liu, C. Zhang, L. Zhao, T. Qin, J. Zhu, J. Li, N. Yu, and T.-Y. Liu. Return-based contrastive representation learning for reinforcement learning. arXiv preprint arXiv:2102.10960, 2021.
+[44] I.-J. Liu, R. Yeh, and A. Schwing. High-throughput synchronous deep rl. Advances in Neural Information Processing Systems, 33, 2020.
+[45] R. Mises and H. Pollaczek-Geiringer. Praktische verfahren der gleichungsauflösung. ZAMMJournal of Applied Mathematics and Mechanics/Zeitschrift für Angewandte Mathematik und Mechanik, 9(1):58­77, 1929.
+[46] T. Miyato, T. Kataoka, M. Koyama, and Y. Yoshida. Spectral normalization for generative adversarial networks. arXiv preprint arXiv:1802.05957, 2018.
+[47] V. Mnih, K. Kavukcuoglu, D. Silver, A. A. Rusu, J. Veness, M. G. Bellemare, A. Graves, M. Riedmiller, A. K. Fidjeland, G. Ostrovski, et al. Human-level control through deep reinforcement learning. nature, 518(7540):529­533, 2015.
+[48] V. Mnih, A. P. Badia, M. Mirza, A. Graves, T. Lillicrap, T. Harley, D. Silver, and K. Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In International conference on machine learning, pages 1928­1937. PMLR, 2016.
+[49] S. Narang, H. W. Chung, Y. Tay, W. Fedus, T. Fevry, M. Matena, K. Malkan, N. Fiedel, N. Shazeer, Z. Lan, et al. Do transformer modifications transfer across implementations and applications? arXiv preprint arXiv:2102.11972, 2021.
+[50] E. Parisotto and R. Salakhutdinov. Efficient transformers in reinforcement learning using actor-learner distillation. arXiv preprint arXiv:2104.01655, 2021.
+12
+
+[51] E. Parisotto, F. Song, J. Rae, R. Pascanu, C. Gulcehre, S. Jayakumar, M. Jaderberg, R. L. Kaufman, A. Clark, S. Noury, et al. Stabilizing transformers for reinforcement learning. In International Conference on Machine Learning, pages 7487­7498. PMLR, 2020.
+[52] R. Pascanu, T. Mikolov, and Y. Bengio. On the difficulty of training recurrent neural networks. In International conference on machine learning, pages 1310­1318. PMLR, 2013.
+[53] D. Pathak, P. Agrawal, A. A. Efros, and T. Darrell. Curiosity-driven exploration by selfsupervised prediction. In International Conference on Machine Learning, pages 2778­2787. PMLR, 2017.
+[54] A. Petrenko, Z. Huang, T. Kumar, G. Sukhatme, and V. Koltun. Sample factory: Egocentric 3d control from pixels at 100000 fps with asynchronous reinforcement learning. In International Conference on Machine Learning, pages 7652­7662. PMLR, 2020.
+[55] E. Real, A. Aggarwal, Y. Huang, and Q. V. Le. Regularized evolution for image classifier architecture search. In Proceedings of the aaai conference on artificial intelligence, volume 33, pages 4780­4789, 2019.
+[56] T. Salimans and D. P. Kingma. Weight normalization: A simple reparameterization to accelerate training of deep neural networks. arXiv preprint arXiv:1602.07868, 2016.
+[57] T. Schaul, J. Quan, I. Antonoglou, and D. Silver. Prioritized experience replay. arXiv preprint arXiv:1511.05952, 2015.
+[58] M. Schwarzer, A. Anand, R. Goel, R. D. Hjelm, A. Courville, and P. Bachman. Dataefficient reinforcement learning with momentum predictive representations. arXiv preprint arXiv:2007.05929, 2020.
+[59] S. A. Sontakke, A. Mehrjou, L. Itti, and B. Schölkopf. Causal curiosity: Rl agents discovering self-supervised experiments for causal representation learning. arXiv preprint arXiv:2010.03110, 2020.
+[60] R. S. Sutton. Learning to predict by the methods of temporal differences. Machine learning, 3 (1):9­44, 1988.
+[61] R. S. Sutton and A. G. Barto. Reinforcement learning: An introduction. MIT press, 2018.
+[62] M. Tan and Q. Le. Efficientnet: Rethinking model scaling for convolutional neural networks. In International Conference on Machine Learning, pages 6105­6114. PMLR, 2019.
+[63] Y. Tassa, S. Tunyasuvunakool, A. Muldal, Y. Doron, S. Liu, S. Bohez, J. Merel, T. Erez, T. Lillicrap, and N. Heess. dm control: Software and tasks for continuous control, 2020.
+[64] H. van Hasselt, A. Guez, and D. Silver. Deep reinforcement learning with double q-learning. corr abs/1509.06461 (2015). arXiv preprint arXiv:1509.06461, 2015.
+[65] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, L. Kaiser, and I. Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762, 2017.
+[66] Z. Wang, T. Schaul, M. Hessel, H. Hasselt, M. Lanctot, and N. Freitas. Dueling network architectures for deep reinforcement learning. In International conference on machine learning, pages 1995­2003. PMLR, 2016.
+[67] C. J. C. H. Watkins. Learning from delayed rewards. 1989.
+[68] R. Xiong, Y. Yang, D. He, K. Zheng, S. Zheng, C. Xing, H. Zhang, Y. Lan, L. Wang, and T. Liu. On layer normalization in the transformer architecture. In International Conference on Machine Learning, pages 10524­10533. PMLR, 2020.
+[69] T. Yu, G. Thomas, L. Yu, S. Ermon, J. Zou, S. Levine, C. Finn, and T. Ma. Mopo: Model-based offline policy optimization. arXiv preprint arXiv:2005.13239, 2020.
+[70] A. Zadaianchuk, M. Seitzer, and G. Martius. Self-supervised visual reinforcement learning with object-centric representations. arXiv preprint arXiv:2011.14381, 2020.
+13
+
+[71] A. Zhang, N. Ballas, and J. Pineau. A dissection of overfitting and generalization in continuous reinforcement learning. arXiv preprint arXiv:1806.07937, 2018.
+[72] A. Zhang, R. McAllister, R. Calandra, Y. Gal, and S. Levine. Learning invariant representations for reinforcement learning without reconstruction. arXiv preprint arXiv:2006.10742, 2020.
+[73] C. Zhang, O. Vinyals, R. Munos, and S. Bengio. A study on overfitting in deep reinforcement learning. arXiv preprint arXiv:1804.06893, 2018.
+14
+
+Figure 6: We here compare the gradients when using a modern network with and without smoothing with spectral normalization. When using spectral normalization, the gradients are stable during training even for the larger modern networks. Compare with Figure 3.
+B Hyperparameters list
+Hyperparameters are listed in Table 3. For seeds, we use cyclic permutations of "0123456789" modulo 232 - 1. The modulo is taken due to technical limitations in NumPy seeding.
+C Network Details
+The network details follow Kostrikov et al. [34] except for the heads. The image is resized into an 84-by-84 tensor with frame-stacking from the last 3 steps. This tensor is then processed by the convolutional encoder which consists of four convolutional layers with 3-by-3 kernels and ReLu between them. The encoder uses 32 filters and stride 1 except for the first layer, which uses stride 2. This spatial map is then fed into a linear layer which outputs a 50-dimensional vector, which is processed by a layer norm [6] unit. The MLPs for the critic and actor are feedforward networks that alternate between linear transformations and Relu, using a width of 1024 and two hidden layers. For the modern architecture we use the transformer feedforward architecture [65] with layernorm applied before the input; i.e., we have x + w2Relu w1norm(x) . Dropout is not used. The width of the residual branch is 1024 whereas the linear transformations upscale and downscale the width to
+15
+
+log kr`k
+<latexit sha1_base64="OhObytwGsTDZ20X1JJaE6kP0tLw=">AAAB/3icbVDLSgMxFL3js9bXqODGTbAIrsqMCLosunFZwT6gM5RMmmlDM8mQZIQy7cJfceNCEbf+hjv/xrSdhbYeuHByzr3k3hOlnGnjed/Oyura+sZmaau8vbO7t+8eHDa1zBShDSK5VO0Ia8qZoA3DDKftVFGcRJy2ouHt1G89UqWZFA9mlNIwwX3BYkawsVLXPQ647KNgjAKBI45RQDm3z65b8areDGiZ+AWpQIF61/0KepJkCRWGcKx1x/dSE+ZYGUY4nZSDTNMUkyHu046lAidUh/ls/wk6s0oPxVLZEgbN1N8TOU60HiWR7UywGehFbyr+53UyE1+HORNpZqgg84/ijCMj0TQM1GOKEsNHlmCimN0VkQFWmBgbWdmG4C+evEyaF1Xfq/r3l5XaTRFHCU7gFM7BhyuowR3UoQEExvAMr/DmPDkvzrvzMW9dcYqZI/gD5/MHxDeVSA==</latexit>
+log kr`k
+<latexit sha1_base64="OhRXhPfgO+pub6elyL1jtraVwU5fGf1hs2SoTd1bD3pPZtJr2Zq00a3WXlIg1dwAJqFGJaoNaQV9EQzT6vGPkEaxPKfQ0MustX59LyGKwoM=">AAAB/293XHicbVZDBCLN7STgwsMxwFLIH3XjvKs1+q9LK5b8yRX61qVaAOqnID1XmGrhFTNxb8kaAE2JIiwCruCYsCKqqo7MzKSCbjFLnBhoQtgspdruCWnHmBF5iZcLwVRTbrB6ZA9gCPSMO6E5A1RzUMl3m5Trmkptl4pNDbpaMmQd8szemkPzQMJIZykdIRGpQ2SCyhEq7DMtcHuAJ03OfBC/cFvwe2+sN5LICEGAEfhQbCSqf9Lz+38hvFBjonhv3ft/p+xzGgr09SJPtdbHmhDQgbwlJYQse+PjuzBXHkEeBn7yIO4zvSnrScH3cjvkuNl3lFehL20OQe+lUCnBGcGN+qn9vaje7Neb35dW93/d70O3G7yb5pu/tbr+bXag21+fzjsumcZg52mfptaNr8af7nuzxZ8jflvkOZb9T3ONgd7m8vtoq/+2h88f5AezX9H0WPDgkGajbp1slpzimBlrSSzIlhlmCD5VmSjU0KnLR5mpyVFTqOpoT0XyoIUGRa2C8CSMqV5ZJoC0Ap3E38IDLrDgWKzCfyetLTdVFDFfNGbNFcjYIR6sIJfHky0Y72i8bo7u0u7peH+vhtg121s75GTSr8Lec9XmfUTDqqzVdWQfJZryMFM0iAMYg9r4cm4zlWFTNMqmItUmwU4YwCkXkDE37zCBOhwY6FmkoKBay2EwaLsreVVatuLAXqXdT5PLUJQMKw6WgG42BX7ICAKVSxNxcgDkMjClcA9BCKYgABaLgINJ44bCo5+EARGTDQSwyDSmrm71l3K79zD196DZt5UpybJfq8x9Va+/r0cPedimDh6wGEyKiFZvZBYE+UmLAch0WUogpNsVQS1FIaeWFhj6wV017v3/g8K09K+KL+geioLpwn0JUnmkXKWCUpRzKGW7UEGCIcgjBKUe6xPk21NG7xMfv/7mpdRaeSRjaEtAM+RrAZxXdYzlGzVUiLOY6BF4dp0nkOWZ7cgSAwkD0NyTNyN+5VM5CUoOgkYcIykMxHvCju36Q09zr4kq6upUlKMCAZmEi9YqdbmrUOKDhs+f/tfLljx7sdT//zcFwDuJkhG96NSbs7Pp0GkYoam9P2UjxMdqVPkWL/twZLaJEBMggik+bW9fNl/q1t37N1y48EgkTlwcOdNEUVWq6Ea30ScHHaxSiruWWH5QR6k77KiEUCnzy0ZBwVoDGoVve5rhwtzFtZNbd+xymFPra/++JX85Nzb3CWmUh1byIiEz61Rxz+xVBHwcnOYZIRarsNSl0pblMZlkFqYiWgk4TgJex8NSU41nZ/yJxiQBxjarbC8MZISj3ze0HGhTYKQSTHMbP71GNTG2aFO9NFKDWiE7j+s7JNNo1gHdBSlBqImurIC3mriwbZmMlXNYdT0AEV6hZknagQMqgFMTJWFimXIbBESGgEsQbI7VWNCGd3M4mAHKGHq/4DlfC9P+CdIeBNqvL6aEg6Vyho3aIeWF4+f1BPKX/fegmqvw3/Y3rncv3SVl5n+5nMkX2E0as5RTuXRRqExFpImH5AdC61oU93j7LANgOL0F49gMI9X7+CxB8A0hzJyxleu8Cro4YwxDRIAj3ouVU48Qo<wEQ/bxElvEa30xt7QveLcAx1/Mi6ortHF/>wbDt0mc5PGTD98k6vSLz28rw+vn5z8MkLWfF9fpd5LcATY1jqhFZvzIkj/9Pg47D=A5<+/fMlwHaBxtwDevexViStRA>==</latexit>
+
+critic <latexit sha1_base64="nHyGGEG3MhL1YjtAGSK9K27nZ9o=">AAAB9HicbVBNSwMxEJ2tX7V+VT16CRbBU9kVQY9FLx4r2A9ol5JNs21oNrsms8Wy9Hd48aCIV3+MN/+NabsHbX0w8HhvJpl5QSKFQdf9dgpr6xubW8Xt0s7u3v5B+fCoaeJUM95gsYx1O6CGS6F4AwVK3k40p1EgeSsY3c781phrI2L1gJOE+xEdKBEKRtFKfhf5E2ZMCxRs2itX3Ko7B1klXk4qkKPeK391+zFLI66QSWpMx3MT9DOq7WuST0vd1PCEshEd8I6likbc+Nl86Sk5s0qfhLG2pZDM1d8TGY2MmUSB7YwoDs2yNxP/8zophtd+JlSSIlds8VGYSoIxmSVA+kJzhnJiCV1cTtiQasrQ5lSyIXjLJ6+S5kXVc6ve/WWldpPHUYQTOIVz8OAKanAHdWgAg0d4hld4c8bOi/PufCxaC04+cwx/4Hz+AIYzkpM=</latexit>
+
+actor <latexit sha1_base64="n8dtHMcE78nOLC3Wib5KcFvI6zM=">AAAB83icbVBNS8NAEJ3Ur1q/qh69LBbBU0lE0GPRi8cK9gOaUDbbTbt0swm7E7GE/g0vHhTx6p/x5r9x2+agrQ8GHu/NMDMvTKUw6LrfTmltfWNzq7xd2dnd2z+oHh61TZJpxlsskYnuhtRwKRRvoUDJu6nmNA4l74Tj25nfeeTaiEQ94CTlQUyHSkSCUbSS7yN/wpwyTPS0X625dXcOskq8gtSgQLNf/fIHCctirpBJakzPc1MMcqpRMMmnFT8zPKVsTIe8Z6miMTdBPr95Ss6sMiBRom0pJHP190ROY2MmcWg7Y4ojs+zNxP+8XobRdZALlWbIFVssijJJMCGzAMhAaM5QTiyhTAt7K2Ejqm0GNqaKDcFbfnmVtC/qnlv37i9rjZsijjKcwCmcgwdX0IA7aEILGKTwDK/w5mTOi/PufCxaS04xcwx/4Hz+AMLWkiQ=</latexit>
+
+Figure 5: The largest singular value of the weight matrix at layer 2 when using the MLP or modern architecture (without smoothing). Results are shown for the cartpole swingup environment and averaged across 5 runs. For the modern network with skip connections and normalization, the largest singular value grows dramatically.
+
+max
+<latexit sha1_base64="kBzd/r5TNEwNBg9XjkvCZB4yNuw=">AAAB9HicbVBNS8NAEJ3Ur1q/qh69LBbBU0lE0GPRi8cK9gPaUCbbTbt0N4m7m2IJ/R1ePCji1R/jzX/jts1BWx8MPN6bYWZekAiujet+O4W19Y3NreJ2aWd3b/+gfHjU1HGqKGvQWMSqHaBmgkesYbgRrJ0ohjIQrBWMbmd+a8yU5nH0YCYJ8yUOIh5yisZKflfzgcRe1pX4NO2VK27VnYOsEi8nFchR75W/uv2YppJFhgrUuuO5ifEzVIZTwaalbqpZgnSEA9axNELJtJ/Nj56SM6v0SRgrW5Ehc/X3RIZS64kMbKdEM9TL3kz8z+ukJrz2Mx4lqWERXSwKU0FMTGYJkD5XjBoxsQSp4vZWQoeokBqbU8mG4C2/vEqaF1XPrXr3l5XaTR5HEU7gFM7BgyuowR3UoQEUHuEZXuHNGTsvzrvzsWgtOPnMMfyB8/kDOlaSYg==</latexit>
+
+A Appendix
+
+Figure 7: The performance of SAC when making the networks deeper. Performance is averaged across ten seeds and plotted for 15 tasks from the DeepMind control suite [63]. When smoothing with spectral normalization [46], the performance improves for the 4-hidden-layer network for most tasks.
+
+Table 3: Hyper-parameters for the experiments, following [34]. We use action repeat of 2 for the dreamer benchmark, following [25, 34].
+
+Parameter  T0  adam
+adam
+1adam 2adam batch size
+target update freq
+seed steps log  bounds actor update frequency
+seed steps
+action repeat
+
+Value 0.99 0.1 0.01 1e-3 1e-8 0.9 0.999 512 2 5000 [-10, 2] 2 1000 2
+
+2048. When using spectral normalization, the normalization is added to all intermediate layers -- i.e. not the first and last layer. The reason for this is that we do not want the network to be 1-Lipschitz throughout, as we might need them to represent very large q-values.
+
+D Proofs
+
+
+
+Proposition 2
+
+wa Q
+
+
+
+N (maxi wia
+
+)
+
+(s)
+
+f 2N
+
+N k=1
+
+wka
+
+N k=1
+
+wkc
+
+We are interested in bounding the gradient of the actor defined as per eq. (3). Let us first bound wa A -- the gradient of the action with respect to the actor weights. Let us define xbi as the
+i-th activation before non-linearity f and xai as the i-th activation after the i-th nonlinearity. I.e., we have the recursive definitions xbi = wiaxai-1 and xai = f (xbi ) and (s) = xa0. From these recursive definitions we of course have xbi  wia xai-1 and xai  f xbi . Here f is the Lipschitz norm of f and w is the operator norm of weights wi. Chaining these inequalities together
+inductively one obtains an estimate of the output of the j:th layer:
+
+i
+
+i
+
+i-1
+
+i
+
+xai  (s)
+
+f
+
+wka
+
+xbi  (s)
+
+f
+
+wka
+
+(5)
+
+j=1
+
+k=1
+
+j=1
+
+k=1
+
+16
+
+Secondly, note that A(s) is a scalar, so we can take derivatives with respect to it for all the weights.
+The recursive definitions of xai and xbi gives us that xai A  wi+1 xbi+1 Q and xbi A  f xai A . One can inductively chain these inequalities together to obtain
+
+N
+
+N
+
+N
+
+N
+
+xai A 
+
+f
+
+wka
+
+xbi A 
+
+f
+
+wka
+
+(6)
+
+j+1
+
+k+1
+
+j
+
+k+1
+
+We can now combine eq. (5) and eq. (6) to obtain
+
+wia A = xai-1 · xbi A  xai-1
+
+xbi A
+
+
+
+1 wia
+
+N
+
+N
+
+(s)
+
+f
+
+wka
+
+j=1
+
+k=1
+
+By
+
+the
+
+chain
+
+rule
+
+we
+
+of
+
+course
+
+have
+
+wia Q
+
+=
+
+Q A
+
+wia
+
+A.
+
+Now,
+
+by
+
+repeating
+
+the
+
+argument
+
+of
+
+eq.
+
+(5)
+
+for the critic one can conclude that the critic is Lipschitz with constant
+
+N j=1
+
+f
+
+N k=1
+
+wkc
+
+, which
+
+implies
+
+that
+
+this
+
+constant
+
+also
+
+bounds
+
+Q A
+
+.
+
+After
+
+this,
+
+we
+
+simply
+
+combine
+
+this
+
+bound
+
+for
+
+all
+
+layers
+
+to
+
+complete the proof.
+
+The more general situation, where bias is additionally added, complicates the calculations somewhat.
+
+If
+
+we
+
+update
+
+xbi
+
+=
+
+wixi-1
+
++
+
+bi,
+
+the
+
+gradients
+
+with
+
+respect
+
+to
+
+bi
+
+would
+
+simply
+
+be
+
+Q A
+
+xbi
+
+A,
+
+for
+
+which we can apply the bounds in eq. (6). However, the bounds on the activations in eq. (5) do not
+
+necessarily hold anymore; e.g., if we set bi =  we clearly cannot bound any activation. If we
+
+assume that wi  1, as ,e.g., is the case when spectral normalization is used, and f = 1 as
+
+typically is the case, we can bound the magnitude of the activations as
+
+xai 
+
+i
+(s) + bl
+l=1
+
+i
+
+i
+
+f
+
+wka
+
+j=1
+
+k=1
+
+This expression would then need to be used instead of eq. (5). The case with additional actions is
+
+similar to just one action, but we would need to use wia Q =
+
+j
+
+Q Aj
+
+wia
+
+Aj
+
+,
+
+where
+
+each
+
+term
+
+in
+
+the sum can be bounded as above.
+
+E Improvements
+As per Table 1, the average improvement when changing architecture from the 2 hidden layer MLP to the modern network is slightly more than 141. We can compare this to improvements gained from algorithmic innovations between the Dreamer [25] and DRQ agent [34] which Table 1 puts at less than 40. We can also compare this to the improvements gained for CURL [38], which represented a new SOTA at the time of publication. Specifically, we consult Table 1 of the CURL paper [38]. There, performance is also measured after 500,000 steps on DeepMind control suite [63], however a smaller set of environments is used. CURL reaches an average score of 846 whereas the previously published Dreamer agent [25] scores 783. This results in an improvement of 63. In follow-up work of [36], the average scores increase to 898, which is an even smaller improvement.
+In Table 4 we compare using deeper networks smoothed with spectral normalization against Dreamer [25] and DRQ [34], using the curves from [25, 34]. Dreamer is there run with only 5 seeds [25]. For the sake of using 10 seeds uniformly and controlling for changes in the DRQ setup, we run the baselines ourselves with code released by the authors [25, 34] in Table 1. Since we modify the architecture and source code of DRQ, running experiments with 2 hidden layer MLPs ourselves allows us to make sure that the setup is identical ­ even details such as CUDA versions, minor code changes, GPUs, and seeds can have a large effect in RL [29]. Our setup of modern networks and smoothing beats Dreamer for 11 out of 15 games and beats the 2-hidden-layer MLP of DRQ for 13 out of 15 games in Table 4. At any rate, we do not make any specific claims about what algorithms might be the best -- only that one can improve SAC from pixels/DRQ by using deeper networks with smoothing.
+
+17
+
+Table 4: Comparison of algorithms across tasks from the DeepMind control suite. We compare SAC with a modern architecture and spectral normalization [46] against two state-of-the-art agents: SAC with two layers and image augmentations [34] (MLP), and Dreamer [25]. Here we use numbers from [25, 34] for DRQ and Dreamer. Using modern networks and smoothing still comes out ahead, beating dreamer at 11 out of 15 games and beating MLP at 13 out of 15 games.
+
+MLP Modern+smooth Dreamer
+MLP Modern+smooth Dreamer
+MLP Modern+smooth Dreamer
+MLP Modern+smooth Dreamer
+
+ball in cup catch
+945.9 ± 20.7 968.9 ± 13.3 961.7 ± 2.2
+finger spin
+905.7 ± 43.2 882.5 ± 149.0 338.6 ± 24.3
+hopper stand
+755.9 ± 39.7 854.7 ± 63.5 609.7 ± 76.2
+swingup sparse
+520.4 ± 114.1 620.8 ± 311.0 799.7 ± 7.4
+
+swingup
+825.5 ± 18.2 862.3 ± 15.2 678.4 ± 108.2
+reacher hard
+824.0 ± 35.7 875.1 ± 75.5 95.2 ± 26.1
+walker walk
+897.5 ± 24.3 902.2 ± 67.4 885.8 ± 12.6
+reacher easy
+804.8 ± 31.0 814.0 ± 85.8 429.5 ± 82.3
+
+cheetah run
+701.7 ± 22.1 708.9 ± 46.2 630.0 ± 16.1
+pendulum swingup
+584.3 ± 114.5 586.4 ± 381.3 789.2 ± 25.7
+balance
+993.5 ± 2.7 984.8 ± 29.4 981.8 ± 3.1
+walker stand
+944.4 ± 17.8 953.0 ± 19.8 960.0 ± 7.0
+
+walker run
+465.1 ± 27.2 501.0 ± 57.0 463.5 ± 37.0
+hopper hop
+208.3 ± 11.5 254.2 ± 67.7 120.0 ± 18.5
+balance sparse
+903.2 ± 63.4 968.1 ± 72.3 997.7 ± 0.9
+
+F Compute Resources
+Experiments were conducted with Nvidia Tesla V100 GPUs using CUDA 11.0 and CUDNN 8.0.0.5, running on nodes with Intel Xeon CPUs. Experiments contained in the paper represent approximately a year or two of GPU time.
+G Ethics Statement
+Deep reinforcement learning is still mostly an academic pursuit, but many applications are promising targets for this technology. Beneficial applications include autonomous vehicles, robots for manufacturing and logistics, and scientific discovery; however, there are also harmful military applications. Our work is relatively academic in nature. We study simple algorithms in stylistic environments, but downstream effects from algorithmic advances can of course have significant real-world impacts. We do not perceive that our work differs significantly from other RL work in this regard.
+
+18
+
+

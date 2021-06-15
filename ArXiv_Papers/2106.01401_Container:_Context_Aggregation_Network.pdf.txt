@@ -1,0 +1,680 @@
+arXiv:2106.01401v1 [cs.CV] 2 Jun 2021
+
+Container: Context Aggregation Network
+Peng Gao1, Jiasen Lu3, Hongsheng Li1, Roozbeh Mottaghi2,3, Aniruddha Kembhavi2,3 1The Chinese University of Hong Kong 2 University of Washington 3 PRIOR @ Allen Institute for AI
+Abstract
+Convolutional neural networks (CNNs) are ubiquitous in computer vision, with a myriad of effective and efficient variations. Recently, Transformers ­ originally introduced in natural language processing ­ have been increasingly adopted in computer vision. While early adopters continue to employ CNN backbones, the latest networks are end-to-end CNN-free Transformer solutions. A recent surprising finding shows that a simple MLP based solution without any traditional convolutional or Transformer components can produce effective visual representations. While CNNs, Transformers and MLP-Mixers may be considered as completely disparate architectures, we provide a unified view showing that they are in fact special cases of a more general method to aggregate spatial context in a neural network stack. We present the CONTAINER (CONText AggregatIon NEtwoRk), a general-purpose building block for multi-head context aggregation that can exploit long-range interactions a la Transformers while still exploiting the inductive bias of the local convolution operation leading to faster convergence speeds, often seen in CNNs. Our CONTAINER architecture achieves 82.7 % Top-1 accuracy on ImageNet using 22M parameters, +2.8 improvement compared with DeiT-Small, and can converge to 79.9 % Top-1 accuracy in just 200 epochs. In contrast to Transformer-based methods that do not scale well to downstream tasks that rely on larger input image resolutions, our efficient network, named CONTAINER-LIGHT, can be employed in object detection and instance segmentation networks such as DETR, RetinaNet and Mask-RCNN to obtain an impressive detection mAP of 38.9, 43.8, 45.1 and mask mAP of 41.3, providing large improvements of 6.6, 7.3, 6.9 and 6.6 pts respectively, compared to a ResNet-50 backbone with a comparable compute and parameter size. Our method also achieves promising results on self-supervised learning compared to DeiT on the DINO framework.
+1 Introduction
+Convolutional neural networks (CNNs) have become the de facto standard for extracting visual representations, and have proven remarkably effective at numerous downstream tasks such as object detection [36], instance segmentation [22] and image captioning [1]. Similarly, in natural language processing, Transformers rule the roost [13, 42, 41, 4]. Their effectiveness at capturing short and long range information have led to state-of-the-art results across tasks such as question answering [44] and language understanding [56].
+In computer vision, Transformers were initially employed as long range information aggregators across space (e.g., in object detection [5]) and time (e.g., in video understanding [59]), but these methods continued to use CNNs [34] to obtain raw visual representations. More recently however, CNN-free visual backbones employing Transformer modules [52, 14] have shown impressive performance on image classification benchmarks such as ImageNet [33]. The race to dethrone CNNs has now begun to expand beyond Transformers ­ a recent unexpected result shows that a multi-layer perceptron (MLP) exclusive network [50] can be just as effective at image classification.
+On the surface, CNNs [34, 8, 61, 23], Vision Transformers (ViTs) [14, 52] and MLP-mixers [50] are typically presented as disparate architectures. However, taking a step back and analyzing these
+
+methods reveals that their core designs are quite similar. Many of these methods adopt a cascade of neural network blocks. Each block typically consists of aggregation modules and fusion modules. Aggregation modules share and accumulate information across a predefined context window over the module inputs (e.g., the self attention operation in a Transformer encoder), while fusion modules combine position-wise features and produce module outputs (e.g., feed forward layers in ResNet).
+In this paper, we show that the primary differences in many popular architectures result from variations in their aggregation modules. These differences can in fact be characterized as variants of an affinity matrix within the aggregator that is used to determine information propagation between a query vector and its context. For instance, in ViTs [14, 52], this affinity matrix is dynamically generated using key and query computations; but in the Xception architecture [8] (that employs depthwise convolutions), the affinity matrix is static ­ the affinity weights are the same regardless of position, and they remain the same across all input images regardless of size. And finally the MLP-Mixer [50] also uses a static affinity matrix which changes across the landscape of the input.
+Along this unified view, we present CONTAINER (CONText AggregatIon NEtwoRk), a general purpose building block for multi-head context aggregation. A CONTAINER block contains both static affinity as well as dynamic affinity based aggregation, which are combined using learnable mixing coefficients. This enables the CONTAINER block to process long range information while still exploiting the inductive bias of the local convolution operation. CONTAINER blocks are easy to implement, can easily be substituted into many present day neural architectures and lead to highly performant networks whilst also converging faster and being data efficient.
+Our proposed CONTAINER architecture obtains 82.7 % Top-1 accuracy on ImageNet using 22M parameters, improving +2.8 points over DeiT-S [52] with a comparable number of parameters. It also converges faster, hitting DeiT-S's accuracy of 79.9 % in just 200 epochs compared to 300.
+We also propose a more efficient model, named CONTAINER-LIGHT that employs only static affinity matrices early on but uses the learnable mixture of static and dynamic affinity matrices in the latter stages of computation. In contrast to ViTs that are inefficient at processing large inputs, CONTAINER-LIGHT can scale to downstream tasks such as detection and instance segmentation that require high resolution input images. Using a CONTAINER-LIGHT backbone and 12 epochs of training, RetinaNet [36] is able to achieve 43.8 mAP, while Mask-RCNN [22] is able to achieve 45.1 mAP on box and 41.3 mAP on instance mask prediction, improvements of +7.3, +6.9 and +6.6 respectively, compared to a ResNet-50 backbone. The more recent DETR and its variants SMCA-DETR and Deformable DETR [5, 19, 70] also benefit from CONTAINER-LIGHT and achieve 38.9, 43.0 and 44.2 mAP, improving significantly over their ResNet-50 backbone baselines.
+CONTAINER-LIGHT is data efficient. Our experiments show that it can obtain an ImageNet Top-1 accuracy of 61.8 using just 10% of training data, significantly better than the 39.3 accuracy obtained by DeiT. CONTAINER-LIGHT also convergences faster and achieves better kNN accuracy (71.5) compared to DeiT (69.6) under DINO self-supervised training framework [6].
+The CONTAINER unification and framework enable us to easily reproduce several past models and even extend them with just a few code and parameter changes. We extend multiple past models and show improved performance ­ for instance, we produce a Hierarchical DeiT model, a multi-head MLP-Mixer and add a static affinity matrix to the DeiT architecture. Our code base and models will be released publicly. Finally, we analyse a CONTAINER model containing both static and dynamic affinities and show the emergence of convolution-like local affinities in the early layers of the network.
+In summary, our contributions include: (1) A unified view of popular architectures for visual inputs ­ CNN, Transformer and MLP-mixer, (2) A novel network block ­ CONTAINER, which uses a mix of static and dynamic affinity matrices via learnable parameters and the corresponding architecture with strong results in image classification and (3) An efficient and effective extension ­ CONTAINER-LIGHT with strong results in detection and segmentation. Importantly, we see that a number of concurrent works are aiming to fuse the CNN and Transformer architectures [35, 62, 39, 24, 53, 67, 62, 46], validating our approach. We hope that our unified view helps place these different concurrent proposals in context and leads to a better understanding of the landscape of these methods.
+2 Related Work
+Visual Backbones. Since AlexNet [33] revolutionized computer vision, a host of CNN based architectures have provided further improvements in terms of accuracy including VGG [45], ResNet [23],
+2
+
+Inception Net [47], SENet [28], ResNeXt [61] and Xception [8] and efficiency including Mobile-net v1 [26], Mobile-net v2 [26] and Efficient-net v2 [49]. With the success of Transformers [54] in NLP such as BERT [13] and GPT [42], researchers have begun to apply them towards solving the long range information aggregation problem in computer vision. ViT [14]/DeiT [52] are transformers that achieve better performance on ImageNet than CNN counterparts. Recently, several concurrent works explore integrating convolutions with transformers and achieve promising results. ConViT [11] explores soft convolutional inductive bias for enhancing DeiT. CeiT [64] directly incorporates CNNs into the Feedforward module of transformers to enhance the learned features. PVT [58] proposes a pyramid vision transformer for efficient transfer to downstream tasks. Pure Transformer models such as ViT/DeiT however, require huge GPU memory and computation for detection [58] and segmentation [68] tasks, which need high resolution input. MLP-Mixer [50] shows that simply performing transposed MLP followed by MLP can achieve near state-of-the-art performance. We propose CONTAINER, a new visual backbone that provides a unified view of these different architectures and performs well across several vision tasks including ones that require a high resolution input.
+Transformer Variants. Vanilla Transformers are unable to scale to long sequences or high-resolution images due to the quadratic computation in self-attention. Several methods have been proposed to make Transformer computations more efficient for high resolution input. Reformer [32], Clusterform [55], Adaptive Clustering Transformer [68] and Asymmetric Clustering [10] propose to use Locality Sensitivity Hashing to cluster keys or queries and reduce quadratic computation into linear computation. Lightweight convolution [60] explore convolution architectures for replacing Transformers but only explore applications in NLP. RNN Transformer [31] builds a connection between RNN and Transformer and results in attention with linear computation. Linformer [57] changes the multiplication order of key,query,value into query,value,key by deleting the softmax normalization layer and achieve linear complexity. Performer [9] uses Orthogonal Random Feature to approximate full rank softmax attention. MLIN [18] performs interaction between latent encoded nodes, and its complexity is linear with respect to input length. Bigbird [3] breaks the full rank attention into local, randomly selected and global attention. Thus the computation complexity becomes linear. Longformer [66] uses local Transformers to tackle the problem of massive GPU memory requirements for long sequences. MLP-Mixer [50] is a pure MLP architecture for image recognition. In the unified formulation we provide, MLP-Mixer can be considered as a single-head Transformer with static affinity matrix weight. MLP-Mixer can provide more efficient computation than vanilla transformer due to no need to calculate affinity matrix using key query multiplication. Efficient Transformers mostly use approximate message passing which results in performance deterioration across tasks. Our CONTAINER unification performs global and local information exchange simultaneously using a mixture affinity matrix, while CONTAINER-LIGHT switches off the dynamic affinity matrix for high resolution feature maps to reduce computation. Although switching off the dynamic affinity matrix slightly hinders classification performance, CONTAINER-LIGHT still provides effective and efficient generalization to downstream tasks compared with popular backbones such as ViT and ResNet.
+Transformers for Vision. Transformers enable high degrees of parallelism and are able to capture long-range dependencies in the input. Thus Transformers have gradually surpassed other architectures such as CNN [34] and RNN [25] on image [14, 5], audio [2], multi-modality [17, 21, 20], and language understanding [13]. In computer vision, Non-local Neural Network [59] has been proposed to capture long range interactions to compensate for the local information captured by CNNs and used for object detection [27] and semantic segmentation [16, 29, 71, 65]. However, these methods use Transformers as a refinement module instead of treating the transformer as a first-class citizen. ViT [14] introduces the first pure Transformer model into computer vision and surpasses CNNs with large scale pretraining on the non publicly available JFT dataset. DeiT [52] trains ViT from scratch on ImageNet-1k and achieve better performance than CNN counterparts. DETR [5] uses Transformer as an encoder and decoder architecture for designing the first end-to-end object detection system. Taming Transformer [15] use Vector Quantization [40] GAN and GPT [42] for high quality highresolution image generation. Motivated by the success of DETR on object detection, Transformers have been applied widely on tasks such as semantic segmentation [69], pose estimation [63], trajectory estimation [38], 3D representation learning and self-supervised learning with MOCO v3 [7] and DINO [6].
+3
+
+3 Methods
+
+In this section we first provide a generalized view of neighborhood/context aggregation modules commonly employed in present neural networks. Then we revisit three major architectures ­ Transformer [54], Depthwise Convolution [8] and the recently proposed MLP-Mixer [50], and show that they are special cases of our generalized view. We then present our CONTAINER module in Sec 3.3 and its efficient version ­ CONTAINER-LIGHT in Sec 3.5.
+
+3.1 Contextual Aggregation for Vision
+
+Consider an input image X  RC×H×W , where C and H × W denote the channel and spatial
+dimensions of the input image, respectively. The input image is first flattened to a sequence of tokens {Xi  RC|i = 1, . . . , N }, where N = HW and input to the network. Vision networks typically stack multiple building blocks with residual connections [23], defined as
+
+Y = F (X, {Wi}) + X.
+
+(1)
+
+Here, X and Y are the input and output vectors of the layers considered, and Wi represents the learnable parameters. F determines how information across X is aggregated to compute the feature at a specific location. We first define an affinity matrix A  RN×N that represents the neighborhood
+for contextual aggregation. Equation 1 can be re-written as:
+
+Y = (AV)W1 + X,
+
+(2)
+
+where V  RN×C is a transformation of X obtained by a linear projection V = XW2. W1 and W2 are the learnable parameters. Aij is the affinity value between Xi and Xj. Multiplying the affinity matrix with V propagates information across features in accordance with the affinity values.
+
+The modeling capacity of such a context aggregation module can be increased by introducing multiple
+
+affinity matrices, allowing the network to have several pathways to contextual information across X.
+
+Let
+
+{Vi
+
+
+
+RN
+
+×
+
+C M
+
+|i
+
+=
+
+1,
+
+.
+
+.
+
+.,M}
+
+be
+
+slices
+
+of
+
+V,
+
+where
+
+M
+
+is
+
+the
+
+number
+
+of
+
+affinity
+
+matrices,
+
+also
+
+referred to as the number of heads. The multi-head version of Equation 2 is
+
+Y = Concat(A1V1, . . . , AM VM )W2 + X,
+
+(3)
+
+where Am denotes the affinity matrix in each head. Different Am can potentially capture different relationships within the feature space and thus increase the representation power of contextual aggregation compared with a single-head version. Note that only spatial information is propagated during contextual aggregation using the affinity matrices; cross-channel information exchange does not occur within the affinity matrix multiplication, and that there is no non-linear activation function.
+
+3.2 The Transformer, Depthwise Convolution and MLP-Mixer
+
+Transformer [54], depthwise convolution [30] and the recently proposed MLP-Mixer [50] are three distinct building blocks used in computer vision. Here, we show that they can be represented within the above context aggregation framework, by defining different types if affinity matrices.
+
+Transformer. In the self-attention mechanism in Transformers, the affinity matrix is modelled by
+
+the similarity between the projected query-key pairs. With M heads, the affinity matrix in head m,
+
+Asma can be written as
+
+Asma = Softmax(QmKTm/ C/M ),
+
+(4)
+
+where Km, Qm are the corresponding key, query in head m, respectively. The affinity matrix in
+
+self-attention is dynamically generated and can capture instance level information. However, this
+
+introduces quadratic computational, which requires heavy computation for high resolution feature.
+
+Depthwise Convolution. The convolution operator fuses both spatial and channel information in
+parallel. This is different from the contextual aggregation block defined above. However, depthwise
+convolution [30] which is an extreme case of group convolution performs disentangled convolution.
+Considering the number of the heads from the contextual aggregation block to be equal to the channel size C, we can define the convolutional affinity matrix given the 1-d kernel Ker  RC×1×k:
+
+Acmoinjv =
+
+Ker[m, 0, |i - j|] 0
+
+|i - j|  k |i - j| > k
+
+,
+
+(5)
+
+4
+
+where Amij is the affinity value between Xi and Xj on head m. In contrast with the affinity matrix obtained from self-attention whose value is conditioned on the input feature, the affinity values for convolution are static ­ they do not depend on the input features, sparse ­ only involves local connections and shared across the affinity matrix.
+
+MLP-Mixer The recently proposed MLP-Mixer [50] does not rely on any convolution or self-
+attention operator. The core of MLP-Mixer is the transposed MLP operation, which can be denoted as X = X + (VT WMLP )T . We can define the affinity matrix as
+
+Amlp = (WMLP )T ,
+
+(6)
+
+where WMLP represents the learnable parameters. This simple equation shows that the transposedMLP operator is a contextual aggregation operator on a single feature group with a dense affinity matrix. Comparing with self-attention and depthwise convolution, the transpose-MLP affinity matrix is static, dense and with no parameter sharing.
+
+The above simple unification reveals the similarities and differences between Transformer, depthwise convolution and MLP-Mixer. Each of these building blocks can be obtained by different formulating different affinity matrices. This finding leads us to create a powerful and efficient building block for vision tasks ­ the CONTAINER.
+
+3.3 The CONTAINER Block
+
+As detailed in Sec 3.2, previous architectures have employed either static or dynamically generated affinity matrices ­ each of which provides its unique set of advantages and features. Our proposed building block named CONTAINER, combines both types of affinity matrices via a learnable parameter. The single head CONTAINER is defined as:
+
+Dynamic Static
+
+Y = (( A(X) + A )V )W2 + X
+
+(7)
+
+A(X) is dynamically generated from X while A is a static affinity matrix. We now present a few special cases of the CONTAINER block. In the following, L denotes a learnable parameter.
+
+·  = 1,  = 0, A(x) = Asa: A vanilla Transformer block with self-attention (denoted sa).
+·  = 0,  = 1, M = C, A = Aconv: A depthwise convolution block. In depthwise convolution, each channel has a different static affinity matrix. When M = C, the resultant block can be considered a Multi-head Depthwise Convolution block (MH-DW). MH-DW shares kernel weights.
+·  = 0,  = 1, M = 1, A = Amlp: An MLP-Mixer block. When M = 1, we name the module Multi-head MLP (MH-MLP). MH-MLP splits channels into M groups and performs independent transposed MLP to capture diverse static token relationships.
+·  = L,  = L, A(x) = Asa, A = Amlp: This CONTAINER block fuses dynamic and static information, but the static affinity resembles the MLP-Mixer matrix. We call this block CONTAINER-PAM (Pay Attention to MLP).
+·  = L,  = L, A(x) = Asa, A = Aconv: This CONTAINER block fuses dynamic and static information, but the static affinity resembles the depthwise convolution matrix. This static affinity matrix contains a locality constraint which is shift invariant, making it more suitable for vision tasks. This is the default configuration used in our experiments.
+
+The CONTAINER block is easy to implement and can be readily swapped into an existing neural network. The above versions of CONTAINER provide variations on the resulting architecture and its performance and exhibit different advantages and limitations. The computation cost of a CONTAINER block is the same as a vanilla Transformer since the static and dynamic matrices are linearly combined.
+
+3.4 The CONTAINER network architecture
+We now present a base architecture used in our experiments. The unification of past works explained above allows us to easily compare self-attention, depthwise convolution, MLP and multiple variations of the CONTAINER block, and we perform these comparison using a consistent base architecture.
+Motivated by networks in past works [23, 58], our base architecture contains 4 stages. In contrast to ViT/DeiT which down-sample the image to a low resolution and keep this resolution constant, each
+
+5
+
+stage in our architecture down-samples the image resolution gradually. Gradually down-sampling can retain image details, which is important for downstream tasks such as segmentation and detection. Each of the 4 stages contains a cascade of blocks. Each block contains two sub-modules, the first to aggregate spatial information (named spatial aggregation module) and the second to fuse channel information (named feed-forward module). In this paper, the channel fusion module is fixed to a 2-layer MLP as proposed in [54]. Designing a better spatial aggregation module is the main focus of this paper. The 4 stages contain 2, 3, 8 and 3 blocks respectively. Each stage uses patch embeddings which fuse spatial patches of size p × p into a single vector. For the 4 stages, the values of p are 4,4,2,2 respectively. The feature dimension within a stage remains constant ­ and is set to 128, 256, 320, and 512 for the four stages. This base architecture augmented with the CONTAINER block results in a similar parameter size as DeiT-S [52].
+
+3.5 The CONTAINER-LIGHT network
+We also present an efficient version known as CONTAINER-LIGHT which uses the same basic architecture as CONTAINER, but switches off the dynamic affinity matrix in the first 3 stages. The absence of the computation heavy dynamic attention at the early stages of computation help efficiently scale the model to process large image resolutions and achieve superior performance on downstream tasks such as detection and instance segmentation.
+
+AmCONTAINER-LIGHT =
+
+Acmonv Asma + Acmonv
+
+Stage = 1, 2, 3 Stage = 4
+
+,
+
+(8)
+
+ and  are learnable parameters. In network stage 1, 2, 3, CONTAINER-LIGHT will switch off Asma.
+
+4 Experiments
+
+We now present experiments with CONTAINER for ImageNet and with CONTAINER-LIGHT for the tasks of object detection, instance segmentation and self-supervised learning. We also present appropriate baselines. Please see the appendix for details of the models, training and setup.
+
+4.1 ImageNet Classification
+Top-1 Accuracy. Table 1 compares several highly performant models within the CNN, Transformer, MLP, Hybrid and our proposed CONTAINER families. CONTAINER and CONTAINER-LIGHT outperform the pure Transformer models ViT [14] and DeiT [52] despite far fewer parameters. They outperform PVT [58] which employ a hierarchical representation similar to our base architecture. They also outperform the recently published state-of-the-art SWIN [39] (they outperform Swin-T which has more parameters). The best performing models continue to be from the EfficientNet [48] family, but we note that EfficientNet [48] and RegNet [43] apply an extensive neural architecture search, which we do not. Finally note that CONTAINER-LIGHT not only achieves a high accuracy but does so at lower FLOPs and much faster throughput than models with comparable capacities.
+The CONTAINER framework allows us to easily reproduce past architectures but also to create effective extensions over past work (outlined in Sec 3.3), several of which are compared in Table 2. H-DeiT-S is a hierarchical version of DeiT-S obtained by simply using Asa within our hierarchical architecture and provides 1.2 gain. Conv-3 (naive convolution (conv) with 3 × 3 kernel) aggregates spatial and channel information, where as Group Conv-3 splits input features and performs convs using different kernels ­ it is cheaper and more effective. When group size = channel dim., we get depth-wise conv. DW-3 is a depthwise convs with 3 by 3 kernel that only aggregates spatial information. Channel information is fused using 1 × 1 convs. MH-DW-3 is a multi-head version of DW-3. MH-DW-3 shares kernel parameters within the same group. With fewer kernels, MH-DW-3 achieves comparable performance with DW-3. MLP is an implementation of transposed MLP for spatial propagation. MLP-LR stands for MLP with low-rank decompostion. MLP-LR provides better performance with fewer parameters. MH-MLP-LR adds a multi-head mechanism over MLP-LR and provides further improvements. In contrast to the original MLP-Mixer [50], we do not add any non-linearity like GELU into CONTAINER as is specified in the contextual aggregation equation.
+Data Efficiency. CONTAINER-LIGHT has a built-in shift-invariance and parameter sharing mechanism. As a result it is more data efficient in comparison to DeiT [52]. Table 3 shows that at the low data regime of 10%, CONTAINER-LIGHT outperforms DeiT by a massive 22.5 points.
+
+6
+
+Family
+
+Network
+
+Top-1 Acc Params FLOPs Throughput Input dim NAS
+
+ResNet-50 [23]
+
+78.5
+
+ResNet-101 [23] 79.8
+
+Xception71 [8]
+
+79.9
+
+RegNetY-4G [43] 80.0
+
+RegNetY-8G [43] 81.7 CNN RegNetY-16G [43] 82.9
+
+EfficientNet-B3 [48] 81.6
+
+EfficientNet-B4 [48] 82.9
+
+EfficientNet-B5 [48] 83.6
+
+EfficientNet-B6 [48] 84.0
+
+EfficientNet-B7 [48] 84.3
+
+ViT-B/16 [14]
+
+77.9
+
+ViT-L/16 [14]
+
+76.5
+
+DeiT-S [52]
+
+79.9
+
+DeiT-B [52]
+
+81.8
+
+PVT-T [58]
+
+75.1
+
+PVT-S [58]
+
+79.8
+
+Transformer PVT-Medium [58] 81.2
+
+PVT-L [58]
+
+81.7
+
+ViL-T [67]
+
+76.3
+
+ViL-S [67]
+
+82.0
+
+Swin-T [39]
+
+81.3
+
+Swin-S [39]
+
+83.0
+
+Swin-B [39]
+
+83.3
+
+MLP
+
+Mixer-B/16 [50] ResMLP-24 [51]
+
+76.4 79.4
+
+Hybrid
+
+ConvViT [11]
+
+81.3
+
+BoT-S1-50 [46]
+
+79.1
+
+BoT-S1-59 [46]
+
+81.7
+
+Container
+
+CONTAINER
+
+82.7
+
+(Ours) CONTAINER-LIGHT 82.0
+
+25.6M 4.1G 44.7M 7.9G 42.3M N/A
+21M 4.0G 39M 8.0G 84M 16.0G 12M 1.8G 19M 4.2G 30M 9.9G 43M 19.0G 66M 37.0G 86M 55.4G 307M 190.7G 22.1M 4.6G 86M 17.5G 13.2M 1.9G 24.5M 3.8G 44.2M 6.7G 61.4M 9.8G 6.7M 1.3G 24.6M 4.9G 29M 4.5G 50M 8.7G 88M 15.4G 79M N/A 30M 6.0G 27M 5.4G 20.8M 4.3G 33.5M 7.3G 22.1M 8.1G 20.0M 3.2G
+
+1250.3 2242  753.7 2242  423.5 2992  1156.7 2242  591.6 2242  334.7 2242  732.1 3002  349.4 3802  169.1 4562  96.9 5282  55.1 6002 
+85.9 3842  27.3 3842  940.4 2242  292.3 2242  N/A 2242  N/A 2242  N/A 2242  N/A 2242  N/A 2242  N/A 2242  755.2 2242  436.9 2242  278.1 2242 
+N/A 2242  715.4 2242 
+N/A 2242  N/A 2242  N/A 2242 
+347.8 2242  1156.9 2242 
+
+Table 1: ImageNet [12] Top-1 accuracy comparison for CNN, Transformer, MLP, Hybrid and Container models. Throughput (images/s) is not reported in all papers (noted as N/A).
+Models that have fewer parameters than CONTAINER or upto 10% more parameters are highlighted.
+
+Method
+
+Top-1 Acc Params 
+
+
+
+C M
+
+Adynamic Astatic
+
+H-DeiT-S
+
+81.0 22.1M 1 0 32 Asa N/A
+
+Conv-3
+
+79.6 33.8M N/A N/A N/A N/A N/A
+
+Group Conv-3 DW-3
+MH-DW-3
+
+79.7 20.5M N/A N/A N/A N/A N/A 80.1 18.7M 0 1 1 N/A Aconv 79.9 18.6M 0 1 32 N/A Aconv
+
+MLP
+
+77.5 50.9M 0 1 C N/A Amlp
+
+MLP-LR
+
+78.9 36.5M 0 1 C N/A Amlp
+
+MH-MLP-LR
+
+79.6 41.6 M 0 1 32 N/A Amlp
+
+CONTAINER
+
+82.7 22.1M L L 32 Asa Aconv
+
+CONTAINER-LIGHT 82.0 20.0M L L 32 Asa Aconv
+
+Table 2: ImageNet accuracies for architecture variations (with convolutions, self-attention and MLP) enabled within the CONTAINER framework. As per our notation, C: num channels, M : num heads, C/M : head dimension. See Sec 3.3 and 4.1 for notation and model details.
+
+7
+
+Static affinity weights at different positions
+
+#25
+
+#50
+
+#90
+
+#100
+
+Network Layer 1
+
+Network Layer 12
+Source pixel at this position - Spatially local affinities are enhanced near the source - Affinity value for the source pixel is very small
+
+Figure 1: (left) Convergence speed comparison between CONTAINER, CONTAINER-LIGHT, Depthwise conv and DeiT. (right) Visualization of the static affinity weights at different positions and layers. Layer 1 displays the emergence of local affinities (resembling convolutions).
+
+Data ratio CONTAINER-LIGHT DeiT
+
+Convergence Speed. Figure 1 (left) compares the con- 100 %
+
+82.0 (+2.1) 79.9
+
+vergence speeds of the two CONTAINER variants with a
+
+80 %
+
+81.1 (+2.6) 78.5
+
+CNN and Transformer (DeiT) [52]. The inductive biases
+
+50 %
+
+78.8 (+4.8) 74.0
+
+in the CNN enable it to converge faster than DeiT [52],
+
+10 %
+
+61.8 (+22.5) 39.3
+
+but they eventually perform similarly at 300 epochs, sug- Table 3: ImageNet Top-1 Acc for
+
+gesting that dynamic, long range context aggregation is CONTAINER-LIGHT and DeiT-S with
+
+powerful but slow to converge. CONTAINER combines the varying training sizes.
+
+best of both and provides accuracy improvements with fast
+
+convergence. CONTAINER-LIGHT converges as fast with a slight accuracy drop.
+
+Emergence of locality. Within our CONTAINER framework, we can easily add a static affinity matrix to the DeiT architecture. This simple change (1 line of code addition), can provide a +0.5 Top-1 improvement from 79.9% to 80.4%. This suggests that static and dynamic affinity matrices provide complementary information. As noted in Sec 3.3, we name this CONTAINER-PAM.
+
+It is interesting to visualize the learnt static affinities at different network layers. Figure 1 (right) displays these for 2 layers. Each matrix represents the static affinities for a single position, reshaped to a 2-d grid to resemble the landscape of the neighboring regions. Within Layer 1, we interestingly observe the emergence of local operations via the enhancement of affinity values next to the source pixel (location). These are akin to convolution operations. Furthermore, the affinity value for the source pixel is very small, i.e. at each location, the context aggregator does not use its current feature. We hypothesize that this is a result of the residual connection [23], thereby alleviating the need to include the source feature within the context. Note that in contrast to dynamic affinity, the learnt static matrix is shared for all input images. Notice that Layer 12 displays a more global affinity matrix without any specific interpretable local patterns.
+
+4.2 Detection with RetinaNet
+
+Since the attention complexity for CONTAINER-LIGHT is linear at high image resolutions (initial layers) and then quadratic, it can be employed for downstream tasks such as object detection which usually require high resolution feature maps. Table 4 compares several backbones applied to the RetinaNet detector [36] on the COCO dataset [37]. Compared to the popular ResNet-50 [23], CONTAINER-LIGHT achieves 43.8 mAP, an improvement of 7.0, 7.2 and 10.4 on APS, APM , and APL with comparable parameters and cost. The significant increase for large objects shows the benefits of global attention via the dynamic global affinity matrix in our model. CONTAINER-LIGHT also surpasses the large convolution-based backbone X-101-64 [61] and pure Transformer models with similar number of parameters such as PVT-S [58], ViL-S [67], and SWIN-T [39] by large margins. Compared to large Transformer backbones such as ViL-M [67] and ViL-B [67], we achieve comparable performance with significantly fewer parameters and FLOPs.
+
+4.3 Detection and Segmentation with Mask-RCNN
+Table 4 also compares several backbones for detection and instance segmentation using the Mask R-CNN network [22]. As with the findings for RetinaNet [36], CONTAINER-LIGHT outperforms
+
+8
+
+Mask R-CNN
+
+RetinaNet
+
+Method
+
+#P FLOPs AP b AP5b0 AP7b5 AP m AP5m0 AP7m5 #P FLOPs mAP APS APM APL
+
+ResNet50 [23] 44.2 180G 38.2 58.8 41.4 34.7 55.7 37.2 37.7 239G 36.5 20.4 40.3 48.1 ResNet101 [23] 63.2 259G 40.0 60.5 44.0 36.1 57.5 38.6 56.7 319G 38.5 21.7 42.8 50.4 X-101-32 [61] 62.8 259G 41.9 62.5 45.9 37.5 59.4 40.2 56.4 319G 39.9 22.3 44.2 52.5 X-101-64 [61] 101.9 424G 42.8 63.8 47.3 38.4 60.6 41.3 95.5 483G 41.0 23.9 45.2 54.0
+
+PVT-S [58] ViL-S [58] SWIN-T [39] ViL-M [58] ViL-B [58]
+
+44.1 245G 40.4 62.9 43.8 37.8 60.1 40.3 34.2 226G 40.4 25.0 42.9 55.7 45.0 174G 41.8 64.1 45.1 38.5 61.1 41.4 35.6 252G 41.6 24.9 44.6 56.2 48.0 267G 43.7 66.6 47.4 39.8 63.6 42.7 385 244G 41.5 26.4 45.1 55.7 60.1 261G 43.4 65.9 47.0 39.7 62.8 42.1 50.7 338G 42.9 27.0 46.1 57.2 76.1 365G 45.1 67.2 49.3 41.0 64.3 44.2 66.7 443G 44.3 28.9 47.9 58.3
+
+BoT50 [46] 39.5 N/A 39.4 60.3 43.0 35.3 57 37.5 N/A N/A N/A N/A N/A N/A BoT50-(6x) [46] 39.5 N/A 43.7 64.7 47.9 38.7 61.8 41.1 N/A N/A N/A N/A N/A N/A
+
+CONTAINER-LIGHT 39.6 237G 45.1 67.3 49.5 41.3 64.2 44.5 29.7 218G 43.8 27.4 47.5 58.5
+
+Table 4: Comparing the CONTAINER-LIGHT backbone with several previous methods at the tasks of object detection and instance segmentation using the Mask-RCNN and RetinaNet networks.
+
+convolution and Transformer based approaches such as ResNet [23], X-101 [61], PVT [58], ViL [67] and recent state-of-the-art SWIN-T [39] and the recent hybrid approach BoT [46]. It obtains comparable numbers to the much larger ViL-B [67].
+
+4.4 Detection with DETR
+Table 5 shows that our model can consistently improve object detection performance compared to a ResNet-50 [23] backbone (comparable parameters and computation) on end-toend object detection using DETR [5]. We demonstrate large improvements with DETR [5], DDETR [70] as well as SMCA-DETR [19]. See appendix for AP S, AP M , and AP L numbers.
+
+Method
+
+mAP
+
+DETR-ResNet50 [5]
+
+32.3
+
+DETR-CONTAINER-LIGHT
+
+38.9
+
+DDETR w/o multi-scale-ResNet50 [70] 39.3
+
+DDETR w/o multi-scale-CONTAINER-LIGHT 43.0
+
+SMCA w/o multi-scale-ResNet50 [19] 41.0
+
+SMCA w/o multi-scale-CONTAINER-LIGHT 44.2
+
+Table 5: CONTAINER-LIGHT and ResNet-50 backbones with DETR and variants for object detection.
+
+4.5 Self supervised learning
+
+We train DeiT [52] and CONTAINER-LIGHT for 100
+
+Epochs 
+
+20 40 60 80 100
+
+epochs at the self supervised task of visual representa-
+
+DeiT [6]
+
+52.0 63.3 66.5 68.9 69.6
+
+tion learning using the DINO framework [6]. Table 6 CONTAINER-LIGHT 58.0 67.0 70.0 71.1 71.5
+
+compares top-10 kNN accuracy for both backbones Table 6: CONTAINER-LIGHT and DeiT on at different epochs of training. CONTAINER-LIGHT DINO self-supervised learning. significantly outperforms DeiT with large improve-
+
+ments initially demonstrating more efficient learning.
+
+5 Conclusion
+In this paper, we have shown that disparate architectures such as Transformers, depth-wise CNNs and MLP-based methods are closely related via an affinity matrix used for context aggregation. Using this view, we have proposed CONTAINER, a generalized context aggregation building block that combines static and dynamic affinity matrices using learnable parameters. Our proposed networks, CONTAINER and CONTAINER-LIGHT show superior performance at image classification, object detection, instance segmentation and self-supervised representation learning. We hope that this unified view can motivate future research in the design of effective and efficient visual backbones.
+Limitations: CONTAINER is very effective at image classification but cannot be directly applied to high resolution inputs. The efficient version CONTAINER-LIGHT, can be used for a variety of tasks. However, its limitation is that it is partially hand-crafted ­ the dynamic affinity matrix is switched off in the first 3 stages. Future work will address how to learn this using the task at hand.
+Negative societal impact: This research does not have a direct negative societal impact. However, we should be aware that powerful neural networks, particularly image classification networks can be used for harmful applications like face and gender recognition.
+
+9
+
+References
+[1] Peter Anderson, X. He, Chris Buehler, Damien Teney, Mark Johnson, Stephen Gould, and Lei Zhang. Bottom-up and top-down attention for image captioning and visual question answering. In CVPR, 2018. 1
+[2] Alexei Baevski, Henry Zhou, Abdelrahman Mohamed, and Michael Auli. wav2vec 2.0: A framework for self-supervised learning of speech representations. In NeurIPS, 2020. 3
+[3] Iz Beltagy, Matthew E Peters, and Arman Cohan. Longformer: The long-document transformer. arXiv, 2020. 3
+[4] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. In NeurIPS, 2020. 1
+[5] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander Kirillov, and Sergey Zagoruyko. End-to-end object detection with transformers. In ECCV, 2020. 1, 2, 3, 9, 13
+[6] Mathilde Caron, Hugo Touvron, Ishan Misra, Hervé Jégou, Julien Mairal, Piotr Bojanowski, and Armand Joulin. Emerging properties in self-supervised vision transformers. arXiv, 2021. 2, 3, 9
+[7] Xinlei Chen, Saining Xie, and Kaiming He. An empirical study of training self-supervised visual transformers. arXiv, 2021. 3
+[8] François Chollet. Xception: Deep learning with depthwise separable convolutions. In CVPR, 2017. 1, 2, 3, 4, 7
+[9] Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamas Sarlos, Peter Hawkins, Jared Davis, Afroz Mohiuddin, Lukasz Kaiser, et al. Rethinking attention with performers. In ICLR, 2021. 3
+[10] Giannis Daras, Nikita Kitaev, Augustus Odena, and Alexandros G Dimakis. Smyrf: Efficient attention using asymmetric clustering. In NeurIPS, 2020. 3
+[11] Stéphane d'Ascoli, Hugo Touvron, Matthew Leavitt, Ari Morcos, Giulio Biroli, and Levent Sagun. Convit: Improving vision transformers with soft convolutional inductive biases. arXiv, 2021. 3, 7
+[12] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. Imagenet: A large-scale hierarchical image database. In CVPR, 2009. 7
+[13] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. In NAACL, 2019. 1, 3
+[14] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. In ICLR, 2021. 1, 2, 3, 6, 7
+[15] Patrick Esser, Robin Rombach, and Björn Ommer. Taming transformers for high-resolution image synthesis. In CVPR, 2021. 3
+[16] Jun Fu, Jing Liu, Haijie Tian, Yong Li, Yongjun Bao, Zhiwei Fang, and Hanqing Lu. Dual attention network for scene segmentation. In CVPR, 2019. 3
+[17] Peng Gao, Zhengkai Jiang, Haoxuan You, Pan Lu, Steven CH Hoi, Xiaogang Wang, and Hongsheng Li. Dynamic fusion with intra-and inter-modality attention flow for visual question answering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6639­6648, 2019. 3
+[18] Peng Gao, Haoxuan You, Zhanpeng Zhang, Xiaogang Wang, and Hongsheng Li. Multi-modality latent interaction network for visual question answering. In ICCV, 2019. 3
+[19] Peng Gao, Minghang Zheng, Xiaogang Wang, Jifeng Dai, and Hongsheng Li. Fast convergence of detr with spatially modulated co-attention. arXiv, 2021. 2, 9, 13
+[20] Shijie Geng, Peng Gao, Moitreya Chatterjee, Chiori Hori, Jonathan Le Roux, Yongfeng Zhang, Hongsheng Li, and Anoop Cherian. Dynamic graph representation learning for video dialog via multi-modal shuffled transformers. arXiv preprint arXiv:2007.03848, 2020. 3
+[21] Shijie Geng, Ji Zhang, Zuohui Fu, Peng Gao, Hang Zhang, and Gerard de Melo. Character matters: Video story understanding with character-aware relations. arXiv preprint arXiv:2005.08646, 2020. 3
+[22] Kaiming He, Georgia Gkioxari, Piotr Dollár, and Ross Girshick. Mask r-cnn. In ICCV, 2017. 1, 2, 8 [23] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition.
+In CVPR, 2016. 1, 2, 4, 5, 7, 8, 9 [24] Byeongho Heo, Sangdoo Yun, Dongyoon Han, Sanghyuk Chun, Junsuk Choe, and Seong Joon Oh.
+Rethinking spatial dimensions of vision transformers. arXiv, 2021. 2 [25] Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation, 9(8), 1997. 3 [26] Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry Kalenichenko, Weijun Wang, Tobias Weyand, Marco
+Andreetto, and Hartwig Adam. Mobilenets: Efficient convolutional neural networks for mobile vision applications. arXiv, 2017. 3 [27] Han Hu, Jiayuan Gu, Zheng Zhang, Jifeng Dai, and Yichen Wei. Relation networks for object detection. In CVPR, 2018. 3
+10
+
+[28] Jie Hu, Li Shen, and Gang Sun. Squeeze-and-excitation networks. In CVPR, 2018. 3 [29] Zilong Huang, Xinggang Wang, Lichao Huang, Chang Huang, Yunchao Wei, and Wenyu Liu. Ccnet:
+Criss-cross attention for semantic segmentation. In ICCV, 2019. 3 [30] Lukasz Kaiser, Aidan N Gomez, and Francois Chollet. Depthwise separable convolutions for neural
+machine translation. arXiv, 2017. 4 [31] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and François Fleuret. Transformers are rnns: Fast
+autoregressive transformers with linear attention. In ICML, 2020. 3 [32] Nikita Kitaev, Lukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. In ICLR, 2020.
+3 [33] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional
+neural networks. NeurIPS, 2012. 1, 2 [34] Yann LeCun, Léon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to
+document recognition. Proceedings of the IEEE, 86(11), 1998. 1, 3 [35] Yawei Li, Kai Zhang, Jiezhang Cao, R. Timofte, and L. Gool. Localvit: Bringing locality to vision
+transformers. arXiv, 2021. 2 [36] Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and Piotr Dollár. Focal loss for dense object
+detection. In ICCV, 2017. 1, 2, 8 [37] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays, Pietro Perona, Deva Ramanan, Piotr Dollár,
+and C Lawrence Zitnick. Microsoft coco: Common objects in context. In ECCV, 2014. 8 [38] Yicheng Liu, Jinghuai Zhang, Liangji Fang, Qinhong Jiang, and Bolei Zhou. Multimodal motion prediction
+with stacked transformers. In CVPR, 2021. 3 [39] Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and Baining Guo. Swin
+transformer: Hierarchical vision transformer using shifted windows. arXiv, 2021. 2, 6, 7, 8, 9 [40] Aaron van den Oord, Oriol Vinyals, and Koray Kavukcuoglu. Neural discrete representation learning. In
+NeurIPS, 2017. 3 [41] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish
+Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen Krueger, and Ilya Sutskever. Learning transferable visual models from natural language supervision. arXiv, 2021. 1 [42] Alec Radford, Luke Metz, and Soumith Chintala. Unsupervised representation learning with deep convolutional generative adversarial networks. arXiv, 2015. 1, 3 [43] Ilija Radosavovic, Raj Prateek Kosaraju, Ross Girshick, Kaiming He, and Piotr Dollár. Designing network design spaces. In CVPR, 2020. 6, 7 [44] Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and Percy Liang. Squad: 100,000+ questions for machine comprehension of text. arXiv, 2016. 1 [45] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. In ICLR, 2015. 2 [46] Aravind Srinivas, Tsung-Yi Lin, Niki Parmar, Jonathon Shlens, Pieter Abbeel, and Ashish Vaswani. Bottleneck transformers for visual recognition. arXiv, 2021. 2, 7, 9 [47] Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet, Scott Reed, Dragomir Anguelov, Dumitru Erhan, Vincent Vanhoucke, and Andrew Rabinovich. Going deeper with convolutions. In CVPR, 2015. 3 [48] Mingxing Tan and Quoc Le. Efficientnet: Rethinking model scaling for convolutional neural networks. In ICML, 2019. 6, 7 [49] Mingxing Tan and Quoc V. Le. Efficientnetv2: Smaller models and faster training. arXiv, 2021. 3 [50] Ilya Tolstikhin, Neil Houlsby, Alexander Kolesnikov, Lucas Beyer, Xiaohua Zhai, Thomas Unterthiner, Jessica Yung, Daniel Keysers, Jakob Uszkoreit, Mario Lucic, and Alexey Dosovitskiy. Mlp-mixer: An all-mlp architecture for vision. arXiv, 2021. 1, 2, 3, 4, 5, 6, 7 [51] Hugo Touvron, Piotr Bojanowski, Mathilde Caron, Matthieu Cord, Alaaeldin El-Nouby, Edouard Grave, Armand Joulin, Gabriel Synnaeve, Jakob Verbeek, and Hervé Jégou. Resmlp: Feedforward networks for image classification with data-efficient training. arXiv, 2021. 7 [52] Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Hervé Jégou. Training data-efficient image transformers & distillation through attention. arXiv, 2020. 1, 2, 3, 6, 7, 8, 9 [53] Ashish Vaswani, Prajit Ramachandran, A. Srinivas, Niki Parmar, Blake A. Hechtman, and Jonathon Shlens. Scaling local self-attention for parameter efficient visual backbones. arXiv, 2021. 2 [54] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In NeurIPS, 2017. 3, 4, 6 [55] Apoorv Vyas, Angelos Katharopoulos, and François Fleuret. Fast transformers with clustered attention. In NeurIPS, 2020. 3 [56] Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel R Bowman. Glue: A multi-task benchmark and analysis platform for natural language understanding. arXiv, 2018. 1 [57] Sinong Wang, Belinda Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-attention with linear complexity. arXiv, 2020. 3
+11
+
+[58] Wenhai Wang, Enze Xie, Xiang Li, Deng-Ping Fan, Kaitao Song, Ding Liang, Tong Lu, Ping Luo, and Ling Shao. Pyramid vision transformer: A versatile backbone for dense prediction without convolutions. arXiv, 2021. 3, 5, 6, 7, 8, 9
+[59] Xiaolong Wang, Ross Girshick, Abhinav Gupta, and Kaiming He. Non-local neural networks. In CVPR, 2018. 1, 3
+[60] Felix Wu, Angela Fan, Alexei Baevski, Yann N Dauphin, and Michael Auli. Pay less attention with lightweight and dynamic convolutions. In ICLR, 2019. 3
+[61] Saining Xie, Ross Girshick, Piotr Dollár, Zhuowen Tu, and Kaiming He. Aggregated residual transformations for deep neural networks. In CVPR, 2017. 1, 3, 8, 9
+[62] Weijian Xu, Yifan Xu, Tyler Chang, and Zhuowen Tu. Co-scale conv-attentional image transformers. arXiv, 2021. 2
+[63] Sen Yang, Zhibin Quan, Mu Nie, and Wankou Yang. Transpose: Towards explainable human pose estimation by transformer. arXiv, 2020. 3
+[64] Kun Yuan, Shaopeng Guo, Ziwei Liu, Aojun Zhou, Fengwei Yu, and Wei Wu. Incorporating convolution designs into visual transformers. arXiv, 2021. 3
+[65] Yuhui Yuan, Xilin Chen, and Jingdong Wang. Object-contextual representations for semantic segmentation. In ECCV, 2020. 3
+[66] Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, et al. Big bird: Transformers for longer sequences. In NeurIPS, 2020. 3
+[67] Pengchuan Zhang, Xiyang Dai, Jianwei Yang, Bin Xiao, Lu Yuan, Lei Zhang, and Jianfeng Gao. Multiscale vision longformer: A new vision transformer for high-resolution image encoding. arXiv, 2021. 2, 7, 8, 9
+[68] Minghang Zheng, Peng Gao, Xiaogang Wang, Hongsheng Li, and Hao Dong. End-to-end object detection with adaptive clustering transformer. arXiv, 2020. 3
+[69] Sixiao Zheng, Jiachen Lu, Hengshuang Zhao, Xiatian Zhu, Zekun Luo, Yabiao Wang, Yanwei Fu, Jianfeng Feng, Tao Xiang, Philip H. S. Torr, and Li Zhang. Rethinking semantic segmentation from a sequence-tosequence perspective with transformers. In CVPR, 2021. 3
+[70] Xizhou Zhu, Weijie Su, Lewei Lu, Bin Li, Xiaogang Wang, and Jifeng Dai. Deformable detr: Deformable transformers for end-to-end object detection. In ICLR, 2021. 2, 9, 13
+[71] Zhen Zhu, Mengde Xu, Song Bai, Tengteng Huang, and Xiang Bai. Asymmetric non-local neural networks for semantic segmentation. In ICCV, 2019. 3
+12
+
+Appendix
+
+A Experimental setups
+
+A.1 ImageNet Classification
+
+ImageNet-1k is an image classification dataset with 1000 object categories. We use the basic architecture explained in Section 3.4. All models are trained with the same setting as DeiT. Depthwise convolution, MLP and CONTAINER-LIGHT are trained with 8 16G V100 GPU with each GPU processing 128 images. Transformer and CONTAINER are trained with 8 80G A100 GPU and each GPU processes 128 images. Color jitter, random erase and mixup are used as data-augmentation strategies. We use the adamW optimizer. Learning rates are calculated using the following equation:
+
+lr = lrbase × Batch × NGP U
+
+(9)
+
+512
+
+where base learning rate is chosen to be 5 × e-4. We use cosine learning schedule and warm up the model in the first 5 epochs and train for 300 epochs in total.
+
+A.2 Detection with RetinaNet
+
+RetinaNet is a one-stage dense object detector using a feature pyramid network and focal loss. It is trained for 12 epochs, starting with a learning rate of 0.0001 which decreases by 10 at epoch 8 and 11. We use adamW optimizer and set weight decay to 0.05. No gradient clip is applied. We warm up for the first 500 iterations. Models are trained with 8 V100 GPU and each GPU holds 2 images. We freeze the batch normalization parameter similar to DETR.
+
+A.3 Detection and Segmentation with Mask-RCNN
+
+Mask-RCNN is a multi-task framework for object detection and instance segmentation. Mask-RCNN models are trained with 8 GPUs and each GPU hold 2 images. Mask-RCNN models are optimized by AdamW with a learning rate of 0.0001 and weight deacy of 0.05. We warm up the first 500 iterations. BN parameters are frozen for all layers.
+
+A.4 Detection with DETR
+
+DETR is an encoder-decoder transformer for end-to-end object detection. To improve the convergence speed and performance of DETR, SMCA-DETR propose a spatial modulated co-attention mechanism which can increase the convergence speed of DETR. Deformable DETR achieve fast convergence through deformable encoder and decoder. We compare CONTAINER-LIGHT with ResNet 50 on DETR without dilation, SMCA without multi scale and Deformable DETR without multi scale. DETR and SMCA DETR are optimized with 8 GPUs and 2 images per GPU, where as Deformable DETR uses 8 GPUs and 4 images per GPU. All models are optimzied with AdamW optimizer and weight clipping. DETR, SMCA DETR and Deformable DETR all use the default parameter setting in the original code release.
+
+Method
+
+Backbone
+
+mAP APS APM APL
+
+DETR [5]
+
+ResNet50
+
+32.3 10.7 33.8 53.0
+
+DETR [5] CONTAINER-LIGHT 38.9 16.5 42.2 60.3
+
+SMCA w/o multi-scale [19]
+
+ResNet50
+
+41.0 21.9 44.3 59.1
+
+SMCA w/o multi-scale [19]
+
+CONTAINER-LIGHT
+
+44.2
+
+23.8
+
+47.9
+
+63.1
+
+DDetr w/o multi-scale [70]
+
+ResNet50
+
+39.3 19.8 43.5 56.1
+
+DDetr w/o multi-scale [70]
+
+CONTAINER-LIGHT
+
+43.0
+
+23.3
+
+46.3
+
+61.2
+
+Table A.1: Comparison with DETR model over training epochs, mAP, inference time and GFLOPs.
+
+13
+
+A.5 Self-supervised Learning DINO
+DINO is a recently proposed self-supervised learning framework. We adopt the default training setup in DINO to test the performance of CONTAINER-LIGHT on self-supervised learning. We compare with ViT-S/16 model using DINO. Baseline model and CONTAINER-LIGHT are trained using 100 epoches with cosine schedule for learning rate and weight decay. Learning rate at the end of warmup is 0.0005 while weight decay at the end will be kept constant to 0.4. Batch size per GPU is set to 64. We report kNN accuracy as a metric to evaluate the performance of self-supervised model.
+B 1 line code change for Container-PAM
+Listing 1: With just 1 line of code change in the forward pass of the Attention module within ViT, one can implement CONTAINER-PAM and obtain a +0.5 improvement on ImageNet top-1 accuracy. class Attention(nn.Module):
+def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop =0., proj_drop=0., seq_l=196):
+super().__init__() self.num_heads = num_heads head_dim = dim // num_heads self.scale = qk_scale or head_dim ** -0.5
+self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+#Uncomment this line for Container-PAM #self.static_a = #nn.Parameter(torch.Tensor(1, num_heads, 1 + seq_l , 1 + seq_l)) #trunc_normal_(self.static_a)
+self.attn_drop = nn.Dropout(attn_drop) self.proj = nn.Linear(dim, dim) self.proj_drop = nn.Dropout(proj_drop)
+def forward(self, x): B, N, C = x.shape qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads). permute(2, 0, 3, 1, 4) q, k, v = qkv[0], qkv[1], qkv[2]
+attn = (q @ k.transpose(-2, -1)) * self.scale attn = attn.softmax(dim=-1)
+#Uncomment this line for Container-PAM #attn = attn + self.static_a
+attn = self.attn_drop(attn)
+x = (attn @ v).transpose(1, 2).reshape(B, N, C) x = self.proj(x) x = self.proj_drop(x) return x
+The attention code is borrowed from the TIMM library 1. The one-line code addition in the forward pass for CONTAINER-PAM is implemented (and commented) in red. This code also requires enabling an additional parameter (also shown in red).
+1https://github.com/rwightman/pytorch-image-models/tree/master/timm
+14
+
+

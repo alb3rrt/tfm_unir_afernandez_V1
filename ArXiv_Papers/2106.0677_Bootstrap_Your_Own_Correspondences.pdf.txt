@@ -1,0 +1,366 @@
+Bootstrap Your Own Correspondences
+Mohamed El Banani Justin Johnson University of Michigan
+{mbanani, justincj}@umich.edu
+
+arXiv:2106.00677v1 [cs.CV] 1 Jun 2021
+
+Abstract
+Geometric feature extraction is a crucial component of point cloud registration pipelines. Recent work has demonstrated how supervised learning can be leveraged to learn better and more compact 3D features. However, those approaches' reliance on ground-truth annotation limits their scalability. We propose BYOC: a self-supervised approach that learns visual and geometric features from RGB-D video without relying on ground-truth pose or correspondence. Our key observation is that randomly-initialized CNNs readily provide us with good correspondences; allowing us to bootstrap the learning of both visual and geometric features. Our approach combines classic ideas from point cloud registration with more recent representation learning approaches. We evaluate our approach on indoor scene datasets and find that our method outperforms traditional and learned descriptors, while being competitive with current state-of-the-art supervised approaches.
+1. Introduction
+One's ability to align two views of the same scene is closely intertwined with their ability to identify corresponding points between the two views. The duality between correspondence estimation and point cloud registration has long been recognized and serves as the basis for many approaches in both problems . Given an accurate registration of a scene, one can easily extract correspondences between the two views. Conversely, given point correspondences, one can easily register two views of a scene. Can we leverage this cycle to jointly learn both correspondence estimation and point cloud registration from scratch?
+At the core of this cycle is the ability to generate good feature descriptors for points in the scene. The prevailing approach to 3D feature learning relies on preregistered scenes to sample ground-truth correspondences for the supervised training of a feature encoder. This is done by sampling positive and negative feature pairs and applying triplet [12, 32, 35, 55] or contrastive [3, 12, 54] losses. While very successful, these approaches require us to have
+
+Figure 1. BYOC uses estimated visual correspondence to train a visual and geometric encoder on RGB-D video frames. At test time, it is able to successfully register raw point clouds.
+already registered the raw depth or RGB-D scans to generate the training data. This limits this approach to data that can be successfully registered with automated approaches like COLMAP [46]. Ideally, we would leverage the success of supervised approaches without relying on ground-truth correspondence labels.
+To this end, we propose Bootstrap Your Own Correspondences (BYOC): a self-supervised end-to-end approach that learns point cloud registration by leveraging pseudo-correspondence labels. Our approach extracts pseudo-correspondence labels from the output of a randomly initialized feature encoder (§ 3.1). We use the sampled correspondences to register the point clouds and apply losses based on the quality of the registration to train the feature encoders. This allows us to slowly bootstrap1 the learning process and learn from RGB-D scans without relying on any pose or correspondence supervision.
+1We use bootstrap in its idiomatic rather than its statistical sense.
+
+This approach works well for registering RGB-D frames, but does worse for aligning point clouds. This is primarily due to the fact that randomly initialized 2D CNNs produce more distinctive features than current point cloud encoders, as shown in Figure 3. We leverage this observation and propose bootstrapping the geometric features using visual correspondences. We do this by using the estimated visual correspondences, as opposed to ground-truth labels [3, 12, 32, 35, 54, 55] to sample positive pairs, and apply a feature metric learning. We adapt a recently proposed self-supervised method, SimSiam [8], for 3D representation learning (§ 3.2). This addition results in improved performance while being significantly simpler (no negative samples or momentum encoders) than prior contrastive learning formulations applied to point clouds.
+Our work draws inspiration from two sources: iterative closest point algorithm (ICP) [4, 9, 59] and self-supervised learning on pseudo-labels [7, 26, 34]. While seemingly different, the same intuition lies at the core of both lines of work. ICP is a registration algorithm that assumes that the closest points between two point clouds correspond to each other. Through iterative refinement and resampling, it can register roughly aligned point clouds. Meanwhile, self-supervised learning with pseudo-labels learns to predict pseudo-labels in the form of current top prediction [34], feature clusters [7], or even a previous prediction [26]. Through redefining the labels over time, the model can learn good representations. Both rely on the observation that pseudo-labels in a well-structured space (i.e., similar objects already lie close to each other) can provide a valuable learning signal. This is particularly relevant for learning due to the finding that CNNs, even when randomly initialized, still serve as good feature extractors [42, 50].
+We evaluate our approach on two indoor scene datasets: ScanNet [13] and 3D Match [58]. Despite the simplicity of our approach, it outperforms hand-crafted features as well as several supervised baselines, while being competitive with current state-of-the-art approaches.
+In summary, we propose a self-supervised approach that uses sampled correspondences from initially random feature encoders to learn point-wise features for point cloud registration (§ 3.1). We also demonstrate how visual correspondences could be used to further improve geometric feature learning (§ 3.2). We demonstrate the efficacy of this approach on point cloud registration (§ 4.1) and correspondence estimation (§ 4.2).
+2. Related Work
+3D Feature Descriptors. Early work on feature point extraction can be traced back to using corners for stereo matching [38]. The core intuition of extracting features based on histograms of gradients was extended to 3D features [29, 30, 44, 45, 48]. More recently, there has
+
+been a nascent body of work focused on leveraging supervised learning for learning 3D features [3, 12, 14­ 16, 22, 32, 35, 53, 55, 62]. The common approach is to sample both positive and negative pairs between two frames and then use them in a triplet [12, 32, 35, 55], contrastive [3, 12, 54], or an N-tuple [15] loss. Other approaches propose unsupervised learning approaches on reconstructed scenes [14, 54, 62]. While those approaches do not explicitly use ground-truth pose, they rely on reconstructed scenes which are generated using ground-truth pose. Unlike prior approaches, our approach operates directly on depth or RGB-D scans without relying on groundtruth pose or correspondence and focuses on point cloud registration as an end task.
+Point Cloud Registration. Early work on point cloud registration assumed perfect correspondence between the point clouds [2, 36]. This assumption was later relaxed by ICP by assuming the closest point is the correspondence [4, 9, 59]. While this assumption holds for several applications (e.g., registering scans from a high frame-rate scanner or finetuning alignment), it is challenged by large transformations and partially overlapping point clouds. Later on, featurebased approaches were proposed that compute features to establish correspondence, and use robust estimators such as RANSAC to handle noise and outliers [49, 60]. For a review, see [39]. More recent approaches incorporate learning into the registration process [5, 6, 10, 19, 21, 28, 40, 56]. Finally, there has been a line of work that proposes selfsupervised approaches for registering objects [1, 27, 28, 52, 53, 56, 57] or reconstructed scenes [14, 32, 62]. We are inspired by this line of work, but differ from it in two key ways: our approach operates directly on raw depth or RGBD scans and is unsupervised.
+Self-supervised learning. Self-supervised learning refers to approaches that apply supervised learning to tasks where the data itself serves as the supervision. This idea has been very popular for 2D representation learning with the goal of learning representations that generalize to downstream tasks [8, 17, 18, 20, 24, 26, 47]. Recently, PointContrast [54] and DepthContrast [61] demonstrated how to extend this formulation to 3D representation learning. We are inspired by this line of work but differ from it in several ways. First, our goal is to use self-supervision to tackle the task itself, not a different downstream task. Second, we differ from prior 3D self-supervision in that we operate on depth scans, not reconstructed scenes like [54]. Also, we learn point-wise representations, not holistic representations like [61]. Finally, our work is inspired by the recently proposed SimSiam [8] which proposes a self-supervised approach that is much simpler than prior approaches. We adapt SimSiam to the point cloud setting by applying it to the sampled feature pairs.
+
+Figure 2. BYOC. Our model takes as input two RGB-D images of a scene. First, we extract visual features from the images and geometric features from the point clouds. This results in two point clouds where each point has a 3D location, visual feature, and geometric feature. We then extract correspondences from the visual and geometric features. Those correspondences are used to estimate a transformation and compute a registration loss. We also apply a feature similarity loss on geometric features sampled using the visual correspondences.
+
+3. Approach
+The goal of this work is to learn geometric point cloud registration from RGB-D video without relying on pose or correspondence supervision. Our approach, shown in Fig. 2, has three major components: visual registration, geometric registration, and correspondence transfer. The first two components are based on the traditional registration pipeline of feature extraction, correspondence estimation, and geometric fitting. The only difference between them is whether the features are extracted using a visual encoder from the image or a geometric encoder from the point cloud. The third component is based on SimSiam [8], where we apply a loss on pairs of geometric features that are sampled using visual correspondences. Our key insight is that randomly initialized CNNs produce features that allow for decent correspondence estimation. This allows us to bootstrap the learning of both visual and geometric encoders by using estimated correspondences with supervised registration and feature similarity losses.
+3.1. Point Cloud Registration
+Given two point clouds, P0 and P1, point cloud registration is the task of finding the transformation T  SE(3) that aligns them. Registration approaches commonly consist of three stages: feature extraction, correspondence estimation, and geometric fitting. In our approach, we perform two registration steps using image or point cloud features. Correspondence estimation and geometric fitting are the same for both steps. Below we discuss each of the steps in detail.
+Geometric Feature Extraction. Our first encoder takes point clouds as input. This encoder allows us to extract features based on the geometry of the input scene. We first generate a point cloud for each view using the input depth and known camera intrinsic matrix. We then encode each point cloud using a sparse 3D convolutional network [11, 25]. We
+
+use this network due to its success as a back-end for supervised registration approaches [10, 12, 21] and 3D representation learning [54, 61]. This network applies sparse convolution to a voxelized point cloud, which allows it to extract features that capture local geometry while maintaining a quick run-time. Similar to prior work [12, 54, 61], we find that a voxel size of 2.5 cm works well for indoor scenes. This step maps our input RGB-D image, I0, I1  R4×H×W to P0, P1  RN×(3+F ) where each point cloud has N points, and each point, p, is represented by a 3D coordinate, xp, and a F -dimensional geometric feature vector, gp.2 In our experiments, we use a feature dimension of 32.
+Visual Feature Extraction. Our second encoder takes images as input and generates an output feature map of the same size. Maintaining the image's spatial resolution results in a feature vector extracted for each pixel. We use a ResNet encoder with two residual blocks as our image encoder and map each pixel to a feature vector of size 32. We use the projected 3D coordinates of the voxelized point cloud from the geometric encoder to index into the 2D feature map. This allows us to generate a point cloud for each input RGB-D image whose points p  P have both a visual feature vector, vp, and a geometric feature vector, gp. We use this property for transferring correspondences between the different feature modalities in § 3.2. We only use the visual encoder during training to bootstrap the geometric feature learning. At test time, we register point clouds without access to image data.
+Correspondence estimation. We estimate the correspondences between the two input views for each feature modality to output two sets of correspondences: Cvis and Cgeo. We first generate a list of correspondences by finding the near-
+2Voxelization will result in point clouds of varying dimension. We use heterogeneous batching to handle this in our implementation, but assume that point clouds have the same size in our discussion for clarity.
+
+est neighbor to each point in the feature space. Since we have two point clouds of N points, we end up with a correspondence list of length 2N candidate correspondences.
+The candidate correspondences will likely contain a lot of false positives due to poor matching, repetitive features, and occluded or non-overlapping portions of the image. The common approach is to filter the correspondences based on some criteria of uniqueness or correctness. Recent approaches propose learning networks that estimate a weight for each correspondence [10, 21, 40]. In this work, we leverage the method proposed by [19] of using a weight based on Lowe's ratio [37]. Given two point clouds, P0 and P1, we find the correspondences of point p  P0 by finding the two nearest neighbors qp and qp,nn2 to p in P1 in feature space. We can calculate the Lowe's ratio weight as follows:
+
+wp,qp
+
+=
+
+1
+
+-
+
+D(fp, fqp ) D(fp, fqp,nn2 )
+
+(1)
+
+where D is cosine distance, and fp is either the visual or the geometric feature descriptor depending on which corre-
+
+spondence set is being calculated. It is worth noting that this
+
+formulation is similar to the triplet loss often used in contrastive learning, where qp is the positive sample and qp,nn2 is the hardest negative sample. We use the resulting weights to rank the correspondences and only include the top k correspondences. We use k = 400 in our experiments. Each element of our correspondence set C consists of the two corresponding points and their weight (p, q, wp,q).
+
+Geometric Fitting. For each set of correspondences, we estimate the transformation, T  SE(3) that would minimize the mean-squared error between the aligned correspondences:
+
+1
+
+w
+
+E(C, T) = |C|
+(p,qp ,w)C
+
+C w ||xqp - T(xp)||
+
+(2)
+
+Choy et al. [10] show this problem can be reformulated as a weighted Procrustes algorithm [23, 31], allowing for weights to be integrated into the operation to improve the optimization process while maintaining differentiability with respect to the weights. We adopt this formulation due to its relative simplicity and ease of incorporation within an end-to-end trainable system. Despite having a filtered correspondence list, the correspondence set might still include some outliers that would result in an incorrect geometric fitting. We adopt the randomized optimization used in [19], and similarly find that we get the best performance by only using it at test time.
+
+Registration Loss. Our registration loss is defined with respect to our correspondence set and the estimated transformation as follows:
+
+Lreg(C) = arg min E(C, T)
+
+(3)
+
+TSE(3)
+
+BYOC (Geometric) Random Geometric
+
+Random Visual
+
+Figure 3. Randomly-initialized CNN features are good feature descriptors. We can estimate good correspondences from random visual features, but not random geometric features. We leverage this observation to bootstrap the learning of geometric features using visual correspondences. Our learned approach learns to estimate accurate correspondence from geometric features.
+There are a few interesting things about this loss. First, it is worth noting that the gradients are back-propagated to the feature encoder through the weights, w, and the transformation, T. Hence, the loss can be formulated without using the weights. We find that using the weight improved the performance of visual registration while deteriorating the performance of geometric registration. Therefore, in our model, we only apply the weighting to the visual registration branch while removing it from the geometric branch.
+Second, the loss operates as a weighted sum over the residuals, specifically, the loss is minimized if the correspondence with the lowest residual error has the highest weight. Since the weights are L1 normalized, the relative weighing of the correspondences matters. Removing the normalization results in an obvious degeneracy since the loss can be minimized by driving the weights to 0, which can be achieved by mode collapse. Finally, the weighted loss closely resembles a triplet loss since we sample both positive (first nearest neighbor) and hardest negative (second nearest neighbor) samples. However, unlike the commonly used margin triplet loss, this formulation does not require defining a margin as it operates on the ratio of distances rather than their absolute scale.
+
+3.2. Visual  Geometric
+
+The approach outlined in § 3.1 works well with visual features, however it is less effective with geometric features. The reason for this becomes apparent once we consider the registration performance using features from randomly initialized encoders. As shown in Figure 3, we observe that the features extracted using randomly initialized visual encoder provide some distinctive output, while a random geometric encoder's outputs are more random.
+Ideally, we would leverage the good visual correspondences to further bootstrap the learning of the geometric features. We observe that geometric feature learning approaches typically define metric learning losses using sampled correspondences [3, 12, 22, 35, 55]. We adapt this approach to the unsupervised setting by sampling feature pairs using visual correspondences. This is fairly simple in our approach since each point has both a visual feature and a geometric feature, so transferring correspondences becomes as simple as indexing into another tensor. Since the correspondences act as an indexing mechanism, the loss is only back-propagated to the geometric encoder.
+Current 3D feature learning approaches rely on both positive and negative pairs to define triplet [12, 32, 35, 55] or contrastive [3, 12, 54] losses. However, as noted in the literature, those losses can be difficult to apply due to their susceptibility to mode collapse and sensitive to hyperparameter choices and negative sampling strategy [12, 54, 61]. Those issues are amplified in our setting since we rely on estimated, not ground-truth, correspondences. Instead of the typical contrastive setup, we adapt the recently proposed SimSiam [8] to the point cloud setting. SimSiam allows us to train our model without requiring negative sampling or having any hyperparameters, while being less susceptible to mode collapse than contrastive losses [8].
+We adapt SimSiam by applying it to the geometric features of corresponding points, instead of features for different augmentations of the same image. Given a correspondence (p, q)  Cvis, we first project the features using a two-layer MLP projection head and apply a stop-gradient operator on the features:
+
+zp = stopgradient(project(gp)).
+
+(4)
+
+We then compute the loss based on the cosine distance between each geometric feature and the projection of its correspondence:
+
+1
+
+LV G(Cvis)
+
+=
+
+|Cvis|
+
+D(gp,
+(p,q)Cvis
+
+zq
+
+)
+
++
+
+D(gq
+
+,
+
+zp)
+
+(5)
+
+where D is the cosine distance function and Cvis is the set of visual correspondences. In our experiments, we observe that adding SimSiam improved the performance without requiring any additional fine-tuning or model changes.
+
+4. Experiments
+We evaluate our approach on point cloud registration of indoor scenes. We train our model on ScanNet, a large dataset of indoor scenes, and evaluate it on ScanNet and the 3D Match registration benchmark. Our experiments aim to answer the following questions: (1) can we learn accurate point cloud registration from bootstrapped correspondences?; (2) can we leverage RGB-D video at training time to train better geometric encoders?
+BYOC variants. We consider three variants of our model: BYOC, BYOC-Geo, and BYOC-Rot. The first variant of our full model, depicted in Fig. 2, is trained using RGBD pairs, but only uses the geometric encoder at test time to register point clouds. The second variant, BYOC-Geo, is trained on depth pairs with only the registration loss on geometric correspondences. This variant applies the bootstrapping idea without further leverage the visual correspondence. Our third variant, BYOC-Rot, is the full model trained with additional rotation augmentation. We sample random rotations and apply them to the point cloud before the geometric encoder. This is a common form of augmentation in 3D feature learning [12, 54] and is intended to provide the learned feature with some rotational equivariance.
+Datasets. We evaluate our approach on two datasets of indoor scenes: ScanNet [13] and 3D Match [58]. While both datasets provide RGB-D video annotated with ground-truth camera poses, 3D Match provides an additional geometric registration benchmark that is more challenging due to the larger viewpoint changes. ScanNet provides pose annotated RGB-D video for 1513 scenes, while 3D Match's RGB-D video dataset only spans 101 scenes. We emphasize that we only use RGB-D video and camera intrinsics for training our model. We use the official train/valid/test scene split for both datasets, and generate view pairs by sampling image pairs that are 20 frames apart. This results in 1594k/12.6k/26k RGB-D pairs for ScanNet and 122k/1.5k/1.5k RGB-D pairs for 3D Match.
+Training Details. We train our model with the Adam [33] optimizer using a learning rate of 10-4 and momentum parameters of (0.9, 0.99). We train each model for 200K iterations with a batch size of 8. We implement our models in PyTorch [41], while making extensive use of PyTorch3D [41], Open3D [63], and Minkowski Engine [11].
+4.1. Point Cloud Registration
+We first evaluate our approach on point cloud registration on ScanNet and report our results in Table 1. Given two point clouds, we estimate the transformation T  SE(3) that would align the point clouds. We emphasize that we discard the visual encoder at test time, and only use the geometric encoder on point cloud input.
+
+ICP (Point-to-Point) ICP (Point-to-Plane) FPFH [44] + Weighted Procrustes FPFH [44] + RANSAC
+FCGF [12] + Weighted Procrustes FCGF [12] + RANSAC FCGF [12] + DGR [10] FCGF [12] + 3D MV Reg [21]
+BYOC BYOC-Rot BYOC-Geo BYOC + RANSAC BYOC
+
+Rotation Accuracy  Error 
+Train Set Pose Sup. 5 10 45 Mean Med.
+
+Translation Accuracy  Error 
+5 10 25 Mean Med.
+
+Chamfer Accuracy  Error 
+1 5 10 Mean Med.
+
+-
+
+31.7 55.6 99.6 10.4 8.8 7.5 19.4 74.6 22.4 20.0 8.4 24.7 40.5 32.9 14.1
+
+-
+
+54.4 68.0 98.6 8.6 3.6 30.0 36.7 70.4 23.6 18.0 31.6 43.1 53.5 229.5 8.2
+
+-
+
+22.2 48.2 84.9 27.8 10.4 7.4 19.6 56.3 54.1 25.3 17.5 46.8 61.2 26.5 5.8
+
+-
+
+34.1 64.0 90.3 20.6 7.2 8.8 26.7 66.8 42.6 18.6 27.0 60.8 73.3 23.3 2.9
+
+3D Match  54.1 73.3 92.2 15.3 4.3 30.8 46.2 73.0 35.0 11.6 45.6 67.4 76.4 21.5 1.4 3D Match  75.3 87.7 95.6 9.7 2.5 39.7 64.9 86.5 20.8 6.4 62.5 83.1 88.2 13.0 0.6 3D Match  83.6 90.5 95.2 9.0 1.7 57.6 78.8 91.3 17.1 4.2 76.5 89.4 91.8 10.7 0.3 3D Match  87.7 93.2 97.0 6.0 1.2 69.0 83.1 91.8 11.7 2.9 78.9 89.2 91.8 10.2 0.2
+
+3D Match ScanNet ScanNet ScanNet ScanNet
+
+66.5 85.2 97.8 7.4 3.3 30.7 57.6 88.9 16.0 8.2 54.1 82.8 89.5 9.5 0.9 71.2 87.8 97.9 6.9 2.8 38.2 63.3 89.8 15.0 6.8 61.8 84.7 90.7 9.3 0.6 80.3 92.8 98.8 4.8 2.3 46.5 74.6 94.6 10.6 5.4 71.9 91.1 94.5 7.2 0.5 81.3 92.8 98.4 5.6 2.4 37.8 69.7 92.1 13.3 6.4 67.7 89.8 93.5 7.7 0.5 86.5 95.2 99.1 3.8 1.7 56.4 80.6 96.3 8.7 4.3 78.1 93.9 96.4 5.6 0.3
+
+Table 1. Pairwise Registration on ScanNet. We outperform existing registration pipelines that use traditional and learned geometric feature descriptors with a RANSAC or Weighted Procrustes estimator. Furthermore, we perform on-par with supervised approaches that were trained on 3D Match, demonstrating the utility of unsupervised training in this domain. Pose Sup. indicates pose supervision.
+
+Baselines. While our approach is unsupervised, we are interested in comparing to both classical hand-crafted and supervised learning approaches. We first compare our approach against different variants of ICP [43]. ICP is an important comparison since it is both an inspiration of this work, as well as a classical algorithm for point cloud registration. We also compare it with a RANSAC-based aligner using FPFH [44] or FCGF [12] 3D feature descriptors. FPFH [44] is a hand-crafted 3D feature descriptor that encodes a histogram of the geometric relationships between each point and its nearest neighbors. FPFH is one of the best non-learned 3D feature descriptors and would be representative of the performance of hand-crafted 3D features. FCGF [12] is a recently proposed learned 3D feature descriptor that combines sparse 3D convolutional networks with contrastive losses defined on ground-truth correspondences to achieve state-of-the-art performance on several registration benchmarks. Finally, we compare with Deep Global Registration [10] and 3D Multiview Registration [22]: two supervised approaches that learn to estimate correspondences on top of FCGF features. Those approaches use supervision for both feature learning and correspondence estimation, while our approach is unsupervised for both. It is worth noting that 3D Multi-view Registration [21] proposes both a method for pairwise registration and synchronizing multiple views at the same time. We only compare against their pairwise registration module.
+
+Evaluation Metrics. We evaluate the pairwise registration by calculating the rotation and translation error between the predicted and ground-truth transformation as follows:
+
+Erotation
+
+=
+
+arccos( T r(RprRgt) 2
+
+-
+
+1 ),
+
+(6)
+
+Etranslation = ||tpr - tgt||2.
+
+(7)
+
+We report the translation error in centimeters and the rotation errors in degrees. We also report the chamfer distance between the predicted and ground-truth alignments of the scene. For each of metric, we report the mean and median errors as well as the accuracy at different thresholds.
+Results. We first note that ICP approaches fail on this task. ICP assumes that the point clouds are prealigned and can be very effective at fine-tuning such alignment by minimizing a chamfer distance. However, our view pairs have a relatively large camera motion with the mean transformation between two frames being 11.4 degrees and 19.4 cm. As a result, ICP struggles with the large transformations and partial overlap between the point cloud pairs. Similarly, FPFH also fails on this task as its output descriptors are not distinctive enough, resulting in many false correspondences which greatly deteriorates the registration performance.
+On the other hand, learned approaches show a clear advantage in this domain as they are able to learn features that are well-tuned for the task and data domain. Our model is able to outperform FCGF despite FCGF being trained with ground-truth correspondences on an indoor scene dataset. This is true regardless of whether our model is trained using RGB-D or depth pairs. While we find that our model trained on 3D Match performs worse than FCGF, this is expected since 3DMatch is a much smaller dataset making it less suitable for a self-supervised approach.
+Finally, our approach is competitive against approaches that use supervision for both feature learning and correspondence estimation [10, 21]. This comparison represents the difference between full supervision on a small dataset vs. self-supervision on a large dataset. Our competitive performance demonstrates the promise of self-supervision in this space and our model's ability to learn for a very simple learning signal: consistency between video frames.
+
+Rotation Error Translation Error Chamfer
+
+Mean Median Mean Median Mean Median
+
+Random Visual
+
+6.4 2.7 14.9 7.0 9.8 0.6
+
+Random Geometric 21.3 13.0 46.5 28.5 26.0 8.6
+
+BYOC (Visual) BYOC-Geo BYOC
+
+2.7 0.9 6.4 2.6 4.8 2.3 10.6 5.4 3.8 1.7 8.7 4.3
+
+3.3 0.1 7.2 0.5 5.6 0.3
+
+Table 2. Random Visual Features are surpsingly good for registration. We achieve good alignment with random visual features, but not geometric features. This pattern holds after training: it is better to align using visual features.
+
+What is the impact of the transformation estimator? While we observe that RANSAC improves the performance of FPFH and FCGF compared to the Weighted Procrustes, we see the opposite pattern with our approach. This is due to the fact that our model is trained specifically on a registration loss on filtered correspondence. As a result, Lowe's ratio becomes a very effective method of filtering our correspondences while being less effective for other approaches.
+How good are random features? We find that random visual features can serve as a strong baseline for point cloud registration on ScanNet, as shown in Fig 3 and Table 2. This is suprising since random visual features perform onpar with FCGF. This explains why our method is capable of achieving this performance without any supervision. We also find that after training, our visual features achieve the highest registration performance. Those results point that visual features are better descriptors for registration, but it is unclear if this a fundemntal advantage or if the performance gap can be be resolved through better architectures or training schemes for geometric feature learning.
+4.2. Correspondence Estimation
+We now examine the quality of the correspondences estimated by our method. We evaluate our approach on the 3D Match geometric registration benchmark and follow the evaluation protocol proposed by Deng et al. [15] of evaluating the correspondence recall. Intuitively, feature-match recall measures the percentage of point cloud pairs that would be registered accurately using a RANSAC estimator by guaranteeing a minimum percentage of inliers.
+Baselines. We compare our approach against three sets of baselines. The first set are hand-crafted features based on the local geometry around each point [44, 45, 48]. The second set are supervised approaches that use known pose to sample ground-truth correspondences and apply a metric learning loss to learn features for geometric registration. Finally, the third set are unsupervised approaches trained on reconstructed scenes. While those approaches do not directly use ground-truth pose during training, their training data (reconstructed scenes) is generated by aligning 50
+
+SHOT [45] USC [48] FPFH [44] FPFH [44] (corr)
+
+Training Data
+
+FMR
+
+Dataset Data Format Recall St. Dev.
+
+-
+
+-
+
+0.238 0.109
+
+-
+
+-
+
+0.400 0.125
+
+-
+
+-
+
+0.481 0.150
+
+-
+
+-
+
+0.462 0.198
+
+3D Match [58] PPFNet [15] PerfectMatch [22] FCGF [12] FCGF [12] (corr)
+
+3D Match Depth + Pose 0.596 3D Match Depth + Pose 0.623 3D Match Depth + Pose 0.947 3D Match Depth + Pose 0.952 3D Match Depth + Pose 0.932
+
+0.088 0.108 0.027 0.066 0.104
+
+CGF [40]
+
+SceneNN
+
+PPF-FoldNet [14] 3D Match
+
+3D PointCapsNet [62] 3D Match
+
+Scenes Scenes Scenes
+
+0.582 0.142 0.718 0.105 0.787 0.062
+
+BYOC w/ no filtering BYOC BYOC-Geo BYOC BYOC-Rot
+
+ScanNet 3D Match ScanNet ScanNet ScanNet
+
+RGB-D RGB-D Depth RGB-D RGB-D
+
+0.662 0.690 0.786 0.766 0.827
+
+0.225 0.172 0.195 0.181 0.150
+
+Table 3. Feature-Match Recall on 3D Match. Our approach achieves better recall than hand-crafted and scene-supervised approaches while being competitive with supervised approaches.
+
+depth maps into a single point cloud. Hence, while those approaches do not use pose supervision explicity, pose information is needed to generate their data. We refer to those approaches as scene-supervised.
+Evaluation Metrics. Given a set of correspondences C, F M (C) evaluates whether the percentage of inliers exceeds 2, where an inlier correspondence is defined as having a residual error less than 1 given the ground-truth transformation T. Feature-match recall is the percentage of point cloud pairs that have a successful feature matching.
+
+1 F M (C) =
+|C|
+
+1 ||xp-Txq|| < 1 > 2 (8)
+
+(p,q)C
+
+Similar to [12, 14, 15], we calculate feature-match recall over all view pairs using 1 = 10 cm and 2 = 5%. Prior approaches often generate feature sets without any specified means of filtering them. As a result, they define the correspondence set as the set of all nearest neighbors. Unlike prior work, our approach outputs a small set of correspondences after ranking them using Lowe's ratio test.
+Results. We find that our approach achieves a high feature-match recall, outperforming traditional approaches and scene-supervised approaches, while being competitive with supervised approaches. It is worth emphasizing that we achieve this performance while training on the raw RGB-D or depth scans without requiring any additional annotation or post-processing of the data. We achieve the best performance by training on ScanNet with rotation augmentations. Rotation augmentation gives us a small boost, de-
+
+Figure 4. BYOC's geometric features allow for accurate registration by mapping corresponding points to similar feature vectors. Our approach learns informative geometric features of the scene. We visualize our features by mapping them to colors using t-SNE [51]. We find that the learned features appear to delineate objects such as chairs and floor edges. This results in the accurate registrations shown in the last column. Our approach takes uncolored point clouds as input; images and color point cloud are presented to aid visualization.
+
+spite resulting in lower registration performance on ScanNet. This can be explained by the differing data distribution between the two dataset: 3D Match benchmark has larger transformations than those observed between video frames. Hence, data augmentation becomes very useful.
+We also observe the interesting pattern that the model trained on only geometric correspondence generalizes better to 3D Match despite doing worse on ScanNet. One explanation for this discrepency is that bootstrapping with visual correspondences biases the model towards representing features that are meaningful in both modalities. Such representations might be more dataset specific, hindering acrossdataset generalization. This finding also opens up the possibility of scaling datasets that only include depth video; e.g., lidar datasets.
+While our best configuration outperforms all the scenesupervised approaches, we achieve performance that is competitve with the scene-supervised approaches when we evaluate all our features (no filtering). We observe that when we attempt to filter the correspondences for FPFH or FCGF, their performance deteriorates. This is consistent with some of the reported results by [14] where using a larger number of features improved their performance. Hence, it is unclear how correspondence filtering would affect their performance. Due to the lack of an official implementation of PPF-FoldNet and the complexity of their approach, we were unable to run additional experiments to better understand the impact of the training data and correspondence filtering on the learning process. This affects
+
+both PPF-FoldNet and 3D Point Capsule Networks since the latter approach replaces the encoder in PPF-FoldNet.
+5. Conclusion
+We propose BYOC: a self-supervised approach to point cloud registration. Our key insight is that randomly initialized CNNs provide us with features that are good enough to bootstrap visual and geometric feature learning through point cloud registration. Our approach takes advantage of pseudo-correspondence labels that are obtained from a visual encoder to apply feature similarity loss to both the geometric and visual encoders. At test time, we only use the geometric encoder to register point clouds without relying on color or image information.
+Our approach is both simple and fast: we rely on a fast sparse 3D convolutional encoder to extract features, use a ratio test to estimate correspondence, and align the features using SVD. This deviates from current state-ofthe-art approaches that use expensive prepossessing techniques [14, 15, 62], learn separate networks for correspondence estimation [10, 21, 40], and use RANSAC as the transformation estimation. Furthermore, we only depth or RGB-D videos to train our model. This allows us to train on any dataset of such format, not only ones that can be accurately registered by traditional SfM pipelines.
+Acknowledgments We would like to thank Richard Higgins and Karan Desai for many helpful discussions and feedback on early drafts of this work.
+
+References
+[1] Yasuhiro Aoki, Hunter Goforth, Rangaprasad Arun Srivatsan, and Simon Lucey. Pointnetlk: Robust & efficient point cloud registration using pointnet. In CVPR, 2019. 2
+[2] KS Arun, TS Huang, and SD Blostein. Least square fitting of two 3-d point sets. In TPAMI, 1987. 2
+[3] Xuyang Bai, Zixin Luo, Lei Zhou, Hongbo Fu, Long Quan, and Chiew-Lan Tai. D3feat: Joint learning of dense detection and description of 3d local features. In CVPR, 2020. 1, 2, 5
+[4] Paul J Besl and Neil D McKay. Method for registration of 3-d shapes. In Sensor fusion IV: control paradigms and data structures. International Society for Optics and Photonics, 1992. 2
+[5] Eric Brachmann, Alexander Krull, Sebastian Nowozin, Jamie Shotton, Frank Michel, Stefan Gumhold, and Carsten Rother. DSAC: Differentiable RANSAC for Camera Localization. In CVPR, 2017. 2
+[6] Eric Brachmann and Carsten Rother. Neural-guided ransac: Learning where to sample model hypotheses. In ICCV, 2019. 2
+[7] Mathilde Caron, Piotr Bojanowski, Armand Joulin, and Matthijs Douze. Deep clustering for unsupervised learning of visual features. In ECCV, pages 132­149, 2018. 2
+[8] Xinlei Chen and Kaiming He. Exploring simple siamese representation learning. arXiv preprint arXiv:2011.10566, 2020. 2, 3, 5
+[9] Yang Chen and Ge´rard Medioni. Object modelling by registration of multiple range images. Image and vision computing, 1992. 2
+[10] Christopher Choy, Wei Dong, and Vladlen Koltun. Deep global registration. In CVPR, 2020. 2, 3, 4, 6, 8
+[11] Christopher Choy, JunYoung Gwak, and Silvio Savarese. 4D Spatio-Temporal ConvNets: Minkowski Convolutional Neural Networks. In CVPR, 2019. 3, 5
+[12] Christopher Choy, Jaesik Park, and Vladlen Koltun. Fully convolutional geometric features. In ICCV, 2019. 1, 2, 3, 5, 6, 7
+[13] Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet: Richly-annotated 3d reconstructions of indoor scenes. In CVPR, 2017. 2, 5
+[14] Haowen Deng, Tolga Birdal, and Slobodan Ilic. PPFFoldNet: Unsupervised learning of rotation invariant 3D local descriptors. In ECCV, 2018. 2, 7, 8
+[15] Haowen Deng, Tolga Birdal, and Slobodan Ilic. Ppfnet: Global context aware local features for robust 3d point matching. In CVPR, June 2018. 2, 7, 8
+[16] Haowen Deng, Tolga Birdal, and Slobodan Ilic. 3d local features for direct pairwise registration. In CVPR, 2019. 2
+[17] Karan Desai and Justin Johnson. Virtex: Learning visual representations from textual annotations. arXiv, 2020. 2
+[18] Carl Doersch, Abhinav Gupta, and Alexei A Efros. Unsupervised visual representation learning by context prediction. In ICCV, 2015. 2
+[19] Mohamed El Banani, Luya Gao, and Justin Johnson. Unsupervisedr&r: Unsupervised point cloud registration via differentiable rendering. In CVPR, 2021. 2, 4
+[20] Spyros Gidaris, Praveer Singh, and Nikos Komodakis. Unsupervised representation learning by predicting image rota-
+
+tions. In ICLR, 2018. 2 [21] Zan Gojcic, Caifa Zhou, Jan D. Wegner, Leonidas J. Guibas,
+and Tolga Birdal. Learning multiview 3d point cloud registration. In CVPR, 2020. 2, 3, 4, 6, 8 [22] Zan Gojcic, Caifa Zhou, Jan D Wegner, and Andreas Wieser. The perfect match: 3d point cloud matching with smoothed densities. In CVPR, 2019. 2, 5, 6, 7 [23] John C Gower. Generalized procrustes analysis. Psychometrika, 40(1):33­51, 1975. 4 [24] Priya Goyal, Dhruv Mahajan, Abhinav Gupta, and Ishan Misra. Scaling and benchmarking self-supervised visual representation learning. In ICCV, 2019. 2 [25] Benjamin Graham, Martin Engelcke, and Laurens van der Maaten. 3d semantic segmentation with submanifold sparse convolutional networks. In CVPR, 2018. 3 [26] Jean-Bastien Grill, Florian Strub, Florent Altche´, Corentin Tallec, Pierre Richemond, Elena Buchatskaya, Carl Doersch, Bernardo Avila Pires, Zhaohan Guo, Mohammad Gheshlaghi Azar, Bilal Piot, koray kavukcuoglu, Remi Munos, and Michal Valko. Bootstrap your own latent: A new approach to self-supervised Learning. In NeurIPS, 2020. 2 [27] Amir Hertz, Rana Hanocka, Raja Giryes, and Daniel CohenOr. Pointgmm: A neural gmm network for point clouds. In CVPR, 2020. 2 [28] Xiaoshui Huang, Guofeng Mei, and Jian Zhang. Featuremetric registration: A fast semi-supervised approach for robust point cloud registration without correspondences. In CVPR, 2020. 2 [29] Andrew E Johnson. Spin-images: a representation for 3-D surface matching. PhD thesis, Cargnegie Mellon University, 1997. 2 [30] Andrew E. Johnson and Martial Hebert. Using spin images for efficient object recognition in cluttered 3d scenes. TPAMI, 1999. 2 [31] Wolfgang Kabsch. A solution for the best rotation to relate two sets of vectors. Acta Crystallographica Section A: Crystal Physics, Diffraction, Theoretical and General Crystallography, 32(5):922­923, 1976. 4 [32] Marc Khoury, Qian-Yi Zhou, and Vladlen Koltun. Learning compact geometric features. In ICCV, 2017. 1, 2, 5 [33] Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In ICLR, 2015. 5 [34] Dong-Hyun Lee et al. Pseudo-label: The simple and efficient semi-supervised learning method for deep neural networks. In ICML - W, 2013. 2 [35] Lei Li, Siyu Zhu, Hongbo Fu, Ping Tan, and Chiew-Lan Tai. End-to-end learning local multi-view descriptors for 3d point clouds. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2020. 1, 2, 5 [36] Hugh Christopher Longuet-Higgins. A computer algorithm for reconstructing a scene from two projections. Nature, 1981. 2 [37] David G Lowe. Distinctive image features from scaleinvariant keypoints. IJCV, 2004. 4 [38] Hans P. Moravec. Rover visual obstacle avoidance. In IJCAI, 1981. 2 [39] Franc¸ois Pomerleau, Francis Colas, and Roland Siegwart. A review of point cloud registration algorithms for mobile robotics. Foundations and Trends in Robotics, 4(1):1­104, 2015. 2
+
+[40] Rene Ranftl and Vladlen Koltun. Deep fundamental matrix estimation. In ECCV, 2018. 2, 4, 7, 8
+[41] Nikhila Ravi, Jeremy Reizenstein, David Novotny, Taylor Gordon, Wan-Yen Lo, Justin Johnson, and Georgia Gkioxari. Accelerating 3d deep learning with pytorch3d. arXiv, 2020. 5
+[42] Amir Rosenfeld and John K Tsotsos. Intriguing properties of randomly weighted networks: Generalizing while learning next to nothing. In 2019 16th Conference on Computer and Robot Vision (CRV), pages 9­16. IEEE, 2019. 2
+[43] Szymon Rusinkiewicz and Marc Levoy. Efficient variants of the icp algorithm. In Proceedings third international conference on 3-D digital imaging and modeling, pages 145­152. IEEE, 2001. 6
+[44] Radu Bogdan Rusu, Nico Blodow, and Michael Beetz. Fast point feature histograms (fpfh) for 3d registration. In ICRA, 2009. 2, 6, 7
+[45] Samuele Salti, Federico Tombari, and Luigi Di Stefano. Shot: Unique signatures of histograms for surface and texture description. Computer Vision and Image Understanding, 2014. 2, 7
+[46] Johannes L Schonberger and Jan-Michael Frahm. Structurefrom-motion revisited. In CVPR, 2016. 1
+[47] Yonglong Tian, Dilip Krishnan, and Phillip Isola. Contrastive multiview coding. arXiv, 2019. 2
+[48] Federico Tombari, Samuele Salti, and Luigi Di Stefano. Unique shape context for 3d data description. In Proceedings of the ACM Workshop on 3D Object Retrieval, 3DOR '10. Association for Computing Machinery, 2010. 2, 7
+[49] Philip HS Torr and David William Murray. The development and comparison of robust methods for estimating the fundamental matrix. IJCV, 1997. 2
+[50] Dmitry Ulyanov, Andrea Vedaldi, and Victor Lempitsky. Deep image prior. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 9446­9454, 2018. 2
+[51] Laurens Van der Maaten and Geoffrey Hinton. Visualizing data using t-SNE. Journal of machine learning research, 9(11), 2008. 8
+[52] Yue Wang and Justin Solomon. Prnet: Self-supervised learning for partial-to-partial registration. NeurIPS, 2019. 2
+[53] Yue Wang and Justin M Solomon. Deep closest point: Learning representations for point cloud registration. In ICCV, 2019. 2
+[54] Saining Xie, Jiatao Gu, Demi Guo, Charles R. Qi, Leonidas Guibas, and Or Litany. Pointcontrast: Unsupervised pretraining for 3d point cloud understanding. In ECCV, 2020. 1, 2, 3, 5
+[55] Zi Jian Yew and Gim Hee Lee. 3dfeat-net: Weakly supervised local 3d features for point cloud registration. In ECCV, 2018. 1, 2, 5
+[56] Zi Jian Yew and Gim Hee Lee. Rpm-net: Robust point matching using learned features. In CVPR, 2020. 2
+[57] Wentao Yuan, Benjamin Eckart, Kihwan Kim, Varun Jampani, Dieter Fox, and Jan Kautz. Deepgmr: Learning latent gaussian mixture models for registration. In ECCV, 2020. 2
+[58] Andy Zeng, Shuran Song, Matthias Nießner, Matthew Fisher, Jianxiong Xiao, and Thomas Funkhouser. 3DMatch: Learning local geometric descriptors from RGB-D reconstructions. In CVPR, 2017. 2, 5, 7
+
+[59] Zhengyou Zhang. Iterative point matching for registration of free-form curves and surfaces. IJCV, 1994. 2
+[60] Zhengyou Zhang, Rachid Deriche, Olivier Faugeras, and Quang-Tuan Luong. A robust technique for matching two uncalibrated images through the recovery of the unknown epipolar geometry. Artificial intelligence, 1995. 2
+[61] Zaiwei Zhang, Rohit Girdhar, Armand Joulin, and Ishan Misra. Self-supervised pretraining of 3d features on any point-cloud. In arXiv preprint arXiv:2101.02691, 2021. 2, 3, 5
+[62] Yongheng Zhao, Tolga Birdal, Haowen Deng, and Federico Tombari. 3D Point Capsule Networks. In CVPR, 2019. 2, 7, 8
+[63] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3D: A modern library for 3D data processing. arXiv, 2018. 5
+
+

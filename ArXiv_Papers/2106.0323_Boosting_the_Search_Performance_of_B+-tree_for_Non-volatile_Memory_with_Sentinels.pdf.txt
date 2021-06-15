@@ -1,0 +1,794 @@
+Boosting the Search Performance of B+-tree for Non-volatile Memory with Sentinels
+
+Chongnan Ye School of Information Science and Technology
+ShanghaiTech University yechn@shanghaitech.edu.cn
+
+Chundong Wang* School of Information Science and Technology
+ShanghaiTech University wangchd@shanghaitech.edu.cn
+
+arXiv:2106.00323v1 [cs.DS] 1 Jun 2021
+
+Abstract--The next-generation non-volatile memory (NVM) is striding into computer systems as a new tier as it incorporates both DRAM's byte-addressability and disk's persistency. Researchers and practitioners have considered building persistent memory by placing NVM on the memory bus for CPU to directly load and store data. As a result, cache-friendly data structures have been developed for NVM. One of them is the prevalent B+-tree. State-of-the-art in-NVM B+-trees mainly focus on the optimization of write operations (insertion and deletion). However, search is of vital importance for B+-tree. Not only search-intensive workloads benefit from an optimized search, but insertion and deletion also rely on a preceding search operation to proceed. In this paper, we attentively study a sorted B+-tree node that spans over contiguous cache lines. Such cache lines exhibit a monotonically increasing trend and searching a target key across them can be accelerated by estimating a range the key falls into. To do so, we construct a probing Sentinel Array in which a sentinel stands for each cache line of B+-tree node. Checking the Sentinel Array avoids scanning unnecessary cache lines and hence significantly reduces cache misses for a search. A quantitative evaluation shows that using Sentinel Arrays boosts the search performance of state-of-the-art in-NVM B+-trees by up to 48.4% while the cost of maintaining of Sentinel Array is low.
+Index Terms--Non-volatile memory, B+-tree, Key-value Database, Cache
+I. INTRODUCTION
+A conventional computer employs DRAM as main memory and hard disk as storage. The disk provides persistency but demands a long time to load and store data [1]. DRAM is volatile and cannot reach large capacity because of its density limitation [2]­[4]. Recently, the next-generation non-volatile memory (NVM), such as phase-change memory (PCM) [5], spin-transfer torque memory (STT-RAM) [6], and resistive RAM (RRAM) [7], emerges as a promising medium that combines both DRAM's byte-addressability and disk's persistency. Hence, researchers and practitioners have proposed to place NVM on the memory bus to build persistent memory, which acts as a new tier of computer architecture and blurs the boundary between DRAM and disk.
+Multiple classic data structures have been tuned for NVM. Among them B+-tree is one that has been widely used for databases and file systems since the era of disks [8]. B+tree is a multi-level structure composed of internal and leaf
+*Corresponding Author
+
+nodes. Internal nodes (INs) are used to index lower-level INs and LNs while leaf nodes (LNs) hold actual key-value (KV) pairs. INs and LNs have the same structure but the pointers of INs point to the address of LNs while the pointers of LNs point to the value data that stored in the B+-tree. And INs have one more pointer than LNs which indicates the leftmost LN of the internal nodes. Keys are sorted in both INs and LNs. When tuning B+-tree for NVM, researchers need to consider the fact that CPU or memory controller may reorder writes from CPU cache to NVM [9]­[11]. One way to retain a writing order is to employ a combination of cache line flush and memory fence [12], which, however, incurs significant performance overheads. With further and further understanding of B+-tree's properties, state-of-the-art B+-trees designed for NVM have evolved from being with sorted nodes (e.g., CDDS-Tree [13]) to unsorted nodes (e.g., NV-Tree, wB+-tree, and FPTree [14]), and again sorted nodes (e.g., FAST-FAIR and Circ-Tree). When developing such B+tree variants, researchers mainly placed their emphasis on reducing the use of cache line flush and memory fence in order to achieve a high write performance for insertion and deletion.
+Nevertheless, the search operation with a target key for the key's corresponding value is of paramount importance for B+tree. Search is not only an independent operation, but insertion and deletion also rely on a preceding search to proceed. As the latest FAST-FAIR and Circ-Tree are with sorted nodes, we focus on optimizing the search operation over sorted KV pairs stored in NVM. It is revealed that linear search is more efficient than binary search over sorted keys although the latter has a theoretically lower time complexity. The reason is that binary search incurs more cache misses while linear search facilitates CPU's branch prediction and prefetch. Our aim of this paper is to further reduce cache misses in searching. We find that no matter if we use binary search or linear search, we must access and check keys that are not the target one. Although accessing those keys leads us to continue the search, it is the cause of cache misses. This is the observation of read amplification in searching a B+-tree node. We intend to reduce as much read amplification as possible. In other words, we want to timely find the exact cache line in which the target key resides. It is impossible except using some auxiliary information. Previously, Oukid et al. [14] proposed
+
+to use 1B hash values as fingerprints for keys. A key and its fingerprint have the same offset. Searching a key transforms to finding the key's fingerprint that indicates the location of the key. However, due to the collisions of 1B fingerprints and the calculation cost, fingerprinting is not efficient in practice.
+We closely study a sorted B+-tree node. We find that each cache line has a range of keys and all cache lines exhibit a monotonically increasing trend. We can choose a sentinel key in a uniform fashion, e.g., the smallest or the largest key, from each cache line to reflect such a trend. When searching a target key, instead of scanning cache lines, we go through the Sentinel Array to determine which cache line the target key stays in. As a result, searching a target key converts to searching the Sentinel Array and one actual cache line of KV pairs. The Sentinel Array contains representatives of cache lines of a B+-tree node and it thus occupies much fewer cache lines. Also, a linear scan of it facilitates CPU's prefetch and branch prediction. Consequently, employing the Sentinel Array significantly reduces read amplification.
+We have augmented FAST-FAIR and Circ-Tree with the idea of Sentinel Array. Experimental results show that compared to the use of Sentinel Array boosts the search performance by up to 42.6% and 48.4%, respectively, for FAST-FAIR and Circ-Tree. Moreover, using Sentinel Arrays is up to 60.1% faster than using the idea of fingerprints. Maintaining Sentinel Arrays, however, incurs at most 4.1% and 6.5% more time for insertions with FAST-FAIR and Circ-Tree, respectively.
+The rest of this paper is organized as follows. The background and motivation are discussed in Section 2. Section 3 shows the detailed design and implementation of Sentinel Array. The evaluation and results are presented in Section 4. In the last, we conclude this paper and look forward to future work.
+II. BACKGROUND AND MOTIVATION
+A. Background
+Byte-addressable non-volatile memory (NVM), such as Phase Change Memory (PCM), Spin-Transfer Torque RAM (STT-RAM), and Resistive RAM (RRAM), has an increasingly important demand in high-performance computing and big data analysis [12], [15]. It combines the durability of hard disk and the comparable access performance of DRAM.
+Data consistency between the volatile device and the nonvolatile device is always one of the most crucial features of storage systems. In the traditional storage architecture, where DRAM acts as the main memory, the system needs to ensure the data consistency from DRAM to the hard disk to prevent the data from being lost if system failure happens [16]. As to NVM, the effort becomes to keep data consistency between CPU and NVM. However, modern CPUs mainly support an atomic write of no more than the memory bus width (8 bytes for 64-bit CPUs) when NVM is put on the memory bus [10], [17], [18]. Moreover, compared to the known persistent status of each page in DRAM, the status of data in cache-lines is unknown and the CPU or the memory controller may write the cache-lines back to the main memory in a different order from
+
+the programmed order. Make memory writes are in a certain order is critical to the crash consistency of pointer-based data structures. For example, a new B+-tree from a split operation must be written completely before the pointer to it is added to its parental node. The pointer may turn to be dangling if the order is reversed but the crash occurs [9] and it's necessary to maintain the writing order.
+Some CPU instructions, such as cache line flush and memory fence, are provided to maintain the written order from cache to memory. cache line flush explicitly invalidates a dirty cache-line and flush it to memory. memory fence makes a barrier that holds back the memory operations after the barrier until those before the barrier complete. However, these instructions incur performance overheads [9], [10], [19]. Therefore, it is necessary to reduce the use of cache line flush and memory fence.
+
+B. Related Work
+
+Researchers have proposed a number of mechanisms to
+
+provide data consistency and optimize the performance of B+-
+
+Average Latency(us)
+
+trees that
+
+Cd0PevU.e5loopnelyd
+
+for NVM. FAST-FAIR [10] uses two features ensures 8-bytes atomic write and duplicate
+
+pointer0s .a4re impossible in B+-tree node. It exploits the store
+dependencies in shifting a sequence of KV pairs in a node on
+insertio0n./3deletion. (e.g. KVi - KVi+1), which reduces the
+
+cosFtAoSf0Tc-.aF2cAhIeRlinsetilfll ufsohleloswasndthmeemcloarsysicfenBc+e.-tree node in a
+
+linear 0st.r1ucture. Circle-Tree [11] was proposed to reduce
+write amplification caused by shifting KV pairs in the linear
+structure.0The circular structure supports bidirectional shifting.
+
+KV pair is which side
+
+irnesqeurti5ered1s/d2feeBlweteerdsa1hti0ftth2ien4gleBoftpoerra2rti0igoh4nts8.sBide
+
+by40de9c6idBing
+
+Most B+-trees developed NfoordeNVSiMze optimize inser-
+tion/deletion performance. Although FP-Tree [14] use a tech-
+
+nique into a
+
+nbaymteeodffifinnggeFerArpprSriinTntti-nF(ghA,aswIhRhvicahlume)a, ptso
+
+tFohpAetiSkmeTiyz-eFoAtfhKeIRVse_apFracihr
+
+performance by chFeAckSinTg-tFhAe aIRrra_ySof fingeCrpirricntlein-sTteraedeof the
+original data container. The efficacy of fingerprinting is low
+due to hash calculCatiirocnlsea-nTdrtehee_coFllisionsCoifrc1Bleh-aTsrheveal_uSes.
+
+C. Motivation
+
+Average Latency(us)
+
+0.4 0.3 0.2 0.1
+0 512B
+
+1024B
+
+2048B
+
+Node Size
+
+B+Tree_Linear B+Tree_Binary
+
+4096B
+
+Fig. 1. B+-tree with different search way comparison
+
+With further and further understanding of B+-tree's properties, researchers have switched from sorted nodes to unsorted
+
+Array in B+Tree Node:
+10 20 30 40 50 60 70 80 90 100 110 120 130 &a &b &c &d &e &f &g &h &i &j &k &l &m
+Sentinel Array: probing array holding the smallest key for each cache line.
+10 50 90 130
+Fig. 2. Sentinel Array example
+nodes, and again to sorted nodes now. More importantly, the researcher found that a large CPU cache of modern processor makes linear search outperform binary search in a sorted B+tree node because of the former's good cache line locality [20]. Fig. 1 verifies that the latency of binary search is greater than that of linear search with small node size (512B/1KB/2KB) when we searched 1 million KV pairs in a sorted B+-tree node.
+As the search is so important that used not only in independent operation, but also in insertion and deletion, optimize the search performance is a key point to boost the throughput. Accessing the key and check if that is the target one is the cause of cache misses. This is the observation of read amplification in searching a sorted B+-tree node. Our goal focus on reducing cache misses in searching. Fig. 2 shows a sorted B+-tree node with a Sentinel Array which has the smallest key from each cache line. When searching a target key 130, instead of scanning 4 cache lines, we go through the Sentinel Array to determine the 4th cache is the target key stays in. As a result, searching key 130 converts to searching the Sentinel Array and one actual cache line of KV pairs.
+III. DESIGN AND IMPLEMENTATION OF SENTINEL ARRAY
+Sentinel Array is an auxiliary structure that contains sentinels, which indicate the minimum key of each cache line of the origin array. The Sentinel Array size is decided by the machine and the original array size. Given a typical cache line size of 64 bytes and a sentinel (minimum key) in 8B, one cache line contains eight sentinels, which are respectively from eight cache lines of KV pairs. Therefore, a Sentinel Array in one cache line is able to support a B+-tree node in 512B (64×8). For a B+-tree node in 2KB with 32 cache lines, a Sentinel Array with four cache lines suffices. In the worst case for searching over such a 2KB node, all four cache lines of Sentinel Array and one cache line of KV pair are scanned. So in all, there are five cache misses. However, in the worst case of searching the original 2KB node incurs 32 cache misses. Concretely, employing a Sentinel Array significantly reduces cache misses.
+We note that Sentinel Array is not enforced consistency with cache line flush and memory fence. Then reason is that Sentinel Array could be reconstructed from keys in the original B+-tree node if the system crashes down. State-of-the-art B+trees developed for NVM embrace comprehensive mechanisms to guarantee the consistency of KV pairs.
+
+Find key=140 in a B+-tree node:
+10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 &a &b &c &d &e &f &g &h &i &j &k &l &m &n &o &p
+
+Without the Sentinel Array:
+
+10 20 30 40 &a &b &c &d
+
+50 60 &e &f
+
+70 80 &g &h
+
+90 100 110 120 &i &j &k &l
+
+130 140 150 160 &m &n &o &p
+
+4 cache misses
+
+With the Sentinel Array:
+10 50 90 130
+130 140 150 160 &m &n &o &p
+2 cache misses
+
+Fig. 3. An illustration of searching 140 in a B+-tree node
+
+A. Search of Sentinel Array
+Fig. 3 exemplifies the process of searching with Sentinel Array. The target key is 140. We assume that four KV pairs occupy one cache line for 16B KV pointer size in total and 64B cache line's size. As shown by the left part of Fig. 4, to reach 140, we need to traverse four cache lines, thereby causing four cache misses. With a Sentinel Array shown on the right part of Fig. 4, we only need to check the cache line of sentinels and the actual cache line holding key 140 and its corresponding value, i.e., two cache misses. Algorithm 1 illustrates the algorithmic steps of searching with Sentinel Array. We note that we add Sentinel Arrays to a B+-tree's leaf nodes without loss of generality.
+
+Algorithm 1 Search With Sentinel Array
+
+Input: The target key.
+
+Output: The pointer of value of target key.
+
+1: begin index = 0
+
+2:
+
+for (i = 1; i <
+
+count
+
+n in
+
+line ;
+
+i
+
++
+
++)
+
+do
+
+3: // count in line is number of KV pairs counted in
+
+one cache line
+
+4: if key < sentinel array[i] then
+
+5:
+
+break
+
+6: end if
+
+7: begin index = begin index + count in line
+
+8: end for
+
+9: Search the node's array begin with begin index
+
+B. Update of Sentinel Array
+From time to time, keys are inserted and deleted in a B+tree node. Therefore, we need to update the node's Sentinel Array, which is simply updated with the original data array. Because the Sentinel Array is reconstructable from consistent KV pairs, the update of it is efficient without using cache line flush or memory fence.
+C. Multi-threading Access
+Sentinel array is added to a B+-tree node as an auxiliary component. A node-level lock shared with the original B+-
+
+Node Size
+
+FAST-FAIR FAST-FAIR_S Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+Node Size
+
+FAST-FAIR FAST-FAIR_S Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+10m
+
+Average Latency(us)
+
+Average Latency(us)
+
+1m
+
+2.5
+
+6
+
+3
+
+8
+
+cy(us) Average Latency(us)Average Latency(us)
+
+Average Latency(us)
+
+2
+
+1.5
+
+1040m
+
+2
+
+1
+
+2
+
+1
+
+0.5
+
+100m
+
+6 4 2concurrent
+
+Average Latency(us)
+
+0 512B 1024B 2048B 4096B Node Size
+
+FAST-FAIR FAST-FAIR_S Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+30 512B 1024B 2048B 4096B
+
+2
+
+Node Size
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+1
+
+FAST-FAIR_S Circle-Tree
+
+0
+
+Circle-Tree_F Circle-Tree_S
+
+0 512B 1024B 2048B 4096B Node Size
+
+FAST-FAIR FAST-FAIR_S Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+0 1512B 1024B 2048B 4096B
+
+0.8
+
+Node Size
+
+0.6 0.4 FAST-FAIR 0.2 FAST-FAIR_S
+0 Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+(a) Average latency (1m data, search,(b) Ave5ra1g2eB lat1e0n2c4yB(1m20d48aBta, i4n0s9e6rtBion,(c) Average latency (10m data, search,(d) Average l1atency 2(10m d4ata, in8ser-
+
+µs)
+
+µs)3
+
+Node Size
+
+µs) 8
+
+)
+
+tion, 1µs)
+
+Number of Threads
+
+Average Latency(us)
+
+Average Latency(us) 
+
+1006m
+
+Fig. 42. A CFoAmSTp-aFrAiIsRon of SFiAxSTT-rFeAeIRs_oFn Inser6ting and Searching 1/10 Million Keys
+
+FAST-FAIR_S Circle-Tree
+
+4
+
+4
+100m
+
+Circle-Tree_F Circle-Tree_S
+
+concurrent
+2
+
+32
+
+8
+
+01
+
+4
+
+Average Latency(us)
+
+Average Latency(us)
+
+Average Latency(us)
+
+20 512B 1024B 2048B 4096B
+
+1
+
+
+
+0
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+512FBAST1-F0A2I4RB_S 204C8iBrcle4-T0r9e6eB
+
+6 4 2 0
+512B 1024B 2048B 4096B
+
+0.8 512B 1024B 2048B 4096B
+
+3
+
+0.6
+
+Node Size
+
+2
+
+0.4 FAST-FAIR 0.2 FAST-FAIR_S
+
+FAST-FAIR_F Circle-Tree
+
+1
+
+0 Circ1le-Tree_2F Cir4cle-Tree_8S
+
+0
+
+Circle-TNreoed_eF SizeCircle-Tree_S
+
+3
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+2
+FAST-FAIR_S Circle-Tree
+
+Node Size
+
+FAST-FAIR FAST-FAIR_S
+
+FAST-FAIR_F Circle-Tree
+
+)
+
+Number of Threads
+
+1
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+FAST-FAIR_S Circle-Tree
+
+FAST-FAIR FAST-FAIR_S Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+1
+
+2
+
+4
+
+8
+
+Number of Threads
+
+FAST-FAIR FAST-FAIR_S
+
+FAST-FAIR_F Circle-Tree
+
+y(us)
+
+Circle-Tree_F Circle-Tree_S
+
+Circle-Tree_F Circle-Tree_S
+
+Circle-Tree_F Circle-Tree_S
+
+Circle-Tree_F Circle-Tree_S
+
+Average Latency(us)
+
+Average Latency(us)
+
+(a) µs)
+
+A8 verage
+
+latency
+
+(100m
+
+data,
+
+search,(b) Average tion, µs)
+
+latency
+
+(100m
+
+data,
+
+inser-
+
+6
+
+Fig.45. A Comparison of Six Trees on Inserting and Searching 100 Million Keys
+2
+
+(µas))4Average
+
+latency
+
+(1m
+
+data,
+
+search,(b) Average latency (1m data, insertion, µs)
+
+3
+
+2 Fig. 6. A Comparison of Six Trees with Multi-Threading
+
+1
+
+0
+
+tree no5d1e2Bhel1p0s24tBo s2u04p8pBor4t09m6Bulti-threading write/read with the Sentinel Array.Node Size
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+FAST-FAIR_S CiIrcVle.-TrEeeVALUATION
+
+In thisCisreclce-tTiroene_,FweCiirmclep-Tlreeme_eS nt and evaluate our Sentinel Ar-
+
+ray based on FAST-FAIR and Circle-Tree in terms of insertion
+
+and search performance. We use a synthetic benchmark YCSB
+
+[21] to evaluate the performance between original FAST-
+
+FAIR/Circle-Tree and ones with Sentinel Array.
+
+A. Evaluation Setup
+All of our experiments are conducted on Linux Server (Kernel version 3.10) with an Intel ® Xeon ® E5-2620v4 2.10GHz CPU with 512KB/2MB/20MB L1/L2/L3 cache, 8GB DRAM. We use DRAM to emulate the NVM space. We keep the read latency of NVM as the same as DRAM, and emulate the write latency by adding an extra delay after each clflushshopt instruction. We set the default write latency of NVM as 300ns. [9], [11], [15]
+Fig. 4 and Fig. 5 show the insertion and search performance of multi-version B+-tree variants. FAST-FAIR has open-source code and Circle-Tree is implemented with respect to its original literature. Given the large gap between the performance of the search function mentioned in the Circle-Tree and the linear search in FAST-FAIR. The Circle-Tree's search function was implemented as a linear search starting from the logical
+
+bas0e loc1ation 2of a n4ode to8 the last valid KV pair. Moreover, the name thNautmhbearsoftThherea`Sds' suffix is the Sentinel Array. The one that has FtAhSeT-F`AFI'R suffiFxAScTo-FnAtIRa_iFns a fingerprint array proposed in the FP-TFrAeSeT.-FAAIRll_SimpCliercmle-eTnreteations have been compiled with -O option. Circle-Tree_F Circle-Tree_S
+Fig. 4 and Fig. 5 show average latencies by running 1/10/100 million insertion and search operations. A shorter average latency means higher performance. We have chosen the geometric mean to calculate the average latency.
+From Fig. 4(a), a B+-tree with Sentinel Array outperforms the one without Sentinel Array with much shorter search latencies. For example, using the idea of Sentinel Array helps to reduce the average search latency of Circle-Tree and FASTFAIR by 48.4% and 42.6%, respectively, with 4KB node size. However, as also shown in Fig. 4(a), the effect of using fingerprints is limited. For example, the search latency of Circle-Tree with 4KB node size is shortened by 3.1%.
+Although the Sentinel Array influences the insertion performance because of its update needs, still with 4KB node, the average insertion latencies of Circle-Tree and FAST-FAIR with the Sentinel Array are increased by 6.5% and 4.0% that of the same structure without the Sentinel Array in Fig. 4(b).
+Another observation illustrated in Fig. 4 is that the search performance of the B+-tree with the Sentinel Array gets better with larger node size. Search latency of B+-tree with Sentinel Array is larger than the ones without Sentinel Array with 512B
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+FAST-FAIR_S Circle-Tree
+
+Circle-Tree_F Circle-Tree_S
+
+YCSB
+
+YCSB concurrent
+
+AvAevreargaegeLaLtaetencnyc(yu(su)s)
+
+Average LatAevenrcay(guesL)atency(us)
+
+Average Latency(us)
+
+4
+
+0.4
+
+41.5
+
+3
+
+YCSB co0nc.u3rrent
+
+31
+
+2 1
+
+04.2 03.1
+
+20.5 1
+
+0 512B 1024B 2048B 4096B Node Size
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+FAST-FAIR_S Circle-Tree
+
+Circle-Tree_F Circle-Tree_S
+
+(a) 99th percentile latency (insertion, µs)
+
+20 512B 1024B 2048B 4096B
+
+1
+
+Node Size
+
+0
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+1FASTN-uFmAI2bRe_rSof ThC4reiracdles-Tre8e
+
+Circle-Tree_F Circle-Tree_S
+
+(b) 99thFApeSrTc-eFnAtilIeRlatency (FsAeaSrTc-hF,AµIsR)_F
+
+00
+
+11
+
+22
+
+44
+
+88
+
+NNuummbbeerroof fTThhrereaaddss
+
+FFAASSTT--FFAAIIRR
+
+FFAASSTT--FFAAIIRR__FF
+
+FFAASSTT--FFAAIIRR__SS CCiirrccllee--TTrreeee
+
+CCiirrccllee--TTrreeee__FF CCiirrccllee--TTrreeee__SS
+
+(c) 99th percentile latency (update, µs)
+
+AvAevreargaegeLaLtAaetvnercnayc(gyu(esu)Lsa)tency(us) Average Latency(us)
+
+Average Latency(us)
+
+Average LaAtveenrcayg(eusL)atency(us)
+
+0.4
+
+FAST-FAIR_S Circle-Tree
+
+0.5
+
+Fig. 7. A Comparison of six KV Stores (4KB Node) on SessionStore Workload of YCSB
+
+YCSB co0nc.u3rrent
+
+Circle-Tree_F Circle-Tree_S 0.4
+
+YCSB concurrent
+
+40.2
+
+0.5
+
+0.3 401..25 1.5
+
+30.1
+
+0.4
+
+20
+
+0.3
+
+512B 1024B 2048B 4096B
+
+0.2
+
+1
+
+Node Size
+
+0.1
+
+30.11 1
+
+20.05 0.51
+
+2
+
+4
+
+8
+
+1
+
+Number of Threads
+
+0 1FAST-FA2IR
+
+4FAST-FAIR8_F
+
+FASNT-uFmAIbRe_rSof ThCreiracdles-Tree
+
+Circle-Tree_F Circle-Tree_S
+
+FAST-FAIR
+
+FAST-FAIR_F
+
+FAST-FAIR_S Circle-Tree
+
+Circle-Tree_F Circle-Tree_S
+
+0
+
+1
+
+2
+
+4
+
+8
+
+Number of Threads
+
+FAST-FAIR FAST-FAIR_S Circle-Tree_F
+
+FAST-FAIR_F Circle-Tree Circle-Tree_S
+
+00
+
+0 1FFC1AAirSScNTTleN--u-FFTumAArmII2ebRRe2be__erSFroof fTTh4FCChr4AeiirrreaSccadTlleeds---FsTTArrIeeR88ee__FS
+
+FFAASSTT--FFAAIIRR
+
+FFAASSTT--FFAAIIRR__FF
+
+FFAASSTT--FFAAIIRR__SS CCiirrccllee--TTrreeee
+
+CCiirrccllee--TTrreeee__FF CCiirrccllee--TTrreeee__SS
+
+(a) 99th percentile latency (insertion, µs)
+
+(b) 99th percentile latency (search, µs)
+
+(c) 99th percentile latency (update, µs)
+
+Average Latency(us)
+
+Average Latency(us)
+
+Average Latency(us)
+
+0.5
+
+1.5
+
+0.5
+
+0.4 0.3
+
+Fig. 8. A Comparison of six KV Stores (4KB Node) with Multi-threading on SessionStore Workload of YCSB
+
+1
+
+0.4
+
+0.3
+
+node.0T.2he reason is that CPU combined with the com0.5piler has performance.
+
+0.2
+
+branc0h.1predict feature and could prefetch the data into cacheline. Th0e node with small size node could find the tar0get with
+
+C. Evaluation on YCS0B.1 0
+
+less cache mis1ses, but2the Sen4tinel Arr8ay implementation needs For end-to-end comparison, 1we buil2t an inte4rface fo8r each
+
+at least one solid Ncaucmhbeemr oisfsTthoresaedasrch Sentinel Array and more B+-tree like data structure to rNecuemivbeer aonfdThrheaanddsle access
+
+branch judgment between Array switch. So it's better to add the Sentinel FAArSrTa-yFAtoIRthe B+-FtAreSeT-lFiAkeIRd_Fata structure with large
+
+requests issued by YCSB. Because the key from a YCSB workload is a string with a preFAfiSxTa-FnAdIRa numbFeAr,STw-FeArIeRm_Foved
+
+node size. ThFeASsTa-mFAeIRre_sSults aCriercalel-sToreoebserved in Fig. 5, which the prefix and treated the numFAbSeTr-FaAs IRan_S8B kCeiryclien-Turenesigned
+
+refer to moreCirdcaleta-Tirnesee_rFtion Cainrdcles-eTarreceh_.S
+
+integer. The default load valuCeiroclfe-YTrCeSe_BF hasCtirecnlefi-Terledes_Swith
+
+B. Multi-threading Performance
+
+100 bytes per field, so the pointer of a KV pair in a leaf node points to the address of stored value.
+
+We have performed multi-threading tests with 1/2/4/8 We used the `workloada' workload with YCSB. It first
+
+threads, to evaluate the performance of the B+-tree with inserts a predefined number of KV pairs (load) and then
+
+Sentinel Array. We evaluated the tests with 4KB node size and follows a search/update ratio of 50%/50% over keys selected
+
+the data size is 1 million keys. Fig. 6(a) shows the performance in accordance with a Zipf distribution (run). YCSB reports a
+
+of each multi-threading search operation and we could observe series of latencies from which we choose the 99th percentile
+
+that FAST-FAIR and Circle-Tree with the Sentinel Array latency to rule out the impact of very short or very long
+
+outperform the one without the Sentinel Array. For example, operations. It means that 99% of overall write/read requests
+
+using sentinels reduces the average search latency by 46.1% can be completed below such a latency.
+
+and 47.6%, for FAST-FAIR and Circle-Tree with 2 threads.
+
+In our experiment, we use 1 million KV pairs to test
+
+The multi-thread insertion showed in Fig. 6(b), indicates performance with YCSB. Fig. 7(a) shows the average latencies
+
+that the Sentinel Array has insignificant influence on insertion of inserting 1 million data into each tree. The structure with
+
+the Sentinel Array still gets lower latency than the original implementation. Fig. 7(b) captures search performance and FAST-FAIR and Circle-Tree with the Sentinel Array get 16.9% and 13.0% improvement on 4KB node size. From Fig. 7(c), which represents the average latency of updating the KV pair of the loaded data, the structure with the Sentinel Array still gets a shorter latency. The reason is that update operation is like the search operation and they only need to find the KV pair's position without shifting the KV pair.
+We also tested multi-threads of the B+-tree with Sentinel Array with YCSB. As showed in Fig. 8(a), Fig. 8(b) and Fig. 8(c) the average search latencies is significantly reduced compared to ones without Sentinel Array.
+V. CONCLUSION
+Search is of primary importance for B+-tree. In this paper, we revisited the search operation of in-NVM B+-tree with sorted nodes and found that the search performance is mainly affected by read amplification and cache misses. As a result, we proposed to use a sentinel to stand for each cache line of a sorted node. Before checking the actual array of KV pairs, a search operation first goes through the probing Sentinel Array to determine which cache line the target key would reside in. As the Sentinel Array is much smaller than the actual array of KV pairs, the number of cache misses is significantly reduced. Extensive experiments confirm that using sentinels significantly boosts the search performance of state-of-the-art B+-trees developed for NVM, especially with larger nodes.
+REFERENCES
+[1] L. M. Grupp, J. D. Davis, and S. Swanson, "The bleak future of NAND flash memory," in Proceedings of the 10th USENIX Conference on File and Storage Technologies, ser. FAST'12. USA: USENIX Association, 2012, p. 2.
+[2] B. C. Lee, E. Ipek, O. Mutlu, and D. Burger, "Architecting phase change memory as a scalable dram alternative," vol. 37, no. 3. New York, NY, USA: Association for Computing Machinery, Jun. 2009, p. 2­13. [Online]. Available: https://doi.org/10.1145/1555815.1555758
+[3] M. K. Qureshi, V. Srinivasan, and J. A. Rivers, "Scalable high performance main memory system using phase-change memory technology," in Proceedings of the 36th Annual International Symposium on Computer Architecture, ser. ISCA '09. New York, NY, USA: Association for Computing Machinery, 2009, p. 24­33. [Online]. Available: https://doi.org/10.1145/1555754.1555760
+[4] P. Zhou, B. Zhao, J. Yang, and Y. Zhang, "A durable and energy efficient main memory using phase change memory technology," p. 14­23, 2009. [Online]. Available: https://doi.org/10.1145/1555754.1555759
+[5] S. Raoux, G. W. Burr, M. J. Breitwisch, C. T. Rettner, Y.-C. Chen, R. M. Shelby, M. Salinga, D. Krebs, S.-H. Chen, H.-L. Lung et al., "Phasechange random access memory: A scalable technology," IBM Journal of Research and Development, vol. 52, no. 4.5, pp. 465­479, 2008.
+[8] R. Bayer and E. M. Mccreight, "Organization and maintenance of large ordered indexes." Berlin, Heidelberg: Springer-Verlag, Sep. 1972, vol. 1, no. 3, p. 173­189. [Online]. Available: https: //doi.org/10.1007/BF00288683
+
+[6] T. Kawahara, "Scalable spin-transfer torque RAM technology for normally-off computing," IEEE Design Test of Computers, vol. 28, no. 1, pp. 52­63, 2011.
+[7] T.-C. Chang, K.-C. Chang, T.-M. Tsai, T.-J. Chu, and S. M. Sze, "Resistance random access memory," Materials Today, vol. 19, no. 5, pp. 254­264, 2016.
+[9] J. Yang, Q. Wei, C. Chen, C. Wang, K. L. Yong, and B. He, "NV-Tree: Reducing consistency cost for NVM-based single level systems," in 13th USENIX Conference on File and Storage Technologies (FAST 15). Santa Clara, CA: USENIX Association, Feb. 2015, pp. 167­181. [Online]. Available: https://www.usenix.org/conference/fast15/ technical-sessions/presentation/yang
+[10] D. Hwang, W.-H. Kim, Y. Won, and B. Nam, "Endurable transient inconsistency in byte-addressable persistent B+-Tree," in 16th USENIX Conference on File and Storage Technologies (FAST 18). Oakland, CA: USENIX Association, Feb. 2018, pp. 187­200. [Online]. Available: https://www.usenix.org/conference/fast18/presentation/hwang
+[11] C. Wang, G. Brihadiswarn, X. Jiang, and S. Chattopadhyay, "Circ-tree: A B+-Tree variant with circular design for persistent memory," arXiv preprint arXiv:1912.09783, 2019.
+[12] I. Moraru, D. G. Andersen, M. Kaminsky, N. Tolia, P. Ranganathan, and N. Binkert, "Consistent, durable, and safe memory management for byte-addressable non volatile main memory," in Proceedings of the First ACM SIGOPS Conference on Timely Results in Operating Systems, ser. TRIOS '13. New York, NY, USA: Association for Computing Machinery, 2013. [Online]. Available: https://doi.org/10.1145/2524211.2524216
+[13] S. Venkataraman, N. Tolia, P. Ranganathan, and R. H. Campbell, "Consistent and durable data structures for non-volatile byte-addressable memory," in Proceedings of the 9th USENIX Conference on File and Stroage Technologies, ser. FAST'11. USA: USENIX Association, 2011, p. 5.
+[14] I. Oukid, J. Lasperas, A. Nica, T. Willhalm, and W. Lehner, "FPTree: A hybrid SCM-DRAM persistent and concurrent B-tree for storage class memory," in Proceedings of the 2016 International Conference on Management of Data, 2016, pp. 371­386.
+[15] J. Zhao, S. Li, D. H. Yoon, Y. Xie, and N. P. Jouppi, "Kiln: Closing the performance gap between systems with and without persistence support," in Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO-46. New York, NY, USA: Association for Computing Machinery, 2013, p. 421­432. [Online]. Available: https://doi.org/10.1145/2540708.2540744
+[16] C. Mohan, D. Haderle, B. Lindsay, H. Pirahesh, and P. Schwarz, "ARIES: a transaction recovery method supporting fine-granularity locking and partial rollbacks using write-ahead logging," ACM Transactions on Database Systems (TODS), vol. 17, no. 1, pp. 94­162, 1992.
+[17] S. R. Dulloor, S. Kumar, A. Keshavamurthy, P. Lantz, D. Reddy, R. Sankaran, and J. Jackson, "System software for persistent memory," in Proceedings of the Ninth European Conference on Computer Systems, ser. EuroSys '14. New York, NY, USA: Association for Computing Machinery, 2014. [Online]. Available: https://doi.org/10.1145/2592798.2592814
+[18] Intel, "Intel® 64 and IA-32 architectures software developer's manual," Volume 3A: System Programming Guide, Part, vol. 1, no. 64, p. 64, Sep. 2016.
+[19] Y. Lu, J. Shu, L. Sun, and O. Mutlu, "Loose-ordering consistency for persistent memory," in 2014 IEEE 32nd International Conference on Computer Design (ICCD), 2014, pp. 216­223.
+[20] A. Danowitz, K. Kelley, J. Mao, J. P. Stevenson, and M. Horowitz, "CPU DB: recording microprocessor history," Queue, vol. 10, no. 4, pp. 10­27, 2012.
+[21] B. F. Cooper, A. Silberstein, E. Tam, R. Ramakrishnan, and R. Sears, "Benchmarking cloud serving systems with YCSB," in Proceedings of the 1st ACM symposium on Cloud computing, 2010, pp. 143­154.
+
+

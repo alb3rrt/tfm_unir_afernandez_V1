@@ -1,0 +1,973 @@
+arXiv:2106.04533v1 [cs.CV] 8 Jun 2021
+
+Chasing Sparsity in Vision Transformers: An End-to-End Exploration
+Tianlong Chen1, Yu Cheng2, Zhe Gan2, Lu Yuan2, Lei Zhang3, Zhangyang Wang1 1University of Texas at Austin, 2Microsoft Corporation, 3International Digital Economy Academy
+{tianlong.chen,atlaswang}@utexas.edu,{yu.cheng,zhe.gan,luyuan}@microsoft.com leizhangcn@ieee.org
+Abstract
+Vision transformers (ViTs) have recently received explosive popularity, but their enormous model sizes and training costs remain daunting. Conventional posttraining pruning often incurs higher training budgets. In contrast, this paper aims to trim down both the training memory overhead and the inference complexity, without scarifying the achievable accuracy. We launch and report the first-ofits-kind comprehensive exploration, on taking a unified approach of integrating sparsity in ViTs "from end to end". Specifically, instead of training full ViTs, we dynamically extract and train sparse subnetworks, while sticking to a fixed small parameter budget. Our approach jointly optimizes model parameters and explores connectivity throughout training, ending up with one sparse network as the final output. The approach is seamlessly extended from unstructured to structured sparsity, the latter by considering to guide the prune-and-grow of selfattention heads inside ViTs. For additional efficiency gains, we further co-explore data and architecture sparsity, by plugging in a novel learnable token selector to adaptively determine the currently most vital patches. Extensive results validate the effectiveness of our proposals on ImageNet with diverse ViT backbones. For instance, at 40% structured sparsity, our sparsified DeiT-Base can achieve 0.42% accuracy gain, at 33.13% FLOPs and 24.70% running time savings, compared to its dense counterpart. Perhaps most surprisingly, we find that the proposed sparse (co-)training can even improve the ViT accuracy rather than compromising it, making sparsity a tantalizing "free lunch". For example, our sparsified DeiT-Small at (5%, 50%) sparsity for (data, architecture), improves 0.28% top-1 accuracy, and meanwhile enjoys 49.32% FLOPs and 4.40% running time savings. Our codes are available at https://github.com/VITA-Group/SViTE.
+1 Introduction
+Recent years have seen substantial efforts devoted to scaling deep networks to enormous sizes. Parameter-counts are frequently measured in billions rather than millions, with the time and financial outlay necessary to train these models growing in concert. The trend undoubtedly continues with the recent forefront of transformers [1, 2] for computer vision tasks. By leveraging self-attention, reducing weight sharing such as convolutions, and feeding massive training data, vision transformers have established many new state-of-the-art records in image classification [1, 2], object detection [3­ 6], image enhancement [7, 8], and image generation [9­11]. Existing vision transformers and variants, despite impressive empirical performance, have in general suffered from gigantic parameter-counts, heavy run-time memory usages, and tedious training. That naturally calls for the next step research of slimming their inference and training, without compromising the performance.
+Model compression and efficient learning are no strangers to deep learning researchers, although their exploration in the emerging vision transformer field remain scarce [12]. Among the large variety
+Preprint. Under review.
+
+of compression means [13], sparsity has been one of the central themes since the beginning [14]. Conventional approaches first train dense networks, and then prune a large portion of parameters in the trained networks to zero. Those methods significantly reduce the inference complexity. However, the price is to cost even greater computational resources and memory footprints at training, since they commonly require (multiple rounds of) re-training to restore the accuracy loss [14­16]. That price becomes particularly prohibitive for vision transformers, whose vanilla one-pass training is already much more tedious, slow and unstable compared to training standard convolutional networks.
+An emerging subfield has explored the prospect of directly training smaller, sparse subnetworks in place of the full networks without sacrificing performance. The key idea is to reuse the sparsity pattern found through pruning and train a sparse network from scratch. The seminal work of Lottery ticket hypothesis (LTH) [17] demonstrated that standard dense networks contain sparse matching subnetworks (sometimes called "winning tickets") capable of training in isolation to full accuracy. In other words, we could have trained smaller networks from the start if only we had known which subnetworks to choose. Unfortunately, LTH requires to empirically find these intriguing subnetworks by an iterative pruning [17, 18] , which still cannot get rid of the expensiveness of post-training pruning. In view of that, follow-up works reveal that sparsity patterns might emerge at the initialization [19, 20], the early stage of training [21], or in dynamic forms throughout training [22­24] by updating model parameters and architecture typologies simultaneously. These efforts shed light on the appealing prospect of "end to end" efficiency from training to inference, by involving sparsity throughout the full learning lifecycle.
+In this paper, we present the first-of-its-kind comprehensive exploration on integrating sparsity in vision transformers (ViTs) "from end to end". With (dynamic) sparsity as the unified tool, we can improve the inference efficiency from both model and data perspectives, while also saving training memory costs. Our innovative efforts are unfolded along the following three thrusts:
+· From Dense to (Dynamic) Sparse: Our primary quest is to find sparse ViTs without sacrificing the achievable accuracy, and meanwhile trimming down the training memory overhead. To meet this challenging demand, we draw inspirations from the latest sparse training works [24, 25] that dynamically extract and train sparse subnetworks instead of training the full models. Sticking to a fixed small parameter budget, our technique jointly optimizes model parameters and explores connectivity throughout the entire training process. We term our first basic approach as Sparse Vision Transformer Exploration (SViTE).
+· From Unstructured to Structured: Most sparse training works [22, 23, 26­29, 28, 24, 30, 31, 25] restricted discussion to unstructured sparsity. To attain structured sparsity which is more hardware-friendly, unlike classical channel pruning available for convolutional networks, we customize a first-order importance approximation [15, 32] to guide the pruneand-grow of self-attention heads inside ViTs. This seamlessly extends SViTE to its second variant of Structured Sparse Vision Transformer Exploration (S2ViTE).
+· From Model to Data: We further conduct a unified co-exploration towards joint data and architecture sparsity. That is by plugging in a novel learnable token selector to determine the most vital patch embeddings in the current input sample. The resultant framework of Sparse Vision Transformer Co-Exploration (SViTE+) remains to be end-to-end trainable and can gain additional efficiency.
+Extensive experiments are conducted on ImageNet with DeiT-Tiny/Small/Base, and results consistently endorse the effectiveness of our proposals. For example, our trained DeiT-Base at 40% structural sparsity can achieve a surprising 0.42% top-1 accuracy gain, at 33.13% FLOPs and 24.70% running time savings, compared to its dense counterpart. Perhaps most impressively, we find that the sparse (co-)training can even improve the ViT accuracy rather than compromising it, making sparsity a tantalizing "free lunch". As another example, applying SViTE+ on DeiT-Small produces superior compressed ViTs at 50% architecture plus 5% data sparsity, saving 49.32% FLOPs and 4.40% running time with a surprising improvement of 0.28% accuracy; plus 10% data sparsity, saving 52.38% FLOPs and 7.63% running time while still at no generalization degradation.
+2 Related Work
+Vision Transformer. Transformer [33] stems from natural language processing (NLP) applications. The Vision Transformer (ViT) [1] first introduced a pure transformer, to encode an image by
+2
+
+splitting it into a sequence of patches, projecting them into token embeddings, and feeding them to transformer encoders. With sufficient training data, ViT is able to outperform convolution neural networks on various image classification benchmarks [1]. Many ViT variants have been proposed since then. For example, DeiT [2] and T2T-ViT [34] are proposed to enhance ViT's training data efficiency, by leveraging teacher-student and better crafted architectures respectively. In addition to image classification, ViT has attracted wide attention in diverse computer vision tasks, including object detection [3­6], segmentation [35, 36], enhancement [7, 8], image generation [9­11], video understanding [37, 38], vision-language [39­46] and 3D point cloud [47].
+Despite impressive empirical performance, ViTs are in general heavy to train and the trained models remain to be massive. That naturally motivates the study to reduce ViT inference and training costs, by considering model compression means. Model compression has been well studied in both computer vision and NLP applications [48­50, 32, 51, 52]. A concurrent work [12] made an initial attempt to compress ViT by 1 pruning. However, it only shrinks the intermediate features while our work targets at real weight and token sparsity that can lead to memory and computational savings. Another loosely related field is the study of efficient attention mechanisms [53, 9, 41, 54­64]. They mainly reduce the calculation complexity for self-attention modules via various approximations such as low-rank decomposition. Our proposed techniques represent an orthogonal direction and can be potentially combined with them, which we leave as future work.
+Pruning and Sparse Training. Pruning is well-known to effectively reduce deep network inference costs [65, 14]. It can be roughly categorized into two groups: (i) unstructured pruning by removing insignificant weight elements per certain criterion, such as weight magnitude [66, 14], gradient [15] and hessian [67]; (ii) structured pruning [68­70] by remove model sub-structures, e.g., channels [68, 69] and attention heads [32], which are often more aligned with hardware efficiency. All above require to train the full dense model first, usually for several train-prune-retrain rounds.
+The recent surge of sparse training seeks to adaptively identify high-quality sparse subnetworks and train only them. Starting from scratch, those methods learn to optimize the model weights together with sparse connectivity simultaneously. [22, 23] first introduced the Sparse Evolutionary Training (SET) technique [22], reaching superior performance compared to training with fixed sparse connectivity [71, 26]. [27­29] leverages "weight reallocation" to improve performance of obtained sparse subnetworks. Furthermore, gradient information from the backward pass is utilized to guide the update of the dynamic sparse connectivity [28, 24], which produces substantial performance gains. The latest investigations [30, 31, 25] demonstrate that more exhaustive exploration in the connectivity space plays a crucial role in the quality of found sparse subnetworks. Current sparse training methods mostly focus on convolutional networks. Most of them discuss unstructured sparsity, except a handful [72, 21] considering to train convolutional networks with structured sparsity.
+3 Methodology
+Our SViTE method (and its variants S2ViTE and SViTE+) is inspired from state-of-the-art sparse training approaches [24, 25] in CNNs. In this section, we first present the sparse exploration of ViT architectures, then show the detailed procedure of input token selection for extra efficiency gains.
+3.1 Sparse ViT Exploration
+Revisiting sparse training. Sparse training starts from a randomly sparsified model; after optimizing several iterations, it shrinks a portion of parameters based on pre-defined pruning criterion, and activates new connections w.r.t. grow indicators. After upgrading the sparse topology, it trains the new subnetwork until the next update of the connectivity. An illustration of the overall procedure is shown in Figure 1. The key factors of sparse training are  sparsity distribution,  update schedule,  pruning and  grow criterion.
+Notations. For a consistent description, we follow the standard notations in [24, 25]. Let D be the training dataset. bt  D is a randomly sampled data batch for iteration t. fW (·) represents the model with parameters W = (W (1), · · · , W (L)), where W (l)  RNl , 1  l  L, Nl is the number of prunable parameters in the lth layer, and L denotes the number of transformer layers. Note that the first linear projection layer and the classifier of ViT [1, 2] are not sparsified in our
+3
+
+Sparse ViT Exploration
+
+Classifier Transformer Encoders
+
+Prune
+
+Token Selection
+......
+
+Training
+
+...
+Grow
+Training
+...
+
+Update Interval
+
+Update Sparse Connectivity
+
+Classifier Transformer Encoders
+Token Selection
+......
+Update Interval
+
+Transformer Encoder Token Selector Patch Tokens Remaining Connections Pruned Connections Grown Connections
+...... Training Time
+
+Concat
+
+···
+
+Softmax
+
+Scaled
+
+Linear
+
+Linear
+
+Linear · · ·
+
+......
+Linear Add & Norm
+Linear
+Linear Add & Norm
+
+Pruneable Weights
+Removeable Features/Modules
+Dot-Product Skip
+Connection
+
+Token Selection for SViTE+
+
+Selected Tokens
+
+(
+
+... )
+
+Learnable Top-K Selection
+
+......
+
+Scores
+
+Scorer Function
+
+......
+
+Linear Projection
+......
+
+Transformer Pruning
+
+Figure 1: The overall procedure of our proposed sparse ViT exploration framework. Upper Figure: first training ViT for T iterations, then performing prune-and-grow strategies to explore critical sparse connectivities, repreating until convergence. Bottom Left Figure: enforcing either structured or unstructured sparsity to transformer layers in ViT. Bottom Right Figure: first scoring each input embedding and applying the learnable top-k selection to identify the most informative tokens.
+
+framework. As illustrated in Figure 1(bottom-left), WQ(l) = {WQ(l,h)}Hh=1, WK(l) = {WK(l,h)}Hh=1,
+
+WV(l) = {WV(l,h)}Hh=1 are the weights of the self-attention module in the lth layer, W (l,1), W (l,2), W (l,3) are the weights of the multilayer perceptron (MLP) module in the lth layer, and W (l) = (WQ(l), WK(l), WV(l), W (l,1), W (l,2), W (l,3)) collectively represent all the parameters in the lth layer,
+where H denotes the number of attention heads, and 1  h  H. X(l), Q(l), K(l), and V (l) are
+
+the corresponding input and intermediate features, respectively. Each sparse layer only maintains a
+
+fraction sl  (0, 1) of its connections, and the overall sparsity of a sparse subnetwork is calculated as
+
+the ratio of pruned elements to the total parameter counts, i.e.,
+
+. l sl×Nl
+l Nl
+
+Sparse Vision Transformer Exploration (SViTE). SViTE explores the unstructured sparse topol-
+
+ogy in vision transformers. To be specific, we adopt Erdo¨s-Re´nyi [22] as our  sparsity distribution.
+
+The
+
+number
+
+of
+
+parameters
+
+in
+
+the
+
+sparse
+
+layer
+
+is
+
+scaled
+
+by
+
+1
+
+-
+
+, nl-1 +nl
+nl-1 ×nl
+
+where
+
+nl
+
+is
+
+the
+
+number
+
+of neurons at layer l. This distribution allocates higher sparsities to the layers with more parame-
+
+ters by scaling the portion of remaining weights with the sum of the number of output and input
+
+neurons/channels. For the  update schedule, it contains: (i) the update interval T, which is
+
+the number of training iterations between two sparse topology updates; (ii) the end iteration Tend, indicating when to stop updating the sparsity connectivity, and we set Tend to 80% of total training iterations in our experiments; (iii) the initial fraction  of connections that can be pruned or
+
+grow, which is 50% in our case; (iv) a decay schedule of the fraction of changeable connections
+
+fdecay(t, , Tend)
+
+=
+
+ 2
+
+(1
+
++
+
+cos(
+
+t× Tend
+
+)),
+
+where
+
+a
+
+cosine
+
+annealing
+
+is
+
+used,
+
+following
+
+[24,
+
+25].
+
+During
+
+each connectivity update, we choose the weight magnitude as  the pruning indicator, and gradient
+
+magnitude as  the grow indicator. Specifically, we eliminate the parameters with the layer-wise
+
+smallest weight values by applying a binary mask mprune, then grow new connections with the highest magnitude gradients by generating a new binary mask mgrow. Both masks are employed to
+
+W (l) via the element-wise dot product, and note that the number of non-zero elements in mprune and mgrow are equal and fixed across the overall procedure. Newly added connections are not
+
+activated in the last sparse topology, and are initialized to zero since it produces better performance
+
+as demonstrated in [24, 25].
+
+Infrequent gradient calculation [24] is adopted in our case, which computes the gradients in an online manner and only stores the top gradient values. As illustrated in [24], such fashion amortizes the
+
+4
+
+extra
+
+effort
+
+of
+
+gradient
+
+calculation,
+
+and
+
+makes
+
+it
+
+still
+
+proportional
+
+to
+
+1-s
+
+as
+
+long as T
+
+
+
+1 1-s
+
+,
+
+where s is the overall sparsity.
+
+Structured Sparse Vision Transformer Exploration (S2ViTE). Although models with unstruc-
+tured sparsity achieves superior performance, structured sparsity [68­70] is much more hardware
+friendly and brings practical efficiency on realistic platforms, which motivates us to propose Structured Sparse ViT Exploration (S2ViTE). We inherit the design of  sparsity distribution and  update schedule from the unstructured SViTE, and a round-up function is used to eliminate decimals in the parameter counting. The key differences lie in the new  pruning and  grow strategies.
+
+Pruning criterion: Let A(l,h) denote fea- Algorithm 1 Sparse ViT Co-Exploration (SViTE+). tures computed from the self-attention
+
+head {WQ(l,h), WK(l,h), WV(l,h)} and input embeddings X(l), as shown in Figure 1. We perform the Taylor expansion to the loss function [15, 32], and derive
+
+Initialize: ViT model fW , Dataset D, Sparsity dis-
+
+tribution S = {s1, · · · , sL}, Update schedule
+
+{T, Tend, , fdecay}, Learning rate 
+
+1: Initialize fW with random sparsity S
+
+Highly
+
+reduced parameter count.
+
+a proxy score for head importance blow: 2: for each training iteration t do
+
+3: Sampling a batch bt  D
+
+Ip(l,h) =
+
+AT(l,h) ·
+
+ L(X (l) )  A(l,h)
+
+,
+
+(1)
+
+where L(·) is the cross-entropy loss as
+used in ViT. During each topology up-
+date, we remove attention heads with the smallest Ip(l,h). For MLPs, we score neurons with 1-norm of their associated weight vectors [73], and drop in-
+significant neurons. For example, the jth neuron of W (l,1) in Figure 1 has an importance score Wj(,l·,1) 1 , where Wj(,l·,1) is the jth row of W (l,1).
+
+4: Scoring the input token embeddings and selecting
+
+the top-k informative tokens
+
+Token selection
+
+5: if (t mod T == 0) and t < Tend then
+
+6:
+
+for each layer l do
+
+7:
+
+ = fdecay(t, , Tend) · (1 - sl) · Nl
+
+8:
+
+Performing prune-and-grow with portion 
+
+w.r.t. certain criterion, generating masks
+
+mprune and mgrow to update fW 's sparsity
+
+patterns
+
+Connectivity exploration
+
+9:
+
+end for
+
+10: else
+
+11:
+
+W = W -  · W Lt
+
+Updating Weights
+
+12: end if
+
+13: end for
+
+14: return a sparse ViT with a trained token selector
+
+Grow criterion: Similar to [24, 25], we
+
+active the new units with the highest
+
+magnitude gradients, such as
+
+ L(X (l) )  A(l,h)
+
+1 and
+
+ L(X (l) )  Wj(,l·,1)
+
+1 for the hth attention head and the jth
+
+neuron of the MLP (W (l,1)), respectively. The gradients are calculated in the same manner as the one
+
+in unstructured SViTE, and newly added units are also initialized to zero.
+
+3.2 Data and Architecture Sparsity Co-Exploration for Ultra Efficiency
+
+Besides exploring sparse transformer architectures, we further
+
+Algorithm 2 The top-k selector in a PyTorch-like style.
+
+slim the dimension of input token def topk_selector(logits, k, tau, dim=-1):
+
+embeddings for extra efficiency # Maintain tokens with the top-k highest scores
+
+bonus by leveraging a learnable token selector, as presented in Figure 1. Meanwhile, the introduced
+
+gumbels = -torch.empty_like(logits).exponential_().log()
+gumbels = (logits + gumbels) / tau # tau is the temperature
+
+data sparsity also serves an im-
+
+y_soft = gumbels.softmax(dim)
+
+plicit regularization for ViT train-
+
+# Straight through
+
+ing, which potentially leads to im-
+
+index = y_soft.topk(k, dim=dim)[1]
+
+proved generalization ability as evi-
+
+y_hard = scatter(logits, index, k)
+
+denced in Table 6. Note that, due to
+
+ret = y_hard - y_soft.detach() + y_soft
+
+the existence of skip connections,
+
+return ret
+
+the number of input tokens actually
+
+determines the dimension of intermediate features which contribute substantially to the overall com-
+
+putation cost. In other words, the slimmed input token embeddings directly result in compressed
+
+intermediate features, and bring substantial efficiency gains.
+
+5
+
+Table 1: Details of training configurations in our experiments, mainly following the settings in [2].
+
+Backbone
+DeiT-Tiny DeiT-Small DeiT-Base
+
+Update Schedule {T, Tend, , fdecay}
+{20000, 1200000, 0.5, cosine} {15000, 1200000, 0.5, cosine} {7000, 600000, 0.5, cosine}
+
+Batch Size
+512 512 1024
+
+Epochs
+600 600 600
+
+Inherited Settings from DeiT [2]
+
+AdamW,
+
+0.0005
+
+×
+
+batchsize 512
+
+,
+
+cosine
+
+decay
+
+warmup 5 epochs, 0.05 weight decay
+
+0.1 label smoothing, augmentations, etc.
+
+For the input tokens X(1)  Rn×d, where n denotes the number of tokens to be shrunk, and d is the dimension of each token embedding that keeps unchanged. As shown in Figure 1, all token embeddings are passed through a learnable scorer function which is paramterized by an MLP in our experiments. Then, a selection of the top-k importance scores (1  k  d) is applied on the top of it, aiming to preserve the significant tokens and remove the useless ones. To optimize parameters of the scorer function, we introduce the popular Gumbel-Softmax [74, 75] and straight-through tricks [76] to enable gradient back-propagation through the top-k selection, which provides an efficient solution to draw samples from a discrete probability distribution. A detailed implementation is in Algorithm 2.
+The full pipeline of data and architecture co-exploration is summarized in Algorithm 1. We term this approach SViTE+. We first feed the randomly sampled data batch to the token selector and pick the top-k informative token embeddings. Then, we alternatively train the sparse ViT for T iterations and perform prune-and-grow to dynamically explore the sparse connectivity in ViTs. In the end, a sparse ViT model with a trained token selector is returned and ready for evaluation.
+
+4 Experiments
+
+Baseline pruning methods. We extend several effective pruning methods from CNN compression as our strong baselines. Unstructured pruning: (i) One-shot weight Magnitude Pruning (OMP) [14], which removes insignificant parameters with the globally smallest weight values; (ii) Gradually Magnitude Pruning (GMP) [16], which seamlessly incorporates gradual pruning techniques within the training process by eliminating a few small magnitude weights per iteration; and (iii) Taylor Pruning (TP) [15], which utilizes the first-order approximation of the training loss to estimate units' importance for model sparsification. Structured pruning: Salience-based Structured Pruning (SSP). We draw inspiration from [32, 73], and remove sub-modules in ViT (e.g., self-attention heads) by leveraging their weight, activation, and gradient information. Moreover, due to the repetitive architecture of ViT, we can easily reduce the number of transformer layers to create a smaller dense ViT (Small-Dense) baseline that has similar parameter counts to the pruned ViT model.
+
+Implementation details. Our experiments
+
+The Overall Performance of SViTE, S2ViTE, and SViTE+
+
+are conducted on ImageNet with DeiT- 82 Tiny/Small/Base backbones. The detailed
+
+DeiT-Base
+
+Testing Accuracy (%)
+
+training configurations are listed in Table 1, 80 which mainly follows the default setups in [2].
+
+DeiT-Small
+
+All involved customized hyperparamters are 78
+
+tuned via grid search (later shown in Figure 3).
+
+For a better exploration of sparsity connec-
+
+tivities, we increase training epochs to 600
+
+for all experiments. GMP [16] has an addi-
+
+tional hyperparameter, i.e., the pruning sched-
+
+ule,
+
+which
+
+starts
+
+from
+
+1 6
+
+and
+
+ends
+
+at
+
+1 2
+
+of
+
+the
+
+training epochs with 20 times pruning in total.
+
+Training time measuring protocol. We strictly measure the running time saving of
+
+76 74 72 DeiT-Tiny
+
+SViTE-Small S2ViTE-Small SViTE-Base S2ViTE-Base SViTE+-Small
+
+20
+
+40
+
+60
+
+80
+
+FLOPs (×1010)
+
+100
+
+Figure 2: Top-1 accuracy (%) over FLOPs (×1010) on Im-
+
+ageNet of our methods, i.e., SViTE, S2ViTE, and SViTE+,
+
+(sparse) vision transformers on the ImageNet- compared to DeiT baselines, trained on Imagenet-1K only.
+
+1K task using CUDA benchmark mode. To be specific, we separately calculate the time elapsed
+
+during each iteration, to eliminate the impact of the hardware environment as much as possible. Note
+
+that the time for the data I/O is excluded.
+
+Highlight of our findings. The overall performance of SViTE, S2ViTE, and SViTE+ on DeiT backbones are summarized in Figure 2. We highlight some takeaways below.
+
+6
+
+Takeaways:  SViTE produces sparse DeiTs with ameliorated generalization and substantial reduced FLOPs, compared to its dense counterpart ( ). SViTE+ further improves the performance of SViTE by selecting most vital patches.  S2ViTE achieves matched accuracy on DeiT-Small, and significantly enhanced performance on DeiT-Base. Meanwhile, its structural sparsity brings considerable running time savings.  Appropriate data and architecture sparsities can effectively regularize ViT training, leading to new state-of-the-art win-win between ViT accuracy and efficiency.
+
+4.1 SViTE with Unstructured Sparsity
+
+We perform SViTE to mine vital unstructured sparsity in DeiTs [2]. Solid lines in Figure 2 record the top-1 test-set accuracy over FLOPs on ImageNet-1K of SViTE-Small and SViTE-Base with a range of sparsity from 30% to 70%. In general, we observe that SViTE generates superior sparse ViTs with both accuracy and efficiency gains. Table 2, 3, and 5 present the comparison between SViTE and various pruning baselines. From these extensive results, we draw several consistent observations. First, compared to the dense baselines, SViTE-Tiny, -Small, and -Base obtain 25.56%  34.16%, 46.26%  55.44%, and 47.95%  57.50% FLOPs reduction, respectively, at 30%  60% sparsity levels with only a negligible accuracy drop within 0.5%. It verifies the effectiveness of our proposal, and indicates severe parameter redundancy in ViT. Second, our SViTE models from dynamic explorations consistently surpass other competitive baseline methods, including OMP, GMP, TP and Small-Dense by a substantial performance margin. Among all the baseline approaches, GMP that advocates a gradual pruning schedule achieves the best accuracy with all three DieT backbones. Third, in Figure 2, both SViTE-Small (blue solid line) and SViTE-Base (green solid line) show an improved trade-off between accuracy and efficiency, compared to their dense DeiT counterparts. Interestingly, we also observe that with similar parameter counts, a large sparse ViT consistently outperforms the corresponding smaller dense ViT. A possible explanation is that appropriate sparse typologies regularize network training and lead to enhanced generalization, which coincides with recent findings of critical subnetworks (i.e., winning tickets) in dense CNNs [77, 78] and NLP transformer [52, 79] models.
+
+Table 2: Results of SViTE-Tiny on ImageNet-1K. Accuracies (%) within/out of parenthesis are the reported [2]/reproduced performance.
+
+Models
+
+Sparsity (#Para.) FLOPs Saving Accuracy (%)
+
+DeiT-Tiny
+
+0% (5.72M)
+
+0%
+
+71.80 (72.20)
+
+SViTE-Tiny OMP GMP TP
+
+30% (4.02M) 30% (4.02M) 30% (4.02M) 30% (4.02M)
+
+25.56% 25.56% 25.56% 25.56%
+
+71.78 68.35 69.56 68.38
+
+SViTE-Tiny OMP GMP TP
+
+40% (3.46M) 40% (3.46M) 40% (3.46M) 40% (3.46M)
+
+34.16% 34.16% 34.16% 34.16%
+
+71.75 66.52 68.36 65.45
+
+Small-Dense 0% (3.94M)
+
+32.54%
+
+67.33
+
+Table 3: Results of SViTE-Small on ImageNet-1K. Accuracies (%) within/out of parenthesis are the reported [2]/reproduced performance.
+
+Models
+
+Sparsity (#Para.) FLOPs Saving Accuracy (%)
+
+DeiT-Small
+
+0% (22.1M)
+
+0%
+
+79.78 (79.90)
+
+SViTE-Small OMP GMP TP
+
+50% (11.1M) 50% (11.1M) 50% (11.1M) 50% (11.1M)
+
+46.26% 46.26% 46.26% 46.26%
+
+79.72 76.32 76.88 76.30
+
+SViTE-Small OMP GMP TP
+
+60% (8.9M) 60% (8.9M) 60% (8.9M) 60% (8.9M)
+
+55.44% 55.44% 55.44% 55.44%
+
+79.41 75.32 76.79 74.50
+
+Small-Dense 0% (11.4M)
+
+49.32%
+
+73.93
+
+Table 4: Results of S2ViTE with structured sparsity on ImageNet-1K with DeiT-Tiny/Small/Base. Accuracies (%) within/out of parenthesis are the reported [2]/reproduced performance.
+
+Models
+
+Sparsity (%) Parameters FLOPs Saving Running Time Reduced Top-1 Accuracy (%)
+
+DeiT-Tiny (Dense)
+
+0%
+
+SViTE-Tiny (Unstructured)
+
+30%
+
+SSP-Tiny (Structured)
+
+30%
+
+S2ViTE-Tiny (Structured)
+
+30%
+
+5.72M 4.02M 4.21M 4.21M
+
+0% 25.56% 23.69% 23.69%
+
+0% 0% 10.57% 10.57%
+
+71.80 (72.20) 71.78 68.59 70.12
+
+DeiT-Small (Dense)
+
+0%
+
+SViTE-Small (Unstructured)
+
+40%
+
+SSP-Small (Structured)
+
+40%
+
+S2ViTE-Small (Structured)
+
+40%
+
+22.1M 13.3M 14.6M 14.6M
+
+0% 36.73% 31.63% 31.63%
+
+0% 0% 22.65% 22.65%
+
+79.78 (79.90) 80.26 77.74 79.22
+
+DeiT-Base (Dense)
+
+0%
+
+SViTE-Base (Unstructured)
+
+40%
+
+SSP-Base (Structured)
+
+40%
+
+S2ViTE-Base (Structured)
+
+40%
+
+86.6M 52.0M 56.8M 56.8M
+
+0% 38.30% 33.13% 33.13%
+
+0% 0% 24.70% 24.70%
+
+80.98 (81.80) 81.56 80.08 82.22
+
+4.2 S2ViTE with Structured Sparsity
+
+For more practical benefits, we investigate sparse DeiTs with structured sparsity. Results are summarized in Table 4. Besides the obtained 23.79%  33.63% FLOPs savings, S2ViTE-Tiny, S2ViTE-
+
+7
+
+Small, and S2ViTE-Base enjoy an extra 10.57%, 22.65%, and 24.70% running time reduction,
+respectively, from 30%  40% structured sparsity with competitive top-1 accuarcies. Furthermore, S2ViTE consistently outperforms the baseline structured pruning method (SSP), which again
+demonstrates the superior sparse connectivity learned from dynamic sparse training.
+
+The most impressive results come from S2ViTE-Base at 40% structured sparsity. It even surpasses
+the dense DeiT base model by 0.42%  1.24% accuracy with 34.41% parameter counts, 33.13% FLOPs, and 24.70% running time reductions. We conclude that (i) an adequate sparsity from S2ViTE
+ameliorates ViT's generalization ability, which can be regarded as an implicit regularization; (ii)
+larger ViTs (e.g., DeiT-Base) tend to have more superfluous self-attention heads, and are more amenable to structural sparsification from S2ViTE, based on Figure 2 where dash lines denote the overall performance of S2ViTE-Small and S2ViTE-Base with a range of sparsity from 30% to 70%.
+
+Table 5: Results of SViTE-Base on ImageNet-1K. Table 6: Results of SViTE+-Small on ImageNet-1K.
+
+Accuracies (%) within/out of parenthesis are the re- Accuracies (%) within/out of parenthesis are the re-
+
+ported [2]/reproduced performance.
+
+ported [2]/reproduced performance.
+
+Models
+DeiT-Base
+SViTE-Base OMP GMP TP
+SViTE-Base OMP GMP TP
+Small-Dense
+
+Sparsity (#Para.)
+0% (86.6M)
+50% (43.4M) 50% (43.4M) 50% (43.4M) 50% (43.4M)
+60% (34.8M) 60% (34.8M) 60% (34.8M) 60% (34.8M)
+0% (44.0M)
+
+FLOPs Saving
+0%
+47.95% 47.95% 47.95% 47.95%
+57.50% 57.50% 57.50% 57.50%
+49.46%
+
+Accuracy (%)
+80.98 (81.80)
+81.51 80.26 80.79 80.55
+81.28 80.25 80.44 80.37
+78.59
+
+#Tokens (%) Time Reduced FLOPs Saving Accuracy (%)
+
+SViTE+-Small 50% Unstructured Sparsity
+
+100% 95% 90% 70%
+
+0% 4.40% 7.63% 19.77%
+
+46.26% 49.32% 52.38% 63.95%
+
+79.72 80.18 79.91 77.90
+
+S2ViTE+-Small 40% Structured Sparsity
+
+100% 95% 90% 70%
+
+22.65% 27.17% 29.21% 39.10%
+
+31.63% 37.76% 41.50% 54.96%
+
+79.22 78.44 78.16 74.77
+
+4.3 SViTE+ with Data and Architecture Sparsity Co-Exploration
+
+In this section, we study data and architecture sparsity co-exploration for ViTs, i.e., SViTE+. Blessed
+by the reduced input token embeddings, even ViTs with unstructured sparsity can have running time
+savings. The benefits are mainly from the shrunk input and intermediate feature dimensions. Without loss of generality, we consider SViTE+-Small with 50% unstructured sparsity and S2ViTE+-Small with 40% structured sparsity as examples. As shown in Table 6 and Figure 2, SViTE+-Small at 50% unstructured sparsity is capable of abandoning 5%  10% tokens while achieving 4.40%  7.63% running time and 49.32%  52.38% FLOPs savings, with even improved top-1 testing accuracy. It
+again demonstrates that data sparsity as an implicit regularizer plays a beneficial role in ViT training.
+However, slimming input and intermediate embedding is less effective when incorporated with S2ViTE, suggesting that aggressively removing structural sub-modules hurts ViT's generalization.
+
+4.4 Ablation Study
+
+Update interval in SViTE. The length of the update interval T controls one of the essential tradeoffs in our proposed dynamic sparse exploration, since T multiplying the number of updates is the pre-defined Tend. On one hand, a larger updated interval (i.e., smaller update frequency) produces a more well-trained model for an improved estimation of units' importance. On the other hand, a larger update frequency (i.e, smaller T) allows more sufficient exploration of sparse connectivities, which potentially generates higher-quality sparse subnetworks, as demonstrated in [25]. We evaluate this factor in our SViTE context, and collect the results in Figure 3 (Left). We observe that T = 20000 works the best for SViTE-Tiny, and both larger and smaller T degrade the performance.
+
+ACCURACY
+
+ACCURACY
+
+65.84 66.77 68.45 69.09 69.30 69.60 68.84 68.84 69.60 67.85
+65.72
+
+1000
+
+2000 5000 10000 15000 20000 25000
+Update Interval (T)
+
+1024 512
+
+256
+
+128
+
+Batch Size ($)
+
+Figure 3: Accuracy of SViTE-Tiny with 50% unstructured sparsity. Left: ablation studies of the update interval
+
+(T); Right: ablations studies of the adopted batch size (b).
+
+Batch size in SViTE. Besides the update interval T, batch size (b) also affects the aforementioned trade-off, especially for the data-hungry ViT training. We investigate different batch sizes in Figure 3 (Right), and find that b = 512 outperforms other common options for SViTE-Tiny.
+
+8
+
+4.5 Visualization
+Sparse connectivity patterns. We provide unit-wise and element-wise heatmap visualizations for SViTE-Base with 40% structured sparsity in Figure A7 (in Appendix). Similarly, element-wise heatmap visualizations of SViTE-Base with 50% unstructured sparsity are displayed in Figure A6. We find that even unstructured sparsity exploration can develop obvious structural patterns (i.e., "vertical lines" in mask heatmaps), which implies a stronger potential for hardware speedup [80].
+Self-attention heatmaps. As shown in Figure 4, we utilize tools in [81] to visualize attention maps of (sparse) ViTs. Multiple attention heads show similar behaviors, which implies the structural redundancy. Fortunately, S2ViTE eliminates unnecessary heads to some extent. Regard to SViTEBase's visual results, it seems activate less attention heads for predictions (darker colors mean larger values), compared to the ones of dense DeiT-Base.
+Learned patch selection patterns. Figure 5 presents the learned behaviors of our token selector in SViTE+. We observe that the removed useless patches are typically distributed around the main object or in the background. Meanwhile, the patches within objects are largely persevered, which evidences the effectiveness of our learned patch token selector.
+
+Dense DeiT-Base
+
+-Base with 40% Structured Sparsity
+
+SViTE-Base with 40% Unstructured Sparsity
+
+Figure 4: Attention probabilities for DeiT-Base, S2ViTE-Base, and SViTE-Base models with 12 layers (rows)
+
+and 12 heads (columns) using visualization tools provided in [81]. Attention maps are averaged over 100 test
+
+samples from ImageNet-1K to present head behavior and remove the dependence on the input content. The
+
+black square is the query pixel. indicates pruned attention heads.
+
+Figure 5: Learned patch selection patterns of SViTE+-Small at 10% data and 50% architecture sparsity levels. indicates removed inessential patches.
+5 Conclusion and Discussion of Broader Impact
+In this work, we introduce sparse ViT exploration algorithms, SViTE and its variants S2ViTE and SViTE+, to explore high-quality sparse patterns in both ViT's architecture and input token embeddings, alleviating training memory bottleneck and pursuing inference ultra efficiency (e.g., running time and FLOPs). Comprehensive experiments on ImageNet validate the effectiveness of our proposal. Our informative visualizations further demonstrate that SViTE+ is capable of mining crucial connections and input tokens by eliminating redundant units and dropping useless token embeddings. Future work includes examining the performance of our sparse ViTs on incoming hardware accelerators [82­86], which will provide better supports for sparsity.
+This work is scientific in nature, and we do not believe it has immediate negative societal impacts. Our findings of sparse vision transformers are highly likely to substantially reduce both memory and energy costs, leading to economic deployment in real-world applications (e.g., on smartphones).
+9
+
+References
+[1] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929, 2020.
+[2] Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Hervé Jégou. Training data-efficient image transformers & distillation through attention. arXiv preprint arXiv:2012.12877, 2020.
+[3] Minghang Zheng, Peng Gao, Xiaogang Wang, Hongsheng Li, and Hao Dong. End-to-end object detection with adaptive clustering transformer. arXiv preprint arXiv:2011.09315, 2020.
+[4] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander Kirillov, and Sergey Zagoruyko. End-to-end object detection with transformers. In European Conference on Computer Vision, pages 213­229. Springer, 2020.
+[5] Zhigang Dai, Bolun Cai, Yugeng Lin, and Junying Chen. Up-detr: Unsupervised pre-training for object detection with transformers. arXiv preprint arXiv:2011.09094, 2020.
+[6] Xizhou Zhu, Weijie Su, Lewei Lu, Bin Li, Xiaogang Wang, and Jifeng Dai. Deformable {detr}: Deformable transformers for end-to-end object detection. In International Conference on Learning Representations, 2021.
+[7] Hanting Chen, Yunhe Wang, Tianyu Guo, Chang Xu, Yiping Deng, Zhenhua Liu, Siwei Ma, Chunjing Xu, Chao Xu, and Wen Gao. Pre-trained image processing transformer. arXiv preprint arXiv:2012.00364, 2020.
+[8] Fuzhi Yang, Huan Yang, Jianlong Fu, Hongtao Lu, and Baining Guo. Learning texture transformer network for image super-resolution. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5791­5800, 2020.
+[9] Niki Parmar, Ashish Vaswani, Jakob Uszkoreit, Lukasz Kaiser, Noam Shazeer, Alexander Ku, and Dustin Tran. Image transformer. In International Conference on Machine Learning, pages 4055­4064. PMLR, 2018.
+[10] Mark Chen, Alec Radford, Rewon Child, Jeffrey Wu, Heewoo Jun, David Luan, and Ilya Sutskever. Generative pretraining from pixels. In Hal Daumé III and Aarti Singh, editors, Proceedings of the 37th International Conference on Machine Learning, volume 119 of Proceedings of Machine Learning Research, pages 1691­1703. PMLR, 13­18 Jul 2020.
+[11] Yifan Jiang, Shiyu Chang, and Zhangyang Wang. Transgan: Two transformers can make one strong gan. arXiv preprint arXiv:2102.07074, 2021.
+[12] Mingjian Zhu, Kai Han, Yehui Tang, and Yunhe Wang. Visual transformer pruning, 2021.
+[13] Yu Cheng, Duo Wang, Pan Zhou, and Tao Zhang. A survey of model compression and acceleration for deep neural networks. arXiv preprint arXiv:1710.09282, 2017.
+[14] Song Han, Huizi Mao, and William J Dally. Deep compression: Compressing deep neural networks with pruning, trained quantization and huffman coding. In International Conference on Learning Representations, 2016.
+[15] Pavlo Molchanov, Arun Mallya, Stephen Tyree, Iuri Frosio, and Jan Kautz. Importance estimation for neural network pruning. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 11264­11272, 2019.
+[16] Michael Zhu and Suyog Gupta. To prune, or not to prune: exploring the efficacy of pruning for model compression. arXiv preprint arXiv:1710.01878, 2017.
+[17] Jonathan Frankle and Michael Carbin. The lottery ticket hypothesis: Finding sparse, trainable neural networks. In International Conference on Learning Representations, 2018.
+10
+
+[18] Jonathan Frankle, Gintare Karolina Dziugaite, Daniel M Roy, and Michael Carbin. Linear mode connectivity and the lottery ticket hypothesis. arXiv preprint arXiv:1912.05671, 2019.
+[19] Namhoon Lee, Thalaiyasingam Ajanthan, and Philip Torr. Snip: Single-shot network pruning based on connection sensitivity. In International Conference on Learning Representations, 2019.
+[20] Chaoqi Wang, Guodong Zhang, and Roger Grosse. Picking winning tickets before training by preserving gradient flow. In International Conference on Learning Representations, 2020.
+[21] Haoran You, Chaojian Li, Pengfei Xu, Yonggan Fu, Yue Wang, Xiaohan Chen, Richard G. Baraniuk, Zhangyang Wang, and Yingyan Lin. Drawing early-bird tickets: Toward more efficient training of deep networks. In International Conference on Learning Representations, 2020.
+[22] Decebal Constantin Mocanu, Elena Mocanu, Peter Stone, Phuong H Nguyen, Madeleine Gibescu, and Antonio Liotta. Scalable training of artificial neural networks with adaptive sparse connectivity inspired by network science. Nature communications, 9(1):1­12, 2018.
+[23] Shiwei Liu, Decebal Constantin Mocanu, Amarsagar Reddy Ramapuram Matavalam, Yulong Pei, and Mykola Pechenizkiy. Sparse evolutionary deep learning with over one million artificial neurons on commodity hardware. Neural Computing and Applications, 2020.
+[24] Utku Evci, Trevor Gale, Jacob Menick, Pablo Samuel Castro, and Erich Elsen. Rigging the lottery: Making all tickets winners. In International Conference on Machine Learning, pages 2943­2952. PMLR, 2020.
+[25] Shiwei Liu, Lu Yin, Decebal Constantin Mocanu, and Mykola Pechenizkiy. Do we actually need dense over-parameterization? in-time over-parameterization in sparse training. arXiv preprint arXiv:2102.02887, 2021.
+[26] Utku Evci, Fabian Pedregosa, Aidan Gomez, and Erich Elsen. The difficulty of training sparse neural networks. arXiv preprint arXiv:1906.10732, 2019.
+[27] Hesham Mostafa and Xin Wang. Parameter efficient training of deep convolutional neural networks by dynamic sparse reparameterization. In International Conference on Machine Learning, 2019.
+[28] Tim Dettmers and Luke Zettlemoyer. Sparse networks from scratch: Faster training without losing performance. arXiv preprint arXiv:1907.04840, 2019.
+[29] Shiwei Liu, Decebal Constantin Mocanu, Yulong Pei, and Mykola Pechenizkiy. Selfish sparse rnn training. arXiv preprint arXiv:2101.09048, 2021.
+[30] Siddhant Jayakumar, Razvan Pascanu, Jack Rae, Simon Osindero, and Erich Elsen. Top-kast: Top-k always sparse training. Advances in Neural Information Processing Systems, 33, 2020.
+[31] Md Aamir Raihan and Tor M Aamodt. Sparse weight activation training. arXiv preprint arXiv:2001.01969, 2020.
+[32] Paul Michel, Omer Levy, and Graham Neubig. Are sixteen heads really better than one?, 2019.
+[33] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in neural information processing systems, pages 5998­6008, 2017.
+[34] Li Yuan, Yunpeng Chen, Tao Wang, Weihao Yu, Yujun Shi, Francis EH Tay, Jiashi Feng, and Shuicheng Yan. Tokens-to-token vit: Training vision transformers from scratch on imagenet. arXiv preprint arXiv:2101.11986, 2021.
+[35] Huiyu Wang, Yukun Zhu, Hartwig Adam, Alan Yuille, and Liang-Chieh Chen. Max-deeplab: End-to-end panoptic segmentation with mask transformers. arXiv preprint arXiv:2012.00759, 2020.
+11
+
+[36] Yuqing Wang, Zhaoliang Xu, Xinlong Wang, Chunhua Shen, Baoshan Cheng, Hao Shen, and Huaxia Xia. End-to-end video instance segmentation with transformers. arXiv preprint arXiv:2011.14503, 2020.
+[37] Yanhong Zeng, Jianlong Fu, and Hongyang Chao. Learning joint spatial-temporal transformations for video inpainting. In European Conference on Computer Vision, pages 528­543. Springer, 2020.
+[38] Luowei Zhou, Yingbo Zhou, Jason J Corso, Richard Socher, and Caiming Xiong. End-to-end dense video captioning with masked transformer. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 8739­8748, 2018.
+[39] Jiasen Lu, Dhruv Batra, Devi Parikh, and Stefan Lee. Vilbert: Pretraining task-agnostic visiolinguistic representations for vision-and-language tasks. arXiv preprint arXiv:1908.02265, 2019.
+[40] Hao Tan and Mohit Bansal. Lxmert: Learning cross-modality encoder representations from transformers. arXiv preprint arXiv:1908.07490, 2019.
+[41] Yen-Chun Chen, Linjie Li, Licheng Yu, Ahmed El Kholy, Faisal Ahmed, Zhe Gan, Yu Cheng, and Jingjing Liu. Uniter: Universal image-text representation learning. In European Conference on Computer Vision, pages 104­120. Springer, 2020.
+[42] Weijie Su, Xizhou Zhu, Yue Cao, Bin Li, Lewei Lu, Furu Wei, and Jifeng Dai. Vl-bert: Pre-training of generic visual-linguistic representations. arXiv preprint arXiv:1908.08530, 2019.
+[43] Liunian Harold Li, Mark Yatskar, Da Yin, Cho-Jui Hsieh, and Kai-Wei Chang. Visualbert: A simple and performant baseline for vision and language. arXiv preprint arXiv:1908.03557, 2019.
+[44] Gen Li, Nan Duan, Yuejian Fang, Ming Gong, and Daxin Jiang. Unicoder-vl: A universal encoder for vision and language by cross-modal pre-training. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, pages 11336­11344, 2020.
+[45] Xiujun Li, Xi Yin, Chunyuan Li, Pengchuan Zhang, Xiaowei Hu, Lei Zhang, Lijuan Wang, Houdong Hu, Li Dong, Furu Wei, et al. Oscar: Object-semantics aligned pre-training for vision-language tasks. In European Conference on Computer Vision, pages 121­137. Springer, 2020.
+[46] Luowei Zhou, Hamid Palangi, Lei Zhang, Houdong Hu, Jason Corso, and Jianfeng Gao. Unified vision-language pre-training for image captioning and vqa. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, pages 13041­13049, 2020.
+[47] Hengshuang Zhao, Li Jiang, Jiaya Jia, Philip Torr, and Vladlen Koltun. Point transformer. arXiv preprint arXiv:2012.09164, 2020.
+[48] Angela Fan, Edouard Grave, and Armand Joulin. Reducing transformer depth on demand with structured dropout. In International Conference on Learning Representations, 2020.
+[49] Fu-Ming Guo, Sijia Liu, Finlay S Mungall, Xue Lin, and Yanzhi Wang. Reweighted proximal pruning for large-scale language representation. arXiv preprint arXiv:1909.12486, 2019.
+[50] Prakhar Ganesh, Yao Chen, Xin Lou, Mohammad Ali Khan, Yin Yang, Deming Chen, Marianne Winslett, Hassan Sajjad, and Preslav Nakov. Compressing large-scale transformer-based models: A case study on bert. arXiv preprint arXiv:2002.11985, 2020.
+[51] J. S. McCarley, Rishav Chakravarti, and Avirup Sil. Structured pruning of a bert-based question answering model. arXiv preprint arXiv:1910.06360, 2019.
+[52] Tianlong Chen, Jonathan Frankle, Shiyu Chang, Sijia Liu, Yang Zhang, Zhangyang Wang, and Michael Carbin. The lottery ticket hypothesis for pre-trained bert networks. arXiv preprint arXiv:2007.12223, 2020.
+12
+
+[53] Pengchuan Zhang, Xiyang Dai, Jianwei Yang, Bin Xiao, Lu Yuan, Lei Zhang, and Jianfeng Gao. Multi-scale vision longformer: A new vision transformer for high-resolution image encoding. arXiv preprint arXiv:2103.15358, 2021.
+[54] Iz Beltagy, Matthew E Peters, and Arman Cohan. Longformer: The long-document transformer. arXiv preprint arXiv:2004.05150, 2020.
+[55] Nikita Kitaev, Lukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. arXiv preprint arXiv:2001.04451, 2020.
+[56] Juho Lee, Yoonho Lee, Jungtaek Kim, Adam Kosiorek, Seungjin Choi, and Yee Whye Teh. Set transformer: A framework for attention-based permutation-invariant neural networks. In International Conference on Machine Learning, pages 3744­3753. PMLR, 2019.
+[57] Aurko Roy, Mohammad Saffar, Ashish Vaswani, and David Grangier. Efficient content-based sparse attention with routing transformers. Transactions of the Association for Computational Linguistics, 9:53­68, 2021.
+[58] Jack W Rae, Anna Potapenko, Siddhant M Jayakumar, and Timothy P Lillicrap. Compressive transformers for long-range sequence modelling. arXiv preprint arXiv:1911.05507, 2019.
+[59] Jonathan Ho, Nal Kalchbrenner, Dirk Weissenborn, and Tim Salimans. Axial attention in multidimensional transformers. arXiv preprint arXiv:1912.12180, 2019.
+[60] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and François Fleuret. Transformers are rnns: Fast autoregressive transformers with linear attention. In International Conference on Machine Learning, pages 5156­5165. PMLR, 2020.
+[61] Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamas Sarlos, Peter Hawkins, Jared Davis, Afroz Mohiuddin, Lukasz Kaiser, et al. Rethinking attention with performers. arXiv preprint arXiv:2009.14794, 2020.
+[62] Yi Tay, Mostafa Dehghani, Samira Abnar, Yikang Shen, Dara Bahri, Philip Pham, Jinfeng Rao, Liu Yang, Sebastian Ruder, and Donald Metzler. Long range arena: A benchmark for efficient transformers. arXiv preprint arXiv:2011.04006, 2020.
+[63] Yi Tay, Mostafa Dehghani, Dara Bahri, and Donald Metzler. Efficient transformers: A survey. arXiv preprint arXiv:2009.06732, 2020.
+[64] Sinong Wang, Belinda Z. Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-attention with linear complexity, 2020.
+[65] Yann LeCun, John S Denker, and Sara A Solla. Optimal brain damage. In Advances in neural information processing systems, pages 598­605, 1990.
+[66] Song Han, Jeff Pool, John Tran, and William Dally. Learning both weights and connections for efficient neural network. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett, editors, Advances in Neural Information Processing Systems 28, pages 1135­1143. Curran Associates, Inc., 2015.
+[67] Yann LeCun, John S. Denker, and Sara A. Solla. Optimal brain damage. In D. S. Touretzky, editor, Advances in Neural Information Processing Systems 2, pages 598­605. Morgan-Kaufmann, 1990.
+[68] Zhuang Liu, Jianguo Li, Zhiqiang Shen, Gao Huang, Shoumeng Yan, and Changshui Zhang. Learning efficient convolutional networks through network slimming. In Proceedings of the IEEE International Conference on Computer Vision, pages 2736­2744, 2017.
+[69] Yihui He, Xiangyu Zhang, and Jian Sun. Channel pruning for accelerating very deep neural networks. In Proceedings of the IEEE International Conference on Computer Vision, 2017.
+[70] Hao Zhou, Jose M Alvarez, and Fatih Porikli. Less is more: Towards compact cnns. In European Conference on Computer Vision, pages 662­677. Springer, 2016.
+13
+
+[71] Decebal Constantin Mocanu, Elena Mocanu, Phuong H Nguyen, Madeleine Gibescu, and Antonio Liotta. A topological insight into restricted boltzmann machines. Machine Learning, 104(2-3):243­270, 2016.
+[72] Sangkug Lym, Esha Choukse, Siavash Zangeneh, Wei Wen, Sujay Sanghavi, and Mattan Erez. Prunetrain: fast neural network training by dynamic sparse model reconfiguration. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, pages 1­13, 2019.
+[73] Brian R Bartoldson, Ari S Morcos, Adrian Barbu, and Gordon Erlebacher. The generalizationstability tradeoff in neural network pruning. arXiv preprint arXiv:1906.03728, 2019.
+[74] Emit J. Gumbel. Statistical theory of extreme values and some practical applications. The Journal of the Royal Aeronautical Society, 58(527):792­793, 1954.
+[75] Chris J Maddison, Daniel Tarlow, and Tom Minka. A* sampling. arXiv preprint arXiv:1411.0030, 2014.
+[76] Penghang Yin, Jiancheng Lyu, Shuai Zhang, Stanley Osher, Yingyong Qi, and Jack Xin. Understanding straight-through estimator in training activation quantized neural nets. arXiv preprint arXiv:1903.05662, 2019.
+[77] Jonathan Frankle, Gintare Karolina Dziugaite, Daniel M Roy, and Michael Carbin. The lottery ticket hypothesis at scale. arXiv preprint arXiv:1903.01611, 2019.
+[78] Tianlong Chen, Jonathan Frankle, Shiyu Chang, Sijia Liu, Yang Zhang, Michael Carbin, and Zhangyang Wang. The lottery tickets hypothesis for supervised and self-supervised pre-training in computer vision models. arXiv preprint arXiv:2012.06908, 2020.
+[79] Trevor Gale, Erich Elsen, and Sara Hooker. The state of sparsity in deep neural networks. arXiv preprint arXiv:1902.09574, 2019.
+[80] Erich Elsen, Marat Dukhan, Trevor Gale, and Karen Simonyan. Fast sparse convnets. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 14629­14638, 2020.
+[81] Jean-Baptiste Cordonnier, Andreas Loukas, and Martin Jaggi. On the relationship between selfattention and convolutional layers. In International Conference on Learning Representations, 2020.
+[82] Peiqi Wang, Yu Ji, Chi Hong, Yongqiang Lyu, Dongsheng Wang, and Yuan Xie. Snrram: An efficient sparse neural network computation architecture based on resistive random-access memory. In 2018 55th ACM/ESDA/IEEE Design Automation Conference (DAC), pages 1­6, 2018.
+[83] Mike Ashby, Christiaan Baaij, Peter Baldwin, Martijn Bastiaan, Oliver Bunting, Aiken Cairncross, Christopher Chalmers, Liz Corrigan, Sam Davis, Nathan van Doorn, et al. Exploiting unstructured sparsity on next-generation datacenter hardware. None, 2019.
+[84] Chen Liu, Guillaume Bellec, Bernhard Vogginger, David Kappel, Johannes Partzsch, Felix Neumärker, Sebastian Höppner, Wolfgang Maass, Steve B Furber, Robert Legenstein, et al. Memory-efficient deep learning on a spinnaker 2 prototype. Frontiers in neuroscience, 12:840, 2018.
+[85] Song Han, Xingyu Liu, Huizi Mao, Jing Pu, Ardavan Pedram, Mark A. Horowitz, and William J. Dally. Eie: Efficient inference engine on compressed deep neural network. In 2016 ACM/IEEE 43rd Annual International Symposium on Computer Architecture (ISCA), pages 243­254, 2016.
+[86] Yu-Hsin Chen, Tien-Ju Yang, Joel Emer, and Vivienne Sze. Eyeriss v2: A flexible accelerator for emerging deep neural networks on mobile devices. IEEE Journal on Emerging and Selected Topics in Circuits and Systems, 9(2):292­308, 2019.
+14
+
+A More Implementation Details
+Computing resources. All experiments use Tesla V100-SXM2-32GB GPUs as computing resources. Specifically, each experiments are ran with 8 V100s for 4  5 days.
+B More Experimental Results
+Sparse topology of SViTE-Base with unstructured sparsity. As shown in Figure A6, we observe that from initial random mask to explored mask in SViTE, plenty of structural patterns emerge (i.e., the darker "vertical" lines mean completely pruned neurons in the MLPs). It is supervising that unstructured sparse exploration can lead to structured patterns, which implies great potential to be accelerated in the real-world hardware devices.
+
+Explore SViTE
+
+Explore SViTE
+
+Explore SViTE
+
+MLP
+
+MLP
+
+MLP
+
+Figure A6: Binary mask visualizations of SViTE-Base at 50% unstructured sparsity. Within each box, left is
+
+the initial random mask; right is the explored mask from SViTE.
+
+Sparse topology of S2ViTE-Base with structured sparsity. Figure A7 shows mask visualizations of pruned multi-attention heads and MLPs in vision transformers. It shows that S2ViTE indeed
+explores a totally different connectivity patterns, compared to the initial topology.
+
+Initial
+
+Explored
+
+Initial Explored
+
+Attention Heads
+
+MLP
+
+Figure A7: (Left) The "survivors" summary of existing attention heads in sparse vision transformers from S2ViTE. Dark entry is the pruned attention head; bright entry means the remaining attention head. (Right)
+
+Binary masks of all W (l,3) MLPs in S2ViTE-Base. Initial denotes the random connectivity in the beginning, and Explored is the explored typologies at the end. Visualized S2ViTE-Base has 40% structural sparsity.
+
+Ablation of only applying our learnable token selector. We compare these three setup: (a) DeiTSmall (79.90 test accuracy); (b) DeiT-Small + Token selector with 10% data sparsity (78.67 test accuracy); (c) DeiT-Small + Token selector with 10% data sparsity + SViTE with 50% unstructured sparsity (79.91 test accuracy). It demonstrates that simultaneously enforcing data and architecture sparsity brings more performance gains.
+
+A15
+
+

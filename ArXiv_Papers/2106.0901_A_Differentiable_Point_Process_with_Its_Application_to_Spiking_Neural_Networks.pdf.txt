@@ -1,0 +1,1628 @@
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+arXiv:2106.00901v2 [cs.NE] 3 Jun 2021
+
+Hiroshi Kajino 1
+
+Abstract
+This paper is concerned about a learning algorithm for a probabilistic model of spiking neural networks (SNNs). Jimenez Rezende & Gerstner (2014) proposed a stochastic variational inference algorithm to train SNNs with hidden neurons. The algorithm updates the variational distribution using the score function gradient estimator, whose high variance often impedes the whole learning algorithm. This paper presents an alternative gradient estimator for SNNs based on the path-wise gradient estimator. The main technical difficulty is a lack of a general method to differentiate a realization of an arbitrary point process, which is necessary to derive the path-wise gradient estimator. We develop a differentiable point process, which is the technical highlight of this paper, and apply it to derive the path-wise gradient estimator for SNNs. We investigate the effectiveness of our gradient estimator through numerical simulation.
+1. Introduction
+A spiking neural network (SNN) is an artificial neural network (ANN) where neurons communicate with each other using spikes rather than real values as the conventional ANNs do. The conventional ANN is a special case of SNN where information is encoded into the firing rate of neurons (which we call the rate coding) and the rate serves as the communication currency. This specification facilitates developing learning algorithms for ANNs, leading to the recent great success of deep neural networks. On the other hand, in the community of neuroscience, experimental evidence on biological neurons indicates that the rate coding alone cannot explain the whole brain activity (Bothe, 2004) and more precise modeling of neural coding is anticipated. Since there still exist performance gaps between the ratebased ANNs and biological neural networks (i.e., brains) in terms of inference capability and energy efficiency, this
+1IBM Research - Tokyo, Tokyo, Japan. Correspondence to: Hiroshi Kajino <kajino@jp.ibm.com>.
+Proceedings of the 38 th International Conference on Machine Learning, PMLR 139, 2021. Copyright 2021 by the author(s).
+
+raises the following question: how much of the current performance gaps can be attributed to this difference on neural coding? This open problem motivates us to study SNNs.
+One of the major obstacles towards answering it is a lack of practical learning algorithms for SNNs, which discourages us from empirical investigation. While there exist a number of attempts to develop learning algorithms, most of them have more or less limited applicability. We consider a practical learning algorithm should at least be (i) theoretically grounded, (ii) empirically confirmed to work well, and (iii) easy to simulate (fewer hyperparameters, less computation time, etc.)1. For example, theoretical aspects of the algorithms based on spike-timing-dependent plasticity (Chapter 19 (Gerstner et al., 2014)) are not well understood. For another example, simulating learning algorithms for continuous-time deterministic SNNs requires the stepsize parameter of time-axis discretization when the dynamics of a neuron is described by differential equations (e.g., (Huh & Sejnowski, 2018)). The step-size parameter brings about the trade-off between the simulation quality and computation time, which makes the simulation more intricate. These examples illustrate that even major approaches do not satisfy all the requirements above, and therefore, there still exists much room for improvement.
+Among a number of approaches, we employ as a foundation a probabilistic formulation of SNNs (Pfister et al., 2006), which models spike trains (temporal sequence of spikes emitted from neurons) as a realization of a multivariate point process. It is easier for us to start from it than others because it already satisfies requirements (i) and (iii), which are more intrinsic properties than requirement (ii). In fact, learning algorithms are formalized by maximum likelihood estimation, and its exact simulation has no trade-off hyperparameter as will be explained in Section 2.2. Therefore, the remaining concern is its empirical performance.
+One of the state-of-the-art learning algorithms for probabilistic SNNs is the work by Jimenez Rezende & Gerstner (2014). The authors propose a stochastic variational inference algorithm for SNNs with hidden neurons. Since spike trains of hidden neurons are unobservable and it is intractable to compute the marginal likelihood, an evidence
+1Biological plausibility is of another great interest, but is not mentioned because it is not mandatory for engineering purposes.
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+lowerbound (ELBO) is instead used as the objective function (Section 4.2). The key factor for optimizing ELBO is the way we estimate the gradient of ELBO. The authors employed the score function gradient estimator, also known as the REINFORCE estimator, which is widely applicable but is often reported to suffer from its high variance.
+Our main idea is to substitute a path-wise gradient estimator for the score function gradient estimator. The path-wise gradient estimator tends to have lower variance than the score function gradient estimator (Mohamed et al., 2019), but it is not widely applicable (and is not applicable to SNNs) because it requires a sample from the variational distribution to be differentiable. Our contribution is that we develop a differentiable point process (Section 3) and apply it to derive the path-wise gradient estimator for SNNs (Section 4.2.2).
+We empirically investigate the effectiveness of the proposed learning algorithm in Section 5. We will confirm that (i) the proposed gradient estimator has lower variance than the existing one and (ii) this lower variance contributes to improve the performance of the learning algorithm. By comparing the performance of the proposed and existing ones, we obtain experimental results supporting these hypotheses. Therefore, we conclude that our path-wise gradient estimator improves empirical performance of SNNs.
+One of the limitations of our learning algorithm as compared to the existing algorithm (Jimenez Rezende & Gerstner, 2014) is computation time. Since our algorithm generates more hidden spikes than the existing one does, our algorithm requires more computation time. We empirically examine the computational overhead of our algorithm against the existing one, and find that our algorithm requires 2.8 times more computation time than the existing one.
+Notation. Let [N ] = {1, 2, . . . , N }. For any vector x, its d-th element is represented by xd. xd d[D] denotes a D-dimensional vector whose d-th element is xd. For any vector x  RD and scalar c  R, x c denotes the (D + 1)-dimensional vector concatenating x and c. Let R0 = {x  0} and R>0 = {x > 0}. Let 1D = {1d}d[D] be the set of D-dimensional one-hot vectors, where 1d  {0, 1}D is the one-hot vector whose dth element is 1 and the others are 0. For any set A, let conv(A) be its convex hull, let conv0(A) := conv(A{0}). Let Cat(p) be the categorical distribution with parameter p  conv(1D), whose random variable takes 1d  1D with probability pd. Let U [a, b] denote the uniform distribution over [a, b]. For any expectation operator Ep, let E^p be its Monte-Carlo approximation using an i.i.d. sample from p.
+
+2.1. Point Processes
+A point process (Daley & Vere-Jones, 2003) is a probabilistic model of an event collection. It is called a temporal point process when the event collection evolves in time. This paper only deals with a temporal point process, and therefore, we refer to it as a point process. We assume that point processes are simple, i.e., no events coincide.
+
+2.1.1. UNIVARIATE POINT PROCESS
+
+Assume we observe a sequence of N  N discrete events
+
+during time interval [0, T ], and let T denote such an ob-
+
+servation. T can be represented by a series of event time
+
+stamps {tn  [0, T ]}n[N] as well as the information that
+
+we observe no event during [0, t1), {(tn, tn+1)}Nn=-11, and (tN , T ]. Let T tn represents a partial observation of T up
+
+to and including time tn. One way of modeling T is to spec-
+
+ify the probability density function of the event time stamp
+
+tn+1 given the collection of its past events T tn , which we describe, f (t | T tn ). Note that the probability den-
+
+sity function must satisfy f (t | T tn ) = 0 for t  tn and
+
+ tn
+
+f (t
+
+|
+
+T
+
+tn )dt
+
+=
+
+1.
+
+The
+
+cumulative
+
+distribution
+
+func-
+
+tion can be defined accordingly: F (t | T tn ) =
+
+t tn
+
+f (s
+
+|
+
+T tn )ds = Pr[tn+1  (tn, t) | T tn ].
+
+Another way of modeling it is to specify the conditional intensity function, which is related to the distributions as,
+
+ f t | T tn
+
+ (t | T tn ) = 1 - F (t | T tn )
+
+(t > tn),
+
+(1)
+
+0
+
+(t  tn).
+
+In the following, let tn denote an arbitrary event time stamp and we only specify the conditional intensity function for t > tn, because its value for t  tn is trivially 0. Observing that (t | T tn )dt = Pr[tn+1  [t, t + dt] | tn+1 / (tn, t), T tn ] holds as dt  +0 (Rasmussen, 2018), the conditional intensity function represents how likely the event occurs at time t given that we have observed n events so far and no event has been observed during (tn, t).
+A point process is more often specified by the conditional intensity function than the time interval distribution. Let PP() be the point process with the conditional intensity function . Corollary 1, which is an immediate consequence of Proposition 2, states the conditions under which the conditional intensity function uniquely specifies a point process.
+Corollary 1. A conditional intensity function  uniquely defines a point process if it satisfies the following conditions for any observation of discrete events T tn and any t > tn:
+
+2. Preliminaries
+This section introduces temporal point processes along with their parameter estimation and sampling methods.
+
+1. (t | T tn ) is non-negative and integrable on any interval starting at tn,
+
+2.
+
+t tn
+
+(s
+
+|
+
+T
+
+tn )ds
+
+
+
+
+
+as
+
+t
+
+
+
+,
+
+and
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+4  3 2 1
+!
+
+"
+
+# $
+
+defined by a 1D-marked point process, where each mark pn
+
+indicates which dimension the event belongs to. For exam-
+
+ple, if pn = 11, the n-th event occurs at the first dimension.
+
+In Figure 2, blue-circle and red-diamond marks correspond
+
+
+
+to the first and the second dimensions respectively.
+
+Letting f (t, p | T1Dtn ) be the probability density function
+
+
+
+of each event (tn+1, pn+1) given its past events T1Dtn , the
+
+conditional intensity function can be defined similarly:
+
+Figure 1. Realization of a temporal point process (bottom) and its corresponding left-continuous counting process (top).
+
+Multivariate
+
+
+
+point process
+
+
+
+Marked
+
+point process
+
+
+
+Figure 2. Illustration of a multivariate point process (top) and its equivalent marked point process (bottom).
+
+3.
+
+t tn
+
+(s
+
+|
+
+T
+
+tn )ds
+
+is
+
+right
+
+continuous
+
+w.r.t.
+
+t.
+
+The log-likelihood of observation T on PP() is given as,
+
+log p(T ) = log  t | T tn(t) - [0,T ](T ), (2)
+tT
+
+where let [0,T ](T ) =
+
+T 0
+
+(t
+
+|
+
+T tn(t) )dt
+
+be
+
+the
+
+inte-
+
+grated conditional intensity function, also known as the
+
+compensator, which accounts for no-event periods, and let
+
+n(t) : R0  Z0 be the left-continuous2 counting process of the observation T , which counts the number of events up
+
+to but not including time t. The latest event time stamp at
+
+time t can be denoted by tn(t)  [0, t). Figure 1 illustrates a
+
+realization of a point process and its counting representation.
+
+A typical procedure of modeling T is to design a parametric
+
+model of the conditional intensity function that satisfies the
+
+conditions of Corollary 1 and train it by maximizing the
+
+log-likelihood function (Equation (2)).
+
+2.1.2. MULTIVARIATE POINT PROCESS
+A multivariate point process is a set of mutually dependent point processes and can be defined via a marked point process, in which each event is associated with a mark. We call a marked point process whose mark belongs to set X, an X-marked point process. Let TX denote an observation of an X-marked point process, which contains a series of event time stamps and marks, {(tn, pn)  [0, T ] × X}n[N]. As illustrated in Figure 2, a D-variate point process can be
+2A counting process is usually defined to be right-continuous. We introduce the left-continuous one so as to represent the integrand of the compensator concisely. See Appendix A for details.
+
+ t, p | T1Dtn
+
+= f t, p | T1Dtn 1 - F t | T1Dtn
+
+,
+
+(3)
+
+where F (t | T1Dtn ) =
+
+t tn
+
+ds
+
+p1D f (s, p | T1Dtn ).
+
+The conditional intensity function represents how likely
+
+event (t, 1d) occurs: (t, 1d | T1Dtn )dt = Pr[tn+1 
+
+[t, t + dt], pn+1 = 1d | tn+1 / (tn, t), T1Dtn ]. Proposi-
+
+tion 2 states conditions under which the conditional inten-
+
+sity function uniquely specifies a marked point process. See
+
+Appendix B for its proof. Let MPP() be the multivariate
+
+point process with the conditional intensity function .
+
+Proposition 2. Let X be a set. A conditional intensity function  uniquely defines an X-marked point process if it satisfies the following conditions for any TXtn and t > tn:
+
+1. (t, p | TXtn )  0 and integrable w.r.t. p and w.r.t. t on any interval starting at tn,
+
+2.
+
+t tn
+
+ds
+
+X dp(s, p | TXtn )   as t  , and
+
+3.
+
+t tn
+
+ds
+
+X dp(s, p | TXtn ) is right continuous in t.
+
+The log-likelihood of observation T1D is written as:
+
+log p(T1D )
+
+=
+
+log 
+
+t,
+
+p
+
+|
+
+T tn(t)
+1D
+
+- [0,T ](T1D ),
+
+(4)
+
+(t,p)T1D
+
+where let [0,T ](T1D ) =
+
+T 0
+
+p1D (t, p | T1Dtn(t))dt
+
+be the compensator. Since its analytical form is not available
+
+for a general conditional intensity function, we resort to
+
+Monte-Carlo approximation to estimate the compensator. In
+
+specific, we draw M examples, {tm}m[M], from U [0, T ] and approximate it as,
+
+[0,T
+
+](T1D
+
+)
+
+
+
+T M
+
+M
+
+
+
+tm,
+
+p
+
+|
+
+T tn(tm)
+1D
+
+.
+
+(5)
+
+m=1 p1D
+
+2.2. Sampling Algorithms
+This section introduces sampling algorithms for a point process given a conditional intensity function. A notable
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+Algorithm 1 Thinning algorithm for MPP
+
+Input: Conditional intensity function  and upperbound ¯ Output: Realization of MPP()
+
+1: S  , T  
+
+2: while true do 3: Sample s  PP(¯ | S)
+
+4: if s > T then
+
+5: break
+
+6:
+
+Sample
+
+p r
+
+ Cat (¯   (s | T ))
+
+7: if r = 1 then 8: T  T  {(s, p)} 9: S  S  {s}
+
+10: return T
+
+feature of the algorithms is that they can exactly simulate point processes without any approximation. This indicates that there exists no hyperparameter controling the trade-off between computational cost and accuracy of the simulation, which greatly facilitates simulating SNNs.
+
+2.2.1. HOMOGENEOUS POISSON PROCESS
+The simplest point process is the homogeneous Poisson process whose conditional intensity function is constant; (t | T tn ) =  for any T tn . It is straightforward to sample from it because the interval between two successive events  is independently and identically distributed according to the exponential distribution, f ( ; ) = e- .
+
+2.2.2. GENERAL POINT PROCESS
+
+It is not straightforward to sample from a general point process when a closed-form expression of the inter-event time distribution is not available. This is true for many point processes including SNNs. Among several sampling methods, the thinning algorithm (Lewis & Shedler, 1979; Ogata, 1981) allows us to sample from such a point process without knowing the closed-form expression. For other sampling algorithms, please refer to Section 6.
+
+The main idea is to generate a sequence of time stamps
+
+from a homogeneous Poisson process with sufficiently high
+
+intensity (which we call the base process) and then to thin
+
+some of the events so that the sequence follows the given
+
+point process. Algorithm 1 describes it for the multivariate
+
+case, where let  (t | T ) =  (t, 1d | T ) d[D], and let ¯ be an operator that receives a D-dimensional vector 
+
+and
+
+returns
+
+1 ¯
+
+ ¯ -  1 .
+
+It first generates a new time stamp s from the homogeneous Poisson process with intensity ¯ (line 3). Then
+
+it decides whether or not to accept the event, and if ac-
+
+cepting, decides which dimension the event is assigned
+
+to (lines 6-8); s is rejected if r = 1, i.e., with probability
+
+1
+
+-
+
+1 ¯
+
+p1D (s, p | T ), and s is accepted as the event
+
+from the d-th dimension (d  [D]) if pd = 1, i.e., with
+
+probability  (s, 1d | T ) /¯,
+
+Intuitively, the correctness of Algorithm 1 is understood as follows. Assuming we have sampled T1Dtn , at any time t > tn, the probability that the algorithm generates the event
+with mark 1d in interval [t, t + dt] is,
+
+Pr tn+1  [t, t + dt], pn+1 = 1d | T1<Dt
+
+=
+
+¯dt
+
+·  t, 1d | T1Dtn /¯
+
+Prob. that the base process generates the event in [t,t+dt]
+
+Prob. that t is assigned the d-th mark
+
+= t, 1d | T1Dtn dt,
+
+where let T1<Dt denote the event tn+1 / (tn, t) and T1Dtn . This shows that the output follows MPP(). For its formal proof, please refer to Reference (Ogata, 1981).
+
+3. Differentiable Point Process
+We present the key building block of our method called a differentiable point process, whose realization is differentiable with respect to its parameters. Differentiability plays an essential role when designing a learning algorithm for latent variable models as will be discussed in Section 4.2.
+The key idea is that the output of Algorithm 1 becomes differentiable if we replace the categorical distribution in line 6 with a reparameterizable distribution such as the concrete distribution, also known as the Gumbel-softmax distribution (Maddison et al., 2017; Jang et al., 2017). We first review the concrete distribution (Section 3.1), and then we present the differentiable point process (Section 3.2).
+3.1. Concrete Distribution
+The concrete distribution has been developed as a reparameterizable substitute for the categorical distribution. The idea comes from the Gumbel-max trick, which enables us to sample from the categorical distribution. Letting   RD0 be an unnormalized parameter of the categorical distribution, the Gumbel-max trick first samples ud  U [0, 1] for each d  [D], and then outputs 1d where d = arg maxd[D] log d - log(- log ud). The output is known to be distributed according to Cat(/  1). While the Gumbel-max trick successfully divides the sampling procedure into random sampling from the fixed distribution and a parameterized transformation of it, which is necessary to be differentiable, the gradient of its realization with respect to  is non-informative, because a small variation to  does not change the gradient.
+The concrete distribution is defined by relaxing the range of
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+Algorithm 2 Thinning algorithm for PP
+
+Input: Conditional intensity function , its upperbound ¯, and temperature  > 0. Output: Realization of PP , ¯, 
+
+1: S  , T  
+
+2: while true do 3: Sample s  PP(¯ | S) 4: if s > T then
+
+5: break
+
+6:
+
+Sample
+
+p r
+
+ Concrete (¯   (s | T ))
+
+7: T  T  {(s, p)}
+
+8: S  S  {s}
+
+9: return T
+
+the random variable from 1D to its convex hull conv(1D) so that its gradient is more informative. Accordingly, the
+argmax operator in the Gumbel-max trick is replaced with the softmax operator with temperature  > 0. Since softmax becomes equivalent to argmax as   0, the concrete distribution also becomes equivalent to the categorical distribution as   0. Let g (p; ) denote the probability density function of the concrete distribution with temperature  and unnormalized parameter   RD>0.
+
+3.2. Multivariate Differentiable Point Process
+
+We present a constructive definition of a differentiable point process in Definition 3.
+
+Definition 3. Assume the conditional intensity function
+
+(t, p | T1Dtn ) can be computed with a conv0(1D)-marked point process. Let
+
+an observation of ¯ be a constant sat-
+
+isfying ¯ > p1D (t, p | Tcontvn0(1D)) for any Tcontvn0(1D)
+
+and t > tn, and  > 0 be temperature. The differentiable
+
+point process PP , ¯,  is defined as a conv0(1D)-
+
+marked point process constructed by Algorithm 2.
+
+Algorithms 1 and 2 are different in two ways. First, all events from the base process are accepted in Algorithm 2, while some are rejected in Algorithm 1. Second, in Algorithm 1, the mark is defined over 1D, while in Algorithm 2, it is defined over conv0(1D); each mark is associated with amplitude that is continuous w.r.t. the model parameter.
+The differentiable point process as defined above can be understood as a marked point process (Proposition 4).
+Proposition 4. The differentiable point process PP(, ¯,  ) is a conv0(1D)-marked point process with conditional intensity function,
+
+ t, p | Tcontvn0(1D); , ¯, 
+
+=¯ · g
+
+p 1- p 1
+
+; ¯  
+
+t | Tcontvn0(1D)
+
+.
+
+We can confirm the differentiability of a realization of PP (Proposition 5). We can also confirm that in the limit of   0, the differentiable point process becomes equivalent to the original point process (Proposition 6). See Appendix C for their formal statements and proofs.
+As discussed by Maddison et al. (2017), the concrete distribution often suffers from underflow and we have to implement it in the logarithmic scale. Our implementation also suffers from the same issue, and we provide a numerically stable implementation idea in Appendix E.
+
+4. Learning Algorithm for SNNs
+We present a learning algorithm for spiking neural networks (SNNs) based on the differentiable point process. We first define a probabilistic model of SNNs (Section 4.1) and then will present our learning algorithm, highlighting the difference from the existing one (Section 4.2).
+
+4.1. Probabilistic Model of Spiking Neural Networks
+
+We employ the standard probabilistic model in the litera-
+ture (Pfister et al., 2006). Let D be the number of neurons, let N = 1D be the set of neurons, each of which is indexed by a one-hot vector, and let TN be spike trains emitted from SNN during time interval [0, T ]. We assume that TN is a realization of an N -marked point process.
+
+We define the conditional intensity function based on a spike response model (SRM) (Gerstner et al., 2014). SRM assumes that the d-th spiking neuron is driven by its internal state called a membrane potential,
+
+ud t | TNtn = u¯d +
+
+fd(t - t ) · p, (6)
+
+(t ,p)TNtn
+
+where fd(s) = fd ,d(s) d [D] is a vector of filter functions from all of the neurons to the d-th neuron. In specific, fd ,d(s) describes the time course of the membrane potential of neuron d in response to a spike emitted by neuron d at time s = 0. We assume fd,d(s)  0 for all d  N . This assumption allows us to reproduce the resetting behavior
+of a biological neuron; the membrane potential is reset to
+a lower level after the neuron fires. We also assume that fd ,d(s) = 0 for s < 0. This assumption ensures that future events have no influence on past events.
+
+Then, the conditional intensity function is defined by,
+
+SNN(t, p | TNtn ) = p · (u(t | TNtn )),
+
+(7)
+
+where  : RD  RD0 is element-wisely non-decreasing and
+
+differentiable3 and let u(t | TNtn ) =
+
+ud(t
+
+|
+
+TNtn )
+
+.
+d[D]
+
+3We use the sigmoid function multiplied by amplitude a > 0 element-wisely as , for which ¯ is easy to derive.
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+As the membrane potential of one neuron increases, the neuron is more likely to fire and generate a spike.
+
+For numerical simulation, we assume that the filter functions are parameterized by weights {wd ,d,l  R}Ll=1 as,
+
+fd ,d(s) =
+
+L l=1
+
+wd
+
+,d,l
+
+·
+
+(s
+
+-
+
+sl)
+
+0
+
+(s  0), (s < 0),
+
+(8)
+
+where
+
+{sl
+
+
+
+R}Ll=1
+
+are
+
+fixed
+
+and
+
+(s)
+
+=
+
+max{
+
+3 4
+
+(1-s2),
+
+0}
+
+is the Epanechnikov kernel. We chose this kernel because
+
+the bounded support of the kernel allows us to ignore events
+
+that occurred more than a certain period ago for membrane potential computation. Let  = {u¯d  R}Dd=1  {wd ,d,l  R | l  [L]}Dd,d =1 denote the set of model parameters.
+
+4.2. Learning Algorithms
+Assume some of the neurons are hidden and their spike trains are unobservable. Let O  N and H = N \O be the sets of observable and hidden neurons, respectively. Accordingly, the spike trains of all of the neurons are divided into observable and hidden ones: TN = TO  TH. We consider an estimation procedure for the model parameters of SNN, , given a set of observed spike trains {TO,n}Nn=1.
+Letting p(TN ; ) = p(TO, TH; ) be the joint distribution of the observable and hidden spike trains, the parameter  is estimated by maximum likelihood estimation:
+
+maximize 
+
+N
+(; TO,n)
+n=1
+
+where (; TO) = log p(TO, TH; )dTH is the marginalized log-likelihood function. Since it is intractable to compute it, we substitute its lower bound called an evidence lower bound (ELBO) for the marginalized log-likelihood function as the objective function:
+
+(, ; TO) = Eq(TH;) [log p(TO, TH; ) - log q(TH; )] ,
+
+ Eq(TH;) (, ; TO, TH),
+
+(9)
+
+where q(TH; ) is an arbitrary distribution called a variational distribution, parameterized by . We specifically assume that the variational distribution is modeled by SNN
+driven by both observable and hidden spike trains. In the following, we omit the index of data n for ease of presentation and consider ELBO using a single observation TO.
+
+Since there exists no closed-form solution to the maximiza-
+
+tion problem, we resort to stochastic gradient ascent meth-
+
+ods, resulting in Algorithm 3. The basic procedure to train
+
+SNN is to choose one realization TO from the data set randomly, and update  and  so as to maximize Equation (9).
+
+In the following, we present both an existing approach and
+
+our
+
+novel
+
+approach
+
+to
+
+compute
+
+the
+
+gradients,
+
+ 
+
+and
+
+ 
+
+.
+
+Algorithm 3 Generic learning algorithm
+
+Input: Observation TO, learning rate {k}Kk=1. Output: Model parameters , .
+
+1: Initialize , 
+
+2: for k = 1, . . . , K do
+
+3:
+
+Update
+
+
+
+
+
+
+
++
+
+k
+
+ 
+
+(,
+
+;
+
+TO )
+
+4:
+
+Update
+
+
+
+
+
+
+
++
+
+k
+
+ 
+
+(,
+
+;
+
+TO )
+
+5: return , 
+
+4.2.1. GRADIENT WITH RESPECT TO 
+
+The gradient with respect to  is straightforwardly computed
+
+by applying Monte-Carlo approximation:
+
+ 
+
+(, ; TO) 
+
+E^ q(TH;)
+
+ 
+
+log
+
+p(TO
+
+,
+
+TH;
+
+)
+
+.
+
+This can be numerically
+
+calculated with the help of automatic differentiation tools.
+
+4.2.2. GRADIENT WITH RESPECT TO 
+
+The gradient with respect to  is more involved. In Equa-
+
+tion (9), the expectation operator depends on  and we
+
+cannot
+
+exchange
+
+ 
+
+and
+
+Eq(TH;).
+
+There are at least
+
+two approaches to computing the gradient in this situa-
+
+tion (Mohamed et al., 2019). One approach is to rely on the
+
+score function gradient estimator, also known as the RE-
+
+INFORCE estimator (Williams, 1992). While it is widely
+
+applicable to a variety of models, it is often reported that
+
+the gradient estimator has high variance. Another approach
+
+is the path-wise gradient estimator, which makes use of the
+
+reparameterization trick (Kingma & Welling, 2014). While
+
+its variance is often reported to be lower than that of the
+
+score function gradient estimator (Mohamed et al., 2019),
+
+its application is limited because the probability distribution
+
+q must be reparameterizable.
+
+In the literature of SNNs, the score function gradient estimator with respect to  has been developed by Jimenez Rezende & Gerstner (2014). Our contribution is to develop a path-wise gradient estimator for SNNs based on a differentiable point process presented in Section 3.
+
+Score function gradient estimator. Jimenez Rezende
+
+& Gerstner (2014) used the score function gradient es-
+
+timator for computing the gradient with respect to :
+
+ 
+
+(,
+
+;
+
+TO
+
+)
+
+
+
+E^ q(TH
+
+;)
+
+[
+
+
+
+log
+
+q(TH 
+
+;)
+
+(
+
+(, ; TO, TH)
+
+-
+
+1)]. While this is an unbiased estimator of the gradient,
+
+its high variance is often problematic. We employ the varia-
+
+tional distribution with the conditional intensity function,
+
+q(t, p | TNtn ; ) = p · (u(t | TNtn ; )), (10)
+
+for any p  H. In particular, we use shared parameters for the model and the variational distribution, i.e., we set  =  as we observe it improves the performance.
+
+Path-wise gradient estimator. We propose a path-wise gra-
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+dient estimator for SNNs. Our main idea is to employ the differentiable point process, PP(q(t, p | TN ; ); ¯,  ), as the variational distribution, where q is defined in Equation (10). This allows us to differentiate a Monte-Carlo approximation of ELBO (Equation (9)) using automatic differentiation tools:
+
+ (, ; TO)  E^PP (, ; TO, Tconv0(H)()) .
+
+
+
+
+
+(11)
+
+The main technical issue in applying the differentiable point process is that its realization Tconv0(H)() is incompatible with the SNN model defined by Equations (6) and (7). The model assumes that a mark p is a one-hot vector, while a mark of a differentiable point process belongs to conv0(H). We address this by devising a differentiable spiking neural network (SNN), which can handle a mark in conv0(H), while keeping the conditional intensity function proper.
+Let N¯ = O  conv0(H) be the set of marks for SNN. We define the membrane potential of neuron d  N as,
+
+ud t | TN¯tn
+
+= u¯d +
+
+fd(t - t ) · p,
+
+(t ,p)TN ¯ tn
+
+(12)
+
+and the conditional intensity of SNN for p  N¯ as,
+
+SNN t, p | TN¯tn ; ¯, 
+
+(13)
+
+=
+
+(p - 1d)SNN t, p | TN¯tn
+
+1d O
+
++ I[p  conv0(H)] t, pH | TN¯tn ; H, ¯, 
+
+where H t | TN¯tn =  ud(t | TN¯tn ) dH , I[·] is the indicator function, and pH = pd dH.
+It is necessary to confirm that (i) the conditional intensity function can be calculated using past events whose marks are in N¯ and (ii) the conditional intensity function satisfies all of the conditions listed in Proposition 2 for X = N¯ . The first requirement immediately follows from Equations (12) and (13). In Appendix D, we provide the formal statement and proof of the second requirement (Proposition 7). We also confirm that ELBO is differentiable (Proposition 8) and that the differentiable SNN becomes equivalent to the vanilla SNN in the limit of   0 (Proposition 9).
+
+5. Empirical Studies
+Let us investigate the effectiveness of our gradient estimator through numerical simulation. Our hypothesis is that (i) the path-wise gradient estimator will have lower variance than the score function estimator and (ii) lower variance will improve the predictive performance. We design two
+
+Table 1. Configuration of SNN generating a synthetic data set.
+
+Network size Activation/filter functions PP # of samplings
+
+D = 6, |O| = 2, |H| = 4 a = 5, L = 2, s1 = 0, s2 = 10  = 0.3, ¯ = 20 100 (Eq. (5)), 1 (Eq. (9))
+
+experiments (Sections 5.1 and 5.2) to verify these two hypotheses. We additionally compare computation cost of the learning algorithms using each of the gradient estimators in Section 5.3. All the experiments are conducted on IBM Cloud4, and the code is publicly available (Kajino, 2021).
+Data set. We use a synthetic data set generated by the vanilla SNN (Equation (7)). Table 1 summarizes its configuration. We set ¯ = a|H| = 20, which is the tightest upperbound because we use the sigmoid activation function with amplitude a. The weights are randomly sampled: biases from U [-1, 1], off-diagonal kernel weights from U [-5, 5], and diagonal kernel weights from U [-5, -0.1].
+Methods compared. Since our objective is to highlight the performance gap between our path-wise gradient estimator (SNN) and the score function gradient estimator (SNN), we use the same hyperparameters and initialization for both of them as much as possible. We initialize their parameters randomly using the same random seed so that both of them have random but the same initial parameters. We also set their hyperparameters as Table 1. The temperature is the only hyperparameter that impacts the performance gap. In preliminary experiments, we observe no significant impact for   [0.1, 0.5], and we only report the result at  = 0.3.
+5.1. Variance of the Gradient Estimators
+First, let us study the variance of the gradient estimators.
+Protocol. We generate a single random parameter setting and use it to generate a synthetic data set consisting of 10 examples of length 50. Then, we compute the gradient estimators using the whole data set 1000 times, which yields 1000 gradient estimates for each method. Finally, we compute the standard deviations of each element of the gradients, and report the mean of the standard deviations.
+Result. The mean standard deviation of SNN was 66.3, whereas that of SNN was 2.49 × 103. This clearly demonstrates that the variance of our estimator tends to be lower than that of the existing estimator.
+5.2. Predictive Performance
+The second experiment studies the predictive performance of the models learned by each of the methods compared.
+4Intel Xeon Gold 6248 2.50GHz 48 cores and 192GB memory.
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+ELBO Per-epoch computation time [sec]
+
+-100
+
+-150
+
+-200
+
+-250
+
+-300
+
+-350
+
+-400
+SNN
+
+-450
+
+SNN
+
+25
+
+50
+
+75
+
+100
+
+125
+
+150
+
+175
+
+200
+
+# of training examples
+
+Figure 3. Predictive performance of SNN and SNN.
+
+500
+
+SNN
+
+SNN
+
+400
+
+300
+
+200
+
+100
+
+0
+
+2.5
+
+5.0
+
+7.5
+
+10.0 12.5 15.0 17.5 20.0
+
+Amplitude a
+
+Figure 4. Per-epoch computation time of SNN and SNN.
+
+Protocol. We generate 24 random parameter settings, and consistently use them in this experiment. We aim to evaluate the performance gap between SNN and SNN in different sizes of training sets. To this end, we execute the following, varying the size as Ntrain = 10, 20, 30, 40, 50, 75 100, 200, and for each parameter setting.
+We generate training/test sets consisting of Ntrain/100 examples of length 50 respectively. SNN and SNN are trained on the training set using AdaGrad (Duchi et al., 2011) with initial learning rate 0.05 for 10 epochs. We evaluate the predictive performance by computing ELBO (Equation (9)) on the test set. For fair comparison, we evaluate the performance of SNN by transferring its parameters to the vanilla SNN5. By repeating this over 24 parameter settings, we obtain 24 ELBO scores. We report their mean as the performance of each method for each Ntrain.
+Result. Figure 3 summarizes the experimental results. It clearly shows that SNN consistently outperforms SNN especially in the small-sample regime, which supports the benefit of our low-variance estimator.
+5.3. Computational Overhead
+The last experiment studies computation overhead of SNN over SNN. The computation time depends on the number of spikes, and the number of (hidden) spikes is proportional to a, the amplitude of the non-linearlity  that maps the membrane potential into the conditional intensity function. In general, SNN generates more hidden spikes than SNN because the thinning algorithm for the differentiable point process does not reject any of the candidate spikes. Therefore, we expect that SNN requires more computation time than SNN. The purpose of this experiment is to measure the computational overhead of SNN over SNN.
+Protocol. We generate a single parameter setting, and gen-
+5For better transfer, we decrease  geometrically by ratio 0.95 at every epoch, which slightly improves the performance.
+
+erate a training set of 10 examples of length 50. We then set up both SNN and SNN with amplitude a = 1, 2, . . . , 20, resuting in 40 models to be trained. For each model, we measure the computation time of running 100 epochs, and obtain per-epoch computation time by averaging them.
+Result. Figure 4 summarizes the experimental results. As is expected, SNN requires 2.8 times more computation time than SNN on average. This result can be used as a reference for users to decide which gradient estimator to be employed. If a user can afford this overhead, our path-wise gradient estimator is recommended; otherwise, please consider to use the score function gradient estimator.
+Note that we can improve the computation time of our method by introducing an adaptive upperbound ¯ in Algorithm 3, if it is a tigher upperbound than the fixed upperbound. We leave this improvement as future work.
+6. Related Work
+The present work is related to the communities of SNNs and point processes. Let us discuss our contributions to them.
+6.1. Spiking Neural Networks
+The most relevant work is the stochastic variational learning algorithm for SNNs (Jimenez Rezende & Gerstner, 2014). As discussed in Section 4.2.2, the difference is the gradient estimator. The authors used the score function gradient estimator, because the path-wise gradient estimator (which became popular by VAE (Kingma & Welling, 2014)) was not popular at that time and the reparameterization trick for point processes was not trivial. Our contribution is to develop a differentiable point process that enables us to derive the path-wise gradient estimator.
+Less relevant but still worth mentioning are the line of work in learning algorithms for deterministic SNNs, where a neuron fires when the membrane potential exceeds a threshold. Although our technique cannot directly contribute to them,
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+we believe it is worthwhile to compare the pros and cons of these different approaches for further development. Of a number of approaches proposed so far (Neftci et al., 2019), we introduce two inspiring studies.
+
+SpikeProp (Bohte et al., 2000) is one of the earliest attempts
+
+to develop a learning algorithm for deterministic SNNs.
+
+SpikeProp uses backpropagation to minimize the difference
+
+between the target firing times {tn}Nn=1 and the actual firing
+
+times {tn}Nn=1 of the network, i.e.,
+
+N n=1
+
+|tn
+
+-
+
+tn|2.
+
+The
+
+gradient is approximated by assuming a linear relationship
+
+between the firing time and the membrane potential, which
+
+is valid only for a small learning rate.
+
+Huh & Sejnowski (2018) propose a differentiable alternative to the threshold-based spike generation, which facilitates gradient computation. They employ a soft-threshold mechanism, and therefore, is differentiable without approximation. Another important contribution is that their model can handle not only spike trains but also a real-valued time-series. They use a readout network that maps spike trains from/into a real-valued time-series. This end-to-end formulation is significant towards practical applications of SNNs, and probabilistic SNNs should be equipped with this feature.
+
+One interesting feature of probabilistic SNNs including our method is that both inference and learning algorithms can be executed naturally in an event-based manner without any discretization of time axis. This is in contrast to deterministic SNNs, where many learning algorithms require us to discretize the continuous-time dynamics for simulation.
+
+6.2. Differentiable Point Processes
+Our differentiable point process is significant in the community of point processes in that it largely expands the applicability of the reparameterization trick for point processes. Let us review the approaches to differentiable point processes, and discuss their pros and cons.
+There are mainly three approaches to sample from point processes, and each of them can be used as a basis of differentiable point processes. The first approach (Shchur et al., 2020a) is to model the inter-event time conditioned on the past history by a log-normal mixture model, instead of modeling the conditional intensity function. Since it is straightforward to develop a reparameterizable sampling algorithm for the mixture model, the resultant point process is also reparameterizable. The second one is the inverse method (Rasmussen, 2018), which utilizes the fact that the inverse of the compensator [0,t] can convert a unit-rate Poisson process into the point process with the corresponding conditional intensity function. Shchur et al. (2020b) propose a reparameterization trick based on the inverse method. The third one is the thinning algorithm, as we presented.
+Of these three approaches, it is interesting to compare the
+
+second and the third approaches. When applying the inverse method (Shchur et al., 2020b) to computing ELBO, it is reported that the objective function contains discontinuous points, making optimization difficult. The discontinuity arises because time stamps of a realization are parameterized, and the algorithm involves a discrete decision whether a time stamp is less than T or not for termination. In contrast, Our differentiable point process does not suffer from it because not time stamps but marks are parameterized. In this sense, these two approaches are complementary.
+When developing a path-wise gradient estimator for SNNs, only the third approach is feasible. The first approach is difficult to be applied because SNNs are modeled via the conditional intensity function, and the inter-event time distribution is not available in a closed form. The second approach is also difficult due to the lack of a closed-form expression of the inverse of the compensator. Our approach only assumes the existence of an upperbound of the conditional intensity function, and therefore, can be applied to SNNs. The assumption on the existence of a constant upperbound can be relaxed in the same way as Ogata's method (Ogata, 1981), which determines ¯ adaptively.
+7. Conclusion and Future Work
+We develop a path-wise gradient estimator for SNNs based on a differentiable point process. Given the experimental results in Section 5, we conclude that our estimator has lower variance than the existing one, which contributes to improve the learning capability.
+Throughout this paper, we only focus on the dependency of the gradient estimator on learning capability, and we have not discussed about its practical applications. In the community of SNNs, however, an increasing number of studies have started to apply SNNs to real-world tasks (Shrestha & Orchard, 2018; Woz´niak et al., 2020). One of the major concerns towards applying our method to real-world tasks is a method to convert real-valued data into/from spike trains. While there are a number of information encoding methods for spike trains, it is still an open problem which encoding is preferred. One interesting direction is to empirically and theoretically investigate the performance of different encoding methods and to understand their pros and cons.
+Another limitation is the computational overhead as discussed in Section 5.3. While the probabilistic formulation can be simulated by an event-based manner, the gradient computation involves backpropagation through time (BPTT), whose complexity increases proportionally to the number of spikes. In addition to relying on the adaptive upperbound ¯, applying online BPTT calculation and its approximation techniques (Williams & Zipser, 1989) to SNNs may be an interesting research direction.
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+References
+Bohte, S. M., Kok, J. N., and Poutre´, H. L. SpikeProp: Backpropagation for Networks of Spiking Neurons. In Proceedings of the 8th European Symposium on Artificial Neural Networks (ESANN 2000), pp. 419­424, 2000.
+Bothe, S. M. The evidence for neural information processing with precise spike-times: A survey. Natural Computing, 2:195­206, 2004.
+Daley, D. J. and Vere-Jones, D. An Introduction to the Theory of Point Processes: Volume I: Elementary Theory and Methods. Springer-Verlag New York, 2003.
+Duchi, J., Hazan, E., and Singer, Y. Adaptive subgradient methods for online learning and stochastic optimization. Journal of Machine Learning Research, 12:2121­2159, 2011. ISSN 15324435.
+Gerstner, W., Kistler, W. M., Naud, R., and Paninski, L. Neuronal Dynamics. Cambridge University Press, 2014.
+Huh, D. and Sejnowski, T. J. Gradient Descent for Spiking Neural Networks. In Bengio, S., Wallach, H., Larochelle, H., Grauman, K., Cesa-Bianchi, N., and Garnett, R. (eds.), Advances in Neural Information Processing Systems 31, pp. 1433­1443. Curran Associates, Inc., 2018.
+Jang, E., Gu, S., and Poole, B. Categorical Reparameterization with Gumbel-Softmax. In Proceedings of the Fifth International Conference on Learning Representations, 2017.
+Jimenez Rezende, D. and Gerstner, W. Stochastic variational learning in recurrent spiking networks. Frontiers in Computational Neuroscience, 8:38, 2014. ISSN 1662-5188. doi: 10.3389/fncom.2014.00038.
+Kajino, H. diffsnn, 2021. URL https://github.com/ ibm-research-tokyo/diffsnn.
+Kingma, D. P. and Welling, M. Auto-encoding variational Bayes. In Proceedings of the Second International Conference on Learning Representations, 2014.
+Lewis, P. A. W. and Shedler, G. S. Simulation of nonhomogeneous poisson processes by thinning. Naval Research Logistics Quarterly, 26(3):403­413, 1979. doi: 10.1002/nav.3800260304.
+Ma¨chler, M. Accurately computing log(1 - exp(-|a|)) assessed by the Rmpfr package. Technical report, 2012.
+Maddison, C. J., Mnih, A., and Teh, Y. W. The Concrete Distribution: A Continuous Relaxation of Discrete Random Variables. In Proceedings of the Fifth International Conference on Learning Representations, 2017.
+
+Mohamed, S., Rosca, M., Figurnov, M., and Mnih, A. Monte Carlo Gradient Estimation in Machine Learning, 2019.
+Neftci, E. O., Mostafa, H., and Zenke, F. Surrogate Gradient Learning in Spiking Neural Networks: Bringing the Power of Gradient-Based Optimization to Spiking Neural Networks. IEEE Signal Processing Magazine, 36 (6):51­63, 2019. doi: 10.1109/MSP.2019.2931595.
+Ogata, Y. On Lewis' simulation method for point processes. IEEE Transactions on Information Theory, 27(1):23­31, jan 1981. ISSN 1557-9654. doi: 10.1109/TIT.1981. 1056305.
+Pfister, J.-P., Toyoizumi, T., Barber, D., and Gerstner, W. Optimal Spike-Timing-Dependent Plasticity for Precise Action Potential Firing in Supervised Learning. Neural Computation, 18(6):1318­1348, 2006. doi: 10.1162/neco. 2006.18.6.1318.
+Rasmussen, J. G. Lecture notes: Temporal point processes and the conditional intensity function. arXiv preprint arXiv:1806.00221, 2018.
+Shchur, O., Bilos, M., and Gu¨nnemann, S. Intensity-free learning of temporal point processes. In International Conference on Learning Representations, 2020a.
+Shchur, O., Gao, N., Bilos, M., and Gu¨nnemann, S. Fast and Flexible Temporal Point Processes with Triangular Maps. In Larochelle, H., Ranzato, M., Hadsell, R., Balcan, M. F., and Lin, H. (eds.), Advances in Neural Information Processing Systems, volume 33, pp. 73­84. Curran Associates, Inc., 2020b.
+Shrestha, S. B. and Orchard, G. SLAYER: Spike Layer Error Reassignment in Time. In Bengio, S., Wallach, H., Larochelle, H., Grauman, K., Cesa-Bianchi, N., and Garnett, R. (eds.), Advances in Neural Information Processing Systems, volume 31. Curran Associates, Inc., 2018.
+Williams, R. J. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine Learning, 8(3):229­256, 1992. ISSN 1573-0565. doi: 10.1007/BF00992696.
+Williams, R. J. and Zipser, D. A Learning Algorithm for Continually Running Fully Recurrent Neural Networks. Neural Computation, 1(2):270­280, 1989. ISSN 08997667. doi: 10.1162/neco.1989.1.2.270.
+Woz´niak, S., Pantazi, A., Bohnstingl, T., and Eleftheriou, E. Deep learning incorporating biologically inspired neural dynamics and in-memory computing. Nature Machine Intelligence, 2(6):325­336, 2020. ISSN 2522-5839. doi: 10.1038/s42256-020-0187-0.
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+  !"!
+
+Proof of Proposition 2. Since Equation (3) reads as,
+
+#
+
+
+
+  =   !"! "
+
+#
+
+#%&
+
+
+
+Figure 5. Conditional intensity functions of our definition (top)
+and the standard one (bottom). The standard conditional intensity function  can be obtained by joining multiple conditional
+intensity functions of our definition in a left-continuous way.
+
+X
+
+dp(t, p
+
+|
+
+TXtn )
+
+=
+
+ft 1-F
+
+| TXtn t | TXtn
+
+=
+
+-
+
+d dt
+
+log(1
+
+-
+
+F
+
+(t
+
+|
+
+TXtn )),
+
+we can represent the cumulative distribution function by the conditional intensity function as,
+
+t
+
+F (t | TXtn ) = 1 - exp - ds dp(s, p | TXtn ) .
+
+tn
+
+X
+
+(14)
+
+In order for the conditional intensity function to define a
+proper cumulative distribution function, the function F (t | TXtn ) defined as Equation (14) must satisfy the following four conditions:
+
+A. Relation to the Standard Notation
+
+Our notation is different from the standard one employed
+by many others including a textbook (Daley & Vere-Jones,
+2003). A major difference is the conditional intensity func-
+tion as illustrated in Figure 5. Our conditional intensity function (t | T tn ) is defined for t > tn and is consistently conditioned on the history of events up to tn (the top panel of Figure 5). On the other hand, the standard conditional intensity function (t) is defined for all t, and the history that conditions it is ambiguous and depends on
+the context; it is sometimes conditioned on the history of events that occured before (and not including) t, which is represented as T tn(t) (the bottom panel of Figure 5), and it is sometimes equivalent to our definition of the conditional
+intensity function.
+
+While such an ambiguity helps to simplify equations (e.g.,
+
+the compensator [0,T ] =
+
+T 0
+
+(t)dt
+
+can
+
+be
+
+represented
+
+by
+
+a single integral), it is sometimes very confusing especially
+
+for those who are not familiar with temporal point processes.
+
+Therefore, we employ a less ambiguous definition. In order
+
+to represent the standard conditional intensity function by
+
+our conditional intensity function, we introduced the left-
+
+continuous counting process n(t) as illustrated in Figure 1;
+
+with this counting process, we obtain the relationship be-
+
+tween the standard and our conditional intensity functions, (t) = (t | T tn(t) ).
+
+B. Conditions for Conditional Intensity Function
+This section provides a proof of Proposition 2, which states several conditions under which the conditional intensity function can specify a marked point process uniquely.
+
+1.
+
+lim
+t
+
+F
+
+(t
+
+|
+
+TXtn )
+
+=
+
+1,
+
+2.
+
+lim
+t-
+
+F
+
+(t
+
+|
+
+TXtn )
+
+=
+
+0,
+
+3. F (t | TXtn ) is non-decreasing in t, and 4. F (t | TXtn ) is right-continuous.
+
+Condition 1 is satisfied by Assumption 2. Condition 2 is satisfied because F (t | TXtn ) = 0 holds for any t  tn. Condition 3 holds because (t, p)  0 implies that the integral in the exponential function in Equation (14) is non-decreasing. Condition 4 holds because Assumption 3 ensures that the exponent in Equation (14) is rightcontinuous, which indicates that Equation (14) itself is rightcontinuous.
+
+C. Properties of Differentiable Point Processes
+This section provides several properties of differentiable point processes and their proofs. First, let us prove Proposition 4, which clarifies the conditional intensity function of a differentiable point process.
+
+Proof of Proposition 4. The following calculus clarifies the relationship:
+
+Pr tn+1  [t, t + dt], pn+1 = p | Tc<ontv0(1D)
+
+= Pr tn+1  [t, t + dt] | Tc<ontv0(1D)
+
+· p pn+1 = p | tn+1  [t, t + dt], Tc<ontv0(1D)
+
+=¯dt · g
+
+p 1- p 1
+
+; ¯  
+
+t | Tcontvn0(1D)
+
+,
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+where let Tc<ontv0(1D) denote the event tn+1 / (tn, t) and Tcontvn0(1D). This suggests that in a differentiable point process, time stamps are distributed according to the homogeneous Poisson process with intensity ¯, and each mark is
+distributed according to the concrete distribution.
+
+is discarded (Algorithm 1) or not (Algorithm 2). If the assumption made in Proposition 6 is satisfied, zero marks do not affect the conditional intensity function, and thus, the output of Algorithm 2 is distributed according to MPP() if we discard the events with zero marks.
+
+We then investigate two properties of the differentiable point process. Proposition 5 states that a realization of the differentiable point process is differentiable with respect to model parameters under mild conditions. Proposition 6 states that the differentiable point process becomes equivalent to the original point process as temperature goes zero.
+Proposition 5. Let (t, p | T1Dtn ) be a conditional intensity function of a multivariate point process parameterized by . Assume that the conditional intensity function can be calculated with Tcontvn0(1D) and is differentiable with respect to any mark in Tcontvn0(1D) and . Then, the marks of a realization of the corresponding differentiable point process is differentiable with respect to .
+
+Proof. We prove Proposition 5 by induction. The first mark is distributed according to ¯   (t | ), which is differentiable with respect to . Assume that marks observed up to (but not including) time t are differentiable with respect to . A mark p at time t is a realization of the concrete distribution with parameter  := ¯   t | Tcontvn0(1D) , and thus, is differentiable with respect to .  is differentiable with respect to , and  is assumed to be differentiable with respect to  and the past marks, which are differentiable by assumption, and this completes the proof.
+Proposition 6. Assume that  t, p | Tcontvn0(1D) =
+ t, p | Tcontvn0(1D)\{(tk, pk)} holds for any Tcontvn0(1D) and any k  [n] such that pk = 0. Then, in the limit of   +0, the output of Algorithm 2 is distributed according to MPP() if we discard the event with mark p = 0.
+
+Proof. As proven by Maddison et al. 2017, the random variable following the concrete distribution converges to the one-hot representation of the categorical variate in the limit of   +0. The random variable in line 6 of Algorithm 2 satisfies the following,
+
+Pr
+
+lim
+ +0
+
+p r
+
+= 1d | s, T
+
+=
+
+(s, 1d ¯
+
+|
+
+T
+
+),
+
+(15)
+
+for d  [D + 1], where let (s, 1D+1 | T )  ¯ -
+
+D d=1
+
+(s,
+
+1d
+
+|
+
+T ).
+
+The above expression states that if
+
+the value of the conditional intensity function is the same,
+
+the random variable in line 6 of Algorithm 2 is equivalent to
+
+that in line 6 of Algorithm 1. The only difference between
+
+these algorithms is whether the event with zero mark p = 0
+
+D. Properties of SNNs
+This section describes the properties of SNNs. First, Proposition 7 states that the conditional intensity function (Equation (13)) satisfies all of the conditions listed in Proposition 2, and thus, it defines an N¯ -marked point process uniquely.
+Proposition 7. Assume that the filter functions {fd ,d(s)}d,d [D] are continuous with respect to s. Then, the conditional intensity function (Equation (13)) uniquely defines an N¯ -marked point process.
+
+Proof. We will confirm the assumptions of Proposition 2. Observing that,
+
+t
+
+ds
+tn
+
+dp
+N¯
+
+s, p | TN¯tn
+
+t
+= ds
+tn
+
+dp s, p | TN¯tn
+conv0 (H)
+
+
+
++
+
+ s, p | TN¯tn 
+
+pO
+
+
+
+
+
+t
+
+= ds ¯ +
+
+ s, p | TN¯tn 
+
+tn
+
+pO
+
+t
+
+=¯(t - tn) + ds
+
+ s, p | TN¯tn ,
+
+tn pO
+
+the first condition is satisfied. By taking t   in the
+above expression, we can confirm that the second condition is satisfied (the first term ¯(t - tn) goes to infinity and the second term is guaranteed to be non-negative). The third condition is satisfied because (s, p | TN¯tn ) is a continuous function with respect to s > tn, which can be guaranteed by the continuity of the filter functions.
+
+Then, let us discuss two properties of SNN. Proposition 8 states that the objective function is differentiable with respect to . Proposition 9 states that SNN becomes equivalent to the vanilla SNN in the limit of   +0.
+Proposition 8. Assume that the filter functions {fd ,d(s)}d,d [D] are differentiable with respect to their parameters . The Monte-Carlo approximation of ELBO (Equation (9)) is differentiable with respect to  if we employ PP(q(t, p | TN¯ ; ); ¯,  ) as the variational distribution.
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+Proof. We first show that marks of a realization of the variational distribution TH() are differentiable with respect to . We then show that both log p(TO, Tconv0(H)) and log q(Tconv0(H)) are differentiable with respect to the marks of TH(). We finally show that log q(Tconv0(H); ) is differentiable with respect to . By the fact that the composition
+of differentiable functions is differentiable, the proposition
+is implied by these three statements.
+TH() is sampled by Algorithm 2 using the conditional intensity function q(t, p | TN¯ ; ), which is differentiable with respect to any mark in TN¯ and  (by the assumption). Therefore, by Proposition 5, the marks of TH() are differentiable with respect to .
+The logarithm of the joint distribution log p(TO, Tconv0(H)) can be written as,
+
+log p(TO, Tconv0(H); )
+
+=
+
+log SNN
+
+t,
+
+p
+
+|
+
+T tn(t)
+N¯
+
+(t,p)TO
+
++
+
+log 
+
+t,
+
+pH
+
+|
+
+T tn(t)
+N¯
+
+;
+
+H
+
+,
+
+¯,
+
+
+
+(t,p)Tconv0 (H)
+
+T
+
+- ¯T -
+
+ds
+
+SNN
+
+s,
+
+p
+
+|
+
+T tn(s)
+N¯
+
+.
+
+0
+
+pO
+
+The first and the last terms are differentiable with respect to
+marks of Tconv0(H), and the third term does not depend on Tconv0(H). For any (t, p)  Tconv0(H), the summand of the second term,
+
+log 
+
+t,
+
+pH
+
+|
+
+T tn(t)
+N¯
+
+;
+
+H,
+
+¯,
+
+
+
+= log ¯ + log g
+
+pH 1 - pH 1
+
+; ¯  H
+
+t | TN¯tn(t)
+
+,
+
+is differentiable with respect to pH because the probabil-
+
+ity density function of the concrete distribution is differ-
+
+entiable with respect to pH. It is also differentiable with
+
+respect
+
+to
+
+the
+
+past
+
+marks
+
+in
+
+T tn(t)
+N¯
+
+because
+
+the
+
+probabil-
+
+ity density function g is differentiable with respect to its
+
+parameter  := ¯  H t | TN¯tn(t) , which is differ-
+
+entiable with respect to the marks in TN¯tn(t). Therefore, log p(TO, Tconv0(H); ), is differentiable with respect to the marks of Tconv0(H).
+
+The logarithm of the variational distribution log q(Tconv0(H)) can be written as,
+
+log q(Tconv0(H))
+
+=
+
+log 
+
+(t,p)Tconv0 (H)
+
+t, pH
+
+|
+
+T tn(t)
+N¯
+
+;
+
+H
+
+,
+
+¯,
+
+
+
+- ¯T, (16)
+
+which is also differentiable with respect to the marks of Tconv0(H) in the same way as the above discussion.
+Finally, log q(Tconv0(H); ) is differentiable with respect to , because the first term of Equation (16) is differentiable with respect to H, which is differentiable with respect to  (partially by the assumption that the filter functions are differentiable with respect to ).
+The proposition follows from the three statements above.
+
+Proposition 9. In the limit of   +0, a realization of SNN (Equation (13)) is distributed according to the vanilla SNN (Equation (7)) if we discard events with mark p = 0.
+
+Proof. Since for any event (tk, pk) (k  [n]) such that pk = 0,
+
+SNN t, p | TN¯tn = SNN t, p | TN¯tn \{(tk, pk)} ,
+holds, the event with mark p = 0 has no influence on the conditional intensity function. In the limit of   +0,
+
+SNN t, p | TN¯tn
+
+
+
+SNN  
+
+t, p | TN¯tn
+
+
+
+
+
+= ¯ - 
+
+SNN t, p | TN¯tn 
+
+
+
+pH
+
+(p  O  H), (p = 0),
+
+holds. As discussed above, the event with mark p = 0 has
+no influence on computing the conditional intensity function,
+and can be removed without changing the conditional intensity function. Therefore, a realization of MPP(SNN) is equivalent to that of MPP(SNN) if we discard all the events with mark p = 0.
+
+E. Numerically Stable Implementation
+For numerical stability, we recommend to represent all probability and subprobability vectors and conditional intensity functions in the logarithmic scale. In this section, we describe an accurate computation of the parameter of the concrete distribution.
+When computing the parameter of the concrete distribution shown below in the logarithmic scale,
+
+¯   t | Tcontvn0(1D)
+
+=
+
+1 ¯
+
+
+
+t | Tcontvn0(1D)
+
+¯ -  t | Tcontvn0(1D)
+
+,
+1
+
+it is straightforward to compute the first D elements with the logarithm of the conditional intensity function,
+
+A Differentiable Point Process with Its Application to Spiking Neural Networks
+
+log  t, p | Tc<ontv0(1D) . However, the last element,
+
+1-
+
+p 1D 
+
+t, p | Tc<ontv0(1D) ¯
+
+,
+
+(17)
+
+is not trivial to compute accurately in the logarithmic scale.
+
+We resort to log1mexp (Ma¨chler, 2012) to compute it, which allows us to compute log(1 - exp(-|a|)) accurately for a = 0 as follows:
+
+log1mexp(a) = log(-expm1(-a)) (0 < a  log 2), log1p(- exp(-a)) (a > log 2),
+
+where expm1(x) and log1p(x) approximately compute exp(x) - 1 and log(1 + x) respectively by using a few
+terms of their Taylor series. Since we can compute log p := log p 1D  t, p | Tc<ontv0(1D) - log ¯ by logsumexp, the computation of Equation (17) boils down to the computation of log(1-p) given log p (p  [0, 1)). Since log(1 - p) = log(1 - exp(-| log p|)) holds for p  [0, 1),
+we can utilize log1mexp to compute it.
+
+

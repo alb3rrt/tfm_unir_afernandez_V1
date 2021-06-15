@@ -1,0 +1,1735 @@
+MULTIPLE IMPUTATION THROUGH XGBOOST
+
+A PREPRINT
+
+Yongshi Deng Department of Statistics University of Auckland Auckland, New Zealand 1010 yongshi.deng@auckland.ac.nz
+
+Thomas Lumley Department of Statistics University of Auckland Auckland, New Zealand 1010 t.lumley@auckland.ac.nz
+
+arXiv:2106.01574v1 [stat.ME] 3 Jun 2021
+
+June 4, 2021
+ABSTRACT
+Multiple imputation is increasingly used in dealing with missing data. While some conventional multiple imputation approaches are well studied and have shown empirical validity, they entail limitations in processing large datasets with complex data structures. Their imputation performances usually rely on expert knowledge of the inherent relations among variables. In addition, these standard approaches tend to be computationally inefficient for medium and large datasets. In this paper, we propose a scalable multiple imputation framework mixgb, which is based on XGBoost, bootstrapping and predictive mean matching. XGBoost, one of the fastest implementations of gradient boosted trees, is able to automatically retain interactions and non-linear relations in a dataset while achieving high computational efficiency. With the aid of bootstrapping and predictive mean matching, we show that our approach obtains less biased estimates and reflects appropriate imputation variability. The proposed framework is implemented in an R package misle. Supplementary materials for this article are available online.
+Keywords Bootstrapping; Computational efficiency; Gradient boosted trees; Imputation variability; Large datasets; Missing data.
+1 Introduction
+Multiple imputation (MI), first introduced by Rubin (1978), has received increasing recognition in dealing with missing data as it can reduce bias and represent the uncertainty of missing values. For an incomplete dataset, each missing value is replaced by a set of M > 1 plausible values instead of a single value. Analysis can then be performed separately on M complete imputed datasets, and results can be combined to yield valid inference. Rubin (1987) argued that the pooled estimates and variance would be statistically valid under proper imputation conditions. A number of frameworks have been developed to implement multiple imputation (MI). However, few automated procedures have been devised for large-scale imputation.
+One main flaw of traditional MI implementations is that they fail to capture complex relations among variables automatically. If such relations exist, popular software packages such as mi (Su et al., 2011) and mice with default settings (van Buuren and Groothuis-Oudshoorn, 2011) would produce unsatisfactory results unless users manually specify any potential non-linear or interaction effects in the imputation model for each incomplete variables. Indeed, van Buuren and Groothuis-Oudshoorn (2011) indicate that using default mice generally would not be optimal and including the interaction of interest in the imputation model is crucial. However, it appears that researchers would often use mice in an automated way (e.g., Fuente-Soro et al., 2021; Wendt et al., 2021; Awada et al., 2021). On the other hand, tree-based algorithms provide a possible way to overcome this shortcoming. Stekhoven and Bühlmann (2012) proposed a non-parametric method for missing value imputation based on random forests (Breiman, 2001) and implemented it in an R package called missForest. Doove et al. (2014) implemented classification and regression tree (CART)
+The author gratefully acknowledges Doctoral Scholarship from the University of Auckland.
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+and random forests within the mice framework (mice-cart and mice-rf) and showed that their performances on preserving the non-linear effects are better than standard mice implementations.
+Another disadvantage of existing MI frameworks is the excessive computation time for large datasets. Recent advances in technology have rendered the collection and analysis of large datasets feasible. However, current MI methods, including those with abilities to capture complex data structures like mice-cart and mice-rf, are more suitable for small datasets and often struggle with medium datasets. When there are reasonably large amounts of missing values present across many variables, this problem can become unmanageable.
+Applying machine learning (ML) techniques to multiple imputation can help to tackle the computational bottleneck, but the validity of imputed values obtained by current ML-based implementations is questionable. One disadvantage is that some software can only perform single imputation and ignores the uncertainty about missing values, thus leading to invalid inference. Zhang et al. (2019) proposed to use an XGBoost-based model to impute time series data. To our knowledge, this is a single imputation approach. An R package missRanger (Mayer, 2019) was developed using ranger (Wright and Ziegler, 2017), which is a faster implementation of random forests. It is mainly designed for single imputation even though Wright and Ziegler (2017) claimed that multiple imputation with missRanger could be achieved by running the imputation model M times. However, its performance has not been investigated.
+Another concern is that most ML-based implementations have validated their imputation performances by point prediction accuracy. Rubin (1996) explained that imputation methods which aim to generate the most accurate imputed value based on the best point prediction would neglect the intrinsic uncertainty of the missing data. These methods are prone to underestimate variance, thus leading to invalid statistical inference. Lall and Robinson (2021) implemented multiple imputation with denoising autoencoders in a Python library midas, which offers an efficient solution for large-sized incomplete data. The main goal of midas is to generate the most accurate imputed values relative to true values, and it appears to overlook whether imputed values reflect adequate variability. Similarly, Yingling (2019) used metrics such as Root Mean Square Error (RMSE) and Mean Absolute Error (MAE) to validate XGBoost-based imputation models, which also aims to recreate the true data rather than represent the uncertainty of missing values.
+The purpose of this paper is to present a fast and automated multiple imputation procedure mixgb, which is based on XGBoost (Chen and Guestrin, 2016), bootstrapping (Efron, 1979) and predictive mean matching (Little, 1988), with a focus on yielding statistically valid results. XGBoost, a fast tree boosting algorithm, has been a frequent winner in Kaggle data competitions (Chen and Guestrin, 2016) and has gained immense popularity because of its speed and accuracy. XGBoost's ability to efficiently capture complex structures of large datasets means it has great potential for automated multiple imputation. With bootstrapping and predictive mean matching, our proposed method can better incorporate the variability of missing data and enhance the imputation quality.
+This paper is structured as follows. Section 2 describes the proposed multiple imputation through XGBoost framework (mixgb) in detail. An overview of simulation studies on imputation performance is given in Section 3.1. The evaluation criteria for multiple imputation implementations are presented in Section 3.2. Simulation results are given in Section 3.3, demonstrating the imputation quality of mixgb. Section 4 demonstrates the advantage of mixgb over other implementations in terms of computational efficiency, and an example using a real dataset is illustrated in Section 5. Finally, discussions based on empirical results are presented in Section 6. We implement the proposed method in our R package misle (multiple imputation through statistical learning), which is available at https://github.com/agnesdeng/misle.
+2 Framework
+Using XGBoost to impute missing data has attracted growing interest in recent years. However, previous work has focused on the prediction accuracy of missing values without sufficient consideration for uncertainty of missing data, which leads to underestimating the variability of imputation. To address this problem, we propose using XGBoost with bootstrapping and predictive mean matching (PMM) for multiple imputation.
+Our framework mixgb works as follows: Given an incomplete n × p dataset X, we first sort our variables by the number of missing values. We then conduct an initial imputation for missing values to obtain a complete sorted dataset Y . We choose to initially impute missing data by randomly drawing from the observed data. We let Yiobs and Yimis be the observed values and imputed (originally missing) values for the variable Yi. We also let Y-obis denote the corresponding data in all variables other than Yi for entries where Yi was observed and Y-miis denote the data for variables other than Yi for entries where Yi was originally missing before initial imputation.
+We use XGBoost models with bootstrapping to better account for uncertainty of missing values. For each of the M imputations, we generate a bootstrapped sample Y  from Y . For each variable we fit an XGBoost model f  : Yiobs  Y-iobs, where Yiobs were the originally observed values in Yi and Y-iobs were the corresponding data in all other
+2
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+variables except Yi. After fitting the model f  using the bootstrapped data, we use this model and Y-miis to obtain
+predictions for Yimis, which we call Yimis.
+However, simply imputing missing values with Yimis is susceptible to underestimation of imputation variability for continuous data. This problem can be alleviated by predictive mean matching (PMM), which was first proposed by Rubin (1986) and extended to multiple imputation by Little (1988). The idea of PMM is to match the predicted values of the missing entries to a set of K donors that have the closest predicted mean values from other observed entries. A donor is then randomly selected and its observed value is used to impute the missing value. Van Buuren (2018) summarises four types of predictive mean matching. We only implement type 1 and type 2 matching in our framework as type 0 is improper and type 3 is not applicable to our method. The detailed algorithm for mixgb is described in Algorithm 1 and is implemented in our R package misle.
+Figure 1 illustrates the need for predictive mean matching for continuous data in multiple imputation through XGBoost. We create a dataset with 1000 observations using yi = 5xi + i, where  N (0, 1). We then generate 50% missing data in x under the MCAR mechanism. As shown in Figure 1, the variability within an imputed dataset using mixgb without the aid of PMM is considerably smaller than both the variance of the observed data and the true variance of masked data. By contrast, both type 1 and type 2 PMM obtain similar within-variance as the masked true variance.
+
+Figure 1: The need for PMM when imputing continuous missing data in mixgb.
+Algorithm 1: Multiple imputation of missing data through XGBoost
+Input: n × p incomplete dataset X; the number of imputations M ; type of predictive mean matching (auto,1,2, or NULL) Initialization: sort variables by the number of missing values in ascending order; make an initial guess for missing data and obtain a complete sorted dataset Y ; If pmm.type=auto, then set pmm.type=2 for numeric variables and set pmm.type=NULL for categorical variables. for m = 1 to M do
+Y  use the last imputed data set ; generate a bootstrap sample Y  from the dataset Y ; for i = 1 to p do
+fit a XGBoost model f  using Yiobs  Y-oibs; Yimis  predict Yimis with model f  and Y-miis; if pmm.type=1 then
+fit a XGBoost model f using Yiobs  Y-obis; Yiobs  predict Yiobs with model f and Y-obis; Yimis match Yimis to Yiobs; update Y with Yimis else if pmm.type=2 then Yiobs  predict Yiobs with model f  and Y-obis; Yimis match Yimis to Yiobs; update Y with Yimis else update Y with Yimis convert Y (m) to Yim(m p ) by reverting the variable ordering; return Yim(m p ) Output: M imputed datasets Yimp = (Yim(1p), Yim(2p), ..., Yim(M p ))
+3
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+3 Simulation studies
+
+3.1 Overview
+
+We conducted simulation studies based on Doove et al. (2014), who evaluated the performance of multiple imputation using recursive partitioning techniques (CART, Forest-boot and Forest-RI) within the mice framework.
+
+Data generation models: We generated simulated continuous datasets using three different data generation models (3.1-3.3):
+
+y1,i = 0 + 1x1,i + 2x2,i + 3x3,i + 4x8,i + 5x9,i + 6x23,i + i; y2,i = 0 + 7x1,i + 8x2,i + 9x3,i + 10x8,i + 11x9,i + 12x1,ix2,i + i; y3,i = 0 + 13x1,i + 14x2,i + 15x3,i + 16x8,i + 17x9,i + 18x8,ix9,i + i,
+
+(3.1) (3.2) (3.3)
+
+where i  N (0, 1). Simulated categorical datasets were generated by three different logistic regression models (3.4-3.6):
+
+logit[P (Y1 = 1)] = 0 + 1d1 + 2d2 + 3d3 + 4d4 + 5d8 + 6d9 + 7d1d2; logit[P (Y2 = 1)] = 0 + 8d1 + 9d2 + 10d3 + 11d4 + 12d8 + 13d9 + 14d3d4; logit[P (Y3 = 1)] = 0 + 15d1 + 16d2 + 17d3 + 18d4 + 19d8 + 20d9 + 21d8d9.
+
+(3.4) (3.5) (3.6)
+
+In order to make a direct comparision with other tree-based implementations, we used the same values of i and i as Doove et al. (2014), which are shown in Table 1. They correspond to interactions with a medium effect size for continuous data generation models and a large effect size for categorical models.
+For continuous data models, ten variables x1 to x10 were drawn from a multivariate normal distribution with means equal to zero and pairwise correlations between the first four variables x1 to x4 equal to 0.5 and pairwise correlations between the last six variables x5 to x10 equal to 0.3. All other pairwise correlations are 0. For categorical data models, binary variables d1, d2, d3, d4, d8 and d9 were randomly assigned 0 or 1 with equal probability, while categorical variables with three categories, d5, d6, d7 and d10 were drawn from a binomial distribution with parameters n = 2 and p = 0.5.
+
+Continuous data
+
+Categorical data
+
+model 3.1 model 3.2 model 3.3
+
+model 3.4 model 3.5 model 3.6
+
+0
+
+0 0
+
+0 0
+
+0
+
+1 0.31 7 0.31 13 0.31
+
+2 0.31 8 0.31 14 0.31
+
+3 0.31 9 0.31 15 0.31
+
+4 0.31 10 0.31 16 0.31
+
+5 0.31 11 0.31 17 0.31
+
+6 0.28 12 0.35 18 0.37
+
+0
+
+0 0
+
+0 0
+
+0
+
+1 0.5 8
+
+0.7 15 0.4
+
+2
+
+1 9
+
+0.5 16 0.4
+
+3 0.5 10 0.7 17 0.4
+
+4 -1 11 -0.2 18 -1.3
+
+5 -1 12 -1.1 19 -0.2
+
+6 -0.5 13 -1.1 20 -0.2
+
+7 1.1 14 1.1 21 1.1
+
+Table 1: Parameter values for data generation models 3.1-3.6.
+
+Missing data mechanisms: For each continuous data generation model, we created a dataset with 1000 observations and missing data were generated according to the following mechanism: 20% MCAR in x1 and x2 and 20% MAR in y for model 3.1; 20% MCAR in x3 and x8 and 20% MAR in y for model 3.2; 20% MCAR in x2 and x3 and 20% MAR in y for model 3.3. Let  be the probability that y is missing. Variable y was made MAR by logit() =  + x9 + x10, where  was found such that the expected value of  is 0.2.
+For each categorical data generation model, we created a dataset with 1000 observations and missing data were generated according to the following mechanism: 20% MCAR in d3 and d4 and 20% MAR in y for model 3.4; 20% MCAR in d1 and d2 and 20% MAR in y for model 3.5 and 3.6. Missing values in y were created by logit() =  + d9 + d10 such that E() = 0.2.
+Methods: We assess the imputation quality of the following implementations: (a) predictive mean matching within MICE (mice.pmm) for continuous data; logistic regression within MICE (mice.logreg) for categorical data; (b) weighted predictive mean matching within MICE (mice.midastouch) for continuous data and bootstrapping logistic regression within MICE (mice.logregboot) for categorical data; (c) classification and regression trees within MICE
+4
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+(mice.cart); (d) random forests within MICE (mice.rf); (e) fast implementation of random forests (missRanger); (f) XGBoost without predictive mean matching (mixgb.null); (g) XGBoost with type 1 predictive mean matching (mixgb.pmm1); (h) XGBoost with type 2 predictive mean matching (mixgb.pmm2).
+All methods except missRanger used default settings and the number of multiple imputations was set to 20. We set the number of trees to 100 in missRanger as we considered the default number 500 too large for this problem. In addition, the author of mice set the default number of trees in mice.rf to 10 based on simulation studies by Shah et al. (2014). To make a fair comparision between these two random forests-based imputation methods, it would be reasonable to set the number of trees in missRanger to 10. However, we found that the performance was far worse than that of mice.rf under the same number of trees. Therefore, we decided to use 100 trees in missRanger instead.
+The performance of these methods was then evaluated over 1000 simulations based on biases, total-imputation variability, between-imputation variability, within-imputation variability, coverage, the width of confidence interval and the fraction of missing information.
+
+3.2 Evaluation criteria To investigate the validity of multiple imputation methods, we use the following criteria:
+
+Bias. Suppose that  is the true value of an estimand, such as one of the i that we use to generate a simulated dataset and ^ is the estimate of  for a given complete simulated dataset. We generate missing data under a specified missing data mechanism and impute the incomplete dataset M = 20 times. For each imputed dataset, we obtain an estimate 
+so the combined estimate would be
+
+1 M = M
+
+M
+
+m .
+
+m=1
+
+(3.7)
+
+Note that the bias of M consists of two components:
+
+E[M ] -  = (E[M ] - E[^]) + (E[^] - ).
+
+(3.8)
+
+We are only interested in the phase two bias E[M ] - E[^], as the phase one bias E[^] -  is subject to random noise, such as the error term i that we use to generate simulated data. Therefore, we report the average phase two bias over
+R = 1000 simulations for each of the coefficients.
+
+Bias = E[M ] - E[^],
+
+where
+
+1 E[M ] = R
+
+R
+
+
+
+(r) M
+
+and
+
+E[^] = 1
+
+R
+^(r).
+
+R
+
+r=1
+
+r=1
+
+(3.9)
+
+Total variance. If an imputation method is proper, we would expect the average total variance of the MI combined
+
+estimate over R = r = 1, 2, ..., R. That
+
+i1s,0V00artroetapl l=i.caVtiaorntostalt(otrubee),awpphreoreximately
+
+equal
+
+to
+
+the
+
+observed
+
+variance
+
+between
+
+all
+
+
+
+(r)
+M,
+
+for
+
+1R Vartotal = E[Tm] = R
+
+U
+
+(r) M
+
++
+
+1 1+
+M
+
+r=1
+
+BM (r) ,
+
+(3.10)
+
+1R Vartotal(true) = Var[M ] = R - 1
+
+
+
+(r) M
+
+-
+
+µ
+
+2
+,
+
+and
+
+1 µ=
+R
+
+R
+
+(Mr).
+
+r=1
+
+r=1
+
+(3.11)
+
+Within-imputation variance. R = 1000 simulations, should be
+
+The expectation of the within-variance component of the similar to the expectation of complete data variances. That
+
+icso, mVabriwniethdinM=.I
+
+estimate over Varwithin(true)
+
+, where
+
+1 Varwithin = E[U M ] = R
+
+R
+
+U (Mr),
+
+r=1
+
+(3.12)
+
+1R Varwithin(true) = E[U ] = R Ur.
+r=1
+
+(3.13)
+
+5
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+Bdaettawseetesns-himoupldutbaeticolnosveatroiathnecet.rueTvhaelueexopfetchteedbevtawlueeenofvathrieanvcaericaonmcepboentewnet:eVn aMrbetewseteinm=.atVesarobbettwaeienne(tdrufero),mwhimerpeuted
+
+1 Varbetween = (1 + M )E[BM ], and
+
+1 E[BM ] = R
+
+R
+
+BM (r)
+
+=
+
+1 R
+
+1 M-
+
+1
+
+R
+
+M
+(m(r) - (Mr))2,
+
+r=1
+
+r=1 m=1
+
+(3.14)
+
+Varbetween(true) = Vartotal(true) - Varwithin(true)
+
+(3.15)
+
+Coverage. The proportion of replications where the 95% confidence interval around the combined MI estimate M contains the complete data estimate ^.
+
+Width of the 95% confidence interval.
+
+The fraction of missing information . This is defined as the ratio of missing information to the complete-data information. This parameter indicates the impact of missing data. Higher value implies a more severe missing data problem.
+
+3.3 Results
+In this study, we aim to investigate the performance of mixgb against other multiple imputation frameworks, such as those evaluated in Doove et al. (2014). In their studies, CART (mice.cart) was suggested to be the best at preserving interaction and nonlinear effects. In this section, we present results for continuous data generation model 3.2 and categorical data generation model 3.6. We observe fairly similar patterns for the other four data generation models. Their simulation results are omitted here but can be found in the supplementary materials.
+Table 2 shows the simulation results for continuous data generation model 3.2. Visualizations of performances on bias and imputation variance are summarized in Figure 2 and Figure 3, respectively. As expected, using mice.pmm or mice.midastouch incurs a considerably large bias for the estimate of the interaction term 12 (see Figure 2 ) since they do not automatically capture interaction relations between variables. However, standard mice implementations appear to generate less biased estimates for linear main effects. On the other hand, the bias of 12 is significantly smaller when mice.cart or mice.rf is used. These findings are consistent with results obtained in Doove et al. (2014). In addition, we found that even though the two random forests-based implementations mice.rf and missRanger can reduce the bias of 12 , they tend to have evidently larger biases in estimates for other linear terms. It should be noted that the results for mice.rf and missRanger are somewhat different. This may be due to different default settings for hyperparameters in these two packages. When missRanger, mixgb.null, mice.pmm and mice.midastouch are used, we observe relatively larger biases in 7 and 8, which are the parameters associated with the interaction term 12. Overall, both mixgb.pmm1 and mixgb.pmm2 obtain results as good as that of mice.cart, with mixgb.pmm1 performing slightly better than mixgb.pmm2.
+To evaluate the performance on imputation variance, we display the difference between the measured and the true variance in Figure 3. Smaller difference indicates a better variance estimate. In terms of capturing proper withinimputation and between-imputation variances for estimates in model 3.2, we can see that mixgb.pmm2 is the best among all methods, followed by mice.pmm, mice.midastouch and mice.cart. When predictive mean matching is not applied, mixgb is prone to underestimate both the within-imputation and between-imputation variances for most estimates. Even though mixgb.pmm1 alleviates this problem to some extent, it is notably inferior to mixgb.pmm2. On the contrary, random forests-based implementations such as mice.rf and missRanger, tend to overestimate the imputation variability for most estimates.
+With regard to the coverage rate for interaction term 12, mice.pmm and mice.midastouch obtain substantially lower coverages compared to other imputation models (see Table 2). Most implementation can achieve at least 95% coverage for other estimates except for 10, where mice.rf and missRanger have a lower coverage rate at around 90%. Compared to mice.pmm and mice.midastouch, tree-based imputation models tend to be more efficient as their confidence intervals are generally narrower while the coverage rate is not less than 95%. The estimated fraction of missing information due to nonresponse is generally higher when we use mice.pmm and mice.midastouch for imputation, which indicates a more complicated missing data problem according to Li et al. (1991).
+
+6
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+Method
+
+Bias ×100
+
+Vartotal ×10000
+
+Vartotal(true) ×10000
+
+Varwithin ×10000
+
+Varwithin(true) ×10000
+
+Varbetween ×10000
+
+Varbetween(true) ×10000
+
+CI coverage %
+
+CI width
+
+missinfo %
+
+0 mice.pmm mice.midastouch
+
+3.41 18.55
+
+17.49
+
+12.67
+
+12.08
+
+5.88
+
+5.41
+
+3.12 18.32
+
+17.32
+
+12.84
+
+12.08
+
+5.48
+
+5.23
+
+98
+
+0.17
+
+32
+
+99
+
+0.17
+
+30
+
+mice.cart
+
+-0.54 16.59
+
+17.65
+
+12.77
+
+12.08
+
+3.83
+
+5.57
+
+100
+
+0.16
+
+23
+
+mice.rf
+
+-1.14 17.40
+
+16.74
+
+13.43
+
+12.08
+
+3.96
+
+4.66
+
+100
+
+0.16
+
+23
+
+missRanger
+
+0.13 15.56
+
+17.70
+
+12.44
+
+12.08
+
+3.11
+
+5.62
+
+100
+
+0.15
+
+20
+
+mixgb.null
+
+-0.22 13.03
+
+17.27
+
+10.54
+
+12.08
+
+2.50
+
+5.19
+
+100
+
+0.14
+
+19
+
+mixgb.pmm1
+
+0.31 13.69
+
+17.57
+
+10.82
+
+12.08
+
+2.87
+
+5.49
+
+100
+
+0.15
+
+21
+
+mixgb.pmm2
+
+-0.67 15.57
+
+17.14
+
+12.10
+
+12.08
+
+3.47
+
+5.06
+
+100
+
+0.15
+
+22
+
+7 mice.pmm mice.midastouch
+
+1.04 21.80
+
+23.51
+
+15.88
+
+15.15
+
+5.92
+
+8.36
+
+1.00 22.36
+
+23.18
+
+16.06
+
+15.15
+
+6.30
+
+8.04
+
+100
+
+0.18
+
+27
+
+100
+
+0.19
+
+28
+
+mice.cart
+
+-0.03 20.75
+
+21.37
+
+15.96
+
+15.15
+
+4.79
+
+6.22
+
+100
+
+0.18
+
+23
+
+mice.rf
+
+-0.17 22.29
+
+18.44
+
+16.70
+
+15.15
+
+5.59
+
+3.29
+
+100
+
+0.19
+
+25
+
+missRanger
+
+1.54 19.38
+
+19.92
+
+15.68
+
+15.15
+
+3.70
+
+4.77
+
+100
+
+0.17
+
+19
+
+mixgb.null
+
+-1.14 15.85
+
+21.00
+
+13.40
+
+15.15
+
+2.46
+
+5.85
+
+100
+
+0.16
+
+15
+
+mixgb.pmm1
+
+-0.18 16.58
+
+21.27
+
+13.79
+
+15.15
+
+2.80
+
+6.12
+
+100
+
+0.16
+
+17
+
+mixgb.pmm2
+
+-0.12 19.69
+
+20.50
+
+15.18
+
+15.15
+
+4.51
+
+5.35
+
+100
+
+0.17
+
+23
+
+8 mice.pmm mice.midastouch
+
+0.96 21.77
+
+22.87
+
+15.87
+
+15.14
+
+5.90
+
+7.72
+
+0.94 22.28
+
+22.11
+
+16.05
+
+15.14
+
+6.23
+
+6.96
+
+100
+
+0.18
+
+27
+
+100
+
+0.19
+
+28
+
+mice.cart
+
+-0.03 20.75
+
+20.99
+
+15.95
+
+15.14
+
+4.81
+
+5.85
+
+100
+
+0.18
+
+23
+
+mice.rf
+
+-0.15 22.23
+
+17.82
+
+16.69
+
+15.14
+
+5.54
+
+2.67
+
+100
+
+0.19
+
+25
+
+missRanger
+
+1.52 19.34
+
+18.80
+
+15.68
+
+15.14
+
+3.66
+
+3.65
+
+100
+
+0.17
+
+19
+
+mixgb.null
+
+-1.13 15.90
+
+20.21
+
+13.39
+
+15.14
+
+2.51
+
+5.06
+
+99
+
+0.16
+
+16
+
+mixgb.pmm1
+
+-0.18 16.54
+
+20.36
+
+13.78
+
+15.14
+
+2.76
+
+5.21
+
+100
+
+0.16
+
+17
+
+mixgb.pmm2
+
+-0.15 19.77
+
+19.51
+
+15.17
+
+15.14
+
+4.60
+
+4.37
+
+100
+
+0.17
+
+23
+
+9 mice.pmm mice.midastouch
+
+0.44 25.51 -0.16 26.04
+
+26.00 25.20
+
+15.86 16.00
+
+15.11 15.11
+
+9.65 10.04
+
+10.89 10.09
+
+99
+
+0.20
+
+38
+
+100
+
+0.20
+
+38
+
+mice.cart
+
+-2.37 23.85
+
+26.43
+
+15.84
+
+15.11
+
+8.01
+
+11.32
+
+98
+
+0.19
+
+33
+
+mice.rf
+
+-4.03 25.24
+
+18.35
+
+16.49
+
+15.11
+
+8.76
+
+3.24
+
+98
+
+0.20
+
+35
+
+missRanger
+
+-3.34 24.33
+
+18.77
+
+15.86
+
+15.11
+
+8.47
+
+3.66
+
+99
+
+0.19
+
+35
+
+mixgb.null
+
+0.94 19.84
+
+27.19
+
+15.23
+
+15.11
+
+4.61
+
+12.08
+
+98
+
+0.17
+
+23
+
+mixgb.pmm1
+
+-1.17 19.11
+
+23.36
+
+15.36
+
+15.11
+
+3.75
+
+8.25
+
+99
+
+0.17
+
+20
+
+mixgb.pmm2
+
+-2.41 23.59
+
+21.87
+
+15.82
+
+15.11
+
+7.77
+
+6.76
+
+99
+
+0.19
+
+33
+
+10 mice.pmm mice.midastouch
+
+0.49 18.62
+
+18.01
+
+11.64
+
+11.09
+
+6.97
+
+6.92
+
+-0.21 18.89
+
+17.66
+
+11.78
+
+11.09
+
+7.10
+
+6.57
+
+100
+
+0.17
+
+37
+
+100
+
+0.17
+
+37
+
+mice.cart
+
+-3.05 17.55
+
+18.88
+
+11.70
+
+11.09
+
+5.85
+
+7.79
+
+96
+
+0.17
+
+33
+
+mice.rf
+
+-5.40 18.64
+
+13.90
+
+12.33
+
+11.09
+
+6.31
+
+2.81
+
+89
+
+0.17
+
+34
+
+missRanger
+
+-4.94 17.52
+
+13.47
+
+11.51
+
+11.09
+
+6.01
+
+2.38
+
+91
+
+0.16
+
+34
+
+mixgb.null
+
+0.17 14.40
+
+19.42
+
+11.12
+
+11.09
+
+3.28
+
+8.33
+
+99
+
+0.15
+
+23
+
+mixgb.pmm1
+
+-1.32 14.06
+
+17.40
+
+11.17
+
+11.09
+
+2.88
+
+6.31
+
+98
+
+0.15
+
+20
+
+mixgb.pmm2
+
+-2.96 17.33
+
+16.03
+
+11.69
+
+11.09
+
+5.64
+
+4.94
+
+98
+
+0.16
+
+32
+
+11 mice.pmm mice.midastouch
+
+1.28 19.12
+
+18.79
+
+11.62
+
+11.08
+
+7.49
+
+7.71
+
+1.13 18.97
+
+18.41
+
+11.75
+
+11.08
+
+7.23
+
+7.33
+
+100
+
+0.17
+
+39
+
+100
+
+0.17
+
+38
+
+mice.cart
+
+-2.34 16.97
+
+18.82
+
+11.69
+
+11.08
+
+5.29
+
+7.74
+
+98
+
+0.16
+
+31
+
+mice.rf
+
+-3.24 17.21
+
+14.46
+
+12.25
+
+11.08
+
+4.96
+
+3.38
+
+98
+
+0.16
+
+29
+
+missRanger
+
+-0.70 15.01
+
+16.99
+
+11.45
+
+11.08
+
+3.56
+
+5.90
+
+100
+
+0.15
+
+24
+
+mixgb.null
+
+-2.76 13.40
+
+17.05
+
+9.77
+
+11.08
+
+3.63
+
+5.97
+
+95
+
+0.14
+
+27
+
+mixgb.pmm1
+
+-1.66 14.15
+
+17.64
+
+10.06
+
+11.08
+
+4.10
+
+6.55
+
+99
+
+0.15
+
+29
+
+mixgb.pmm2
+
+-2.22 16.38
+
+16.58
+
+11.10
+
+11.08
+
+5.28
+
+5.50
+
+98
+
+0.16
+
+32
+
+12 mice.pmm mice.midastouch
+
+-5.63 10.94
+
+9.68
+
+8.56
+
+8.17
+
+2.38
+
+1.51
+
+-5.69 11.67
+
+9.77
+
+8.68
+
+8.17
+
+2.99
+
+1.60
+
+68
+
+0.13
+
+22
+
+71
+
+0.13
+
+25
+
+mice.cart
+
+-2.27 10.94
+
+10.69
+
+8.63
+
+8.17
+
+2.30
+
+2.52
+
+98
+
+0.13
+
+21
+
+mice.rf
+
+-3.51 11.99
+
+9.96
+
+9.08
+
+8.17
+
+2.91
+
+1.79
+
+94
+
+0.14
+
+24
+
+missRanger
+
+-1.84 10.34
+
+10.07
+
+8.41
+
+8.17
+
+1.93
+
+1.90
+
+99
+
+0.13
+
+18
+
+mixgb.null
+
+-2.51 8.30
+
+10.37
+
+7.13
+
+8.17
+
+1.18
+
+2.20
+
+95
+
+0.11
+
+14
+
+mixgb.pmm1
+
+-2.32 8.59
+
+10.44
+
+7.32
+
+8.17
+
+1.28
+
+2.27
+
+96
+
+0.11
+
+15
+
+mixgb.pmm2
+
+-2.46 10.28
+
+10.34
+
+8.18
+
+8.17
+
+2.10
+
+2.17
+
+97
+
+0.13
+
+20
+
+Maximum Monte Carlo SE
+
+0.11 --
+
+--
+
+--
+
+--
+
+--
+
+--
+
+1
+
+0.0005
+
+0.3
+
+Maximum Bootstrap SE (100 samples) --
+
+0.01
+
+0.1
+
+0.004
+
+0.003
+
+0.01
+
+0.1
+
+--
+
+--
+
+--
+
+Table 2: Simulation results for continuous data generation model 3.2.
+
+7
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+Figure 2: Average bias (×100) with Monte Carlo 95% confidence interval over 1000 simulations for continuous data generation model 3.2.
+
+Figure 3: Difference between measured and true variances with 95% bootstrap confidence interval (100 samples) over 1000 simulations for continuous data generation model 3.2. Upper panel ­ Within-imputation variance; Lower panel ­ Between-imputation variance.
+Imputation performance on biases for categorical data generation model 3.6 are illustrated in Figure 4. Interaction term 21 and its related parameters 19 and 20 are least biased when mixgb.null or mixgb.pmm1 is used. As anticipated, mice.logreg and mice.logregboot show unsatisfactory results for the interaction parameter. Surprisingly, random forests-based methods do not appear to reduce the bias for the interaction term 21. Also, they have considerably larger biases for main effects compared with other implementations. Imputation with mixgb.pmm2 performs slightly better than mice.cart on biases for parameters associated with the interaction, but exhibits moderate biases for main effects.
+The differences in the measured and true within-imputation variance are fairly small for all methods, with mice.rf and missRanger having larger differences. With regard to the performance on between-imputation variance, mice.pmm and mice.midastouch perform the worst for the interaction term while mice.rf and missRanger show undesirable
+8
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+results for most estimates. Performance by mice.cart or mixgb.pmm2 seems to be satisfactory but mixgb.null and mixgb.pmm1 yield optimal results on imputation variability.
+Overall, it appears that mixgb.null and mixgb.pmm1 are superior to other implementations for categorical data. However, their performances are indistinguishable, suggesting that predictive mean matching may not be needed for categorical data.
+
+Figure 4: Average bias (×100) with Monte Carlo 95% confidence interval over 1000 simulations for categorical data generation model 3.6.
+
+Figure 5: Difference between measured and true variances with 95% bootstrap confidence interval (100 samples) over 1000 simulations for categorical data generation model 3.6. Upper panel­ Within-imputation variance; Lower panel ­ Between-imputation variance.
+9
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+4 Computational time
+
+In this section, we compare the computation time for different multiple imputation software using real and simulated datasets. All code and details for datasets used in this section are available in the supplementary materials.
+Table 3 shows the average computational time needed to obtain 5 imputed datasets for different imputation implementations using open datasets with various sizes. For each dataset, 30% missing data were created under the MCAR mechanism and performances on wall clock time (elapsed) were averaged over 10 replications. The experiment was run on a Ubuntu 18.04 server with a 64-core processor and 187GB of RAM. Based on the simulation results in Section 3.3, we apply mixgb.pmm2 for continuous variables and mixgb.null for categorical variables as our default settings, which we call mixgb.auto. As both XGBoost and Ranger provide multithread parallel computing, we set the number of threads as 4 in mixgb.auto and missRanger.
+
+Method
+
+Dataset Sizea
+
+soybean 683 × 36 (118)
+
+ntws 3915 × 12 (20)
+
+nhanes 9575 × 15 (21)
+
+credit 30000 × 24 (35)
+
+mice.default mice.cart mice.rf missRanger mixgb.auto b
+
+212
+
+11
+
+24
+
+522
+
+58
+
+34
+
+141
+
+1684
+
+264
+
+399
+
+1377
+
+16978
+
+12
+
+17
+
+77
+
+793
+
+46
+
+11
+
+22
+
+203
+
+maximum S.E
+
+1
+
+1
+
+8
+
+28
+
+a Number in parentheses is the number of columns after one-hot encoding. b Use mixgb.pmm2 for continuous variables and mixgb.null for categorical variables.
+
+Table 3: Comparisons of average computation time (in seconds).
+
+adult 48842 × 15 (107)
+N/A 5260 N/A 350 238
+27
+
+Even though mice.default ran reasonably fast for small datasets, it was unable to handle medium or large datasets, especially those with more categorical variables. Random forests within the MICE framework was the slowest among all methods and it failed to impute the ADULT dataset. Using decision tree within the MICE framework could manage all five datasets, but it was considerably slower than missRanger or mixgb.auto and it scaled badly for large datasets.
+Overall, mixgb.auto and missRanger were the fastest. However, missRanger seemed to outperform mixgb.auto in datasets with fewer observations and more categorical variables. To assess the performance of these two methods in different scenarios, we compared the computation time using simulated data. Figure 6 shows the log time to obtain five imputations on 36 combinations of datasets, with the number of features between 11 and 31, the number of observations ranging from 102 to 105 and the types of features all being continuous, all binary or a mixture of binary and 3-class variables. When the number of observations was 102 , missRanger was faster than mixgb.auto for all types of variables and numbers of features. However, its advantage vanished with larger sample size. For continuous data, mixgb.auto was much faster than missRanger when the number of observations was greater than 102. For binary data, mixgb.auto outperformed missRanger once the number of observations was over 104 for all numbers of features. For data with a mix of binary and 3-class features, mixgb.auto outperformed missRanger when the number of observations was 105.
+
+10
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+Figure 6: Time performance comparison between missRanger and mixgb.auto.
+5 Data Examples
+We illustrate our proposed multiple imputation method mixgb.auto using the NWTS (US National Wilms' Tumor Study) dataset (D'Angio et al., 1989). This dataset contains outcome variables (e.g. relaps and dead) as well as histology results for 3915 patients. Since it provides both the central lab histology (histol) and local institution histology (instit) results, it is extensively used as an example to illustrate two-phase sampling designs (e.g., Breslow and Chatterjee, 1999; Breslow et al., 2009; Chen and Lumley, 2020). Other variables include study (3 or 4), stage (1-4), the age and year at diagnosis, the weight of tumor (specwgt), the diameter of tumor (tumdiam), time to relapse (trel) and time to death (tsur). There are no missing values in the original dataset. We created 20% missing data in histol and tumdiam by an MAR mechanism that depends on trel. Five imputed datasets were then generated using mixgb.auto. Comparisons of some marginal and conditional distributions of various continuous and categorical variables are shown in Figure 7 and Figure 8.
+Figure 7: Marginal distribution of imputed missing values. 11
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+Figure 8: Conditional distribution of imputed missing values.
+
+For some variables, such as histol, marginal distributions of imputed values are close to the distribution of masked true values. However, for some other variables such as tumdiam, some imputed values can still be distributed quite differently from their masked true values or the observed values. This phenomenon is not uncommon in an automated imputation procedure where expert knowledge about the data is not included in the imputation model.
+
+6 Discussion
+
+Commonly used multiple imputation implementations, such as the standard MICE algorithm, cannot automatically preserve complex data structure. To achieve satisfactory performance, they often rely on users to carefully select predictor variables and specify potential nonlinear or interaction effects in the imputation model for each incomplete variable. Ideally, identifying all inherent relations would guarantee a more desirable imputation quality, but it imposes higher requirements on expert knowledge. If the number of variables is large, this task may not be readily feasible and quite often gets omitted. Although using CART and random forests within the MICE framework can incorporate complex relations among data automatically, applying them for large-scale imputations can be challenging as imputation processes are often time-consuming or even abort with error messages. To address these issues, we propose a scalable MI approach based on XGBoost, a fast implementation of a gradient boosting algorithm.
+
+We found that multiple imputation through XGBoost (mixgb) has the advantage of capturing nonlinear relations among
+
+variables automatically. To assess the performance of mixgb against other state-of-the-art approaches, we extend
+
+the simulation studies by Doove et al. (2014). We measured not only the biases but also the imputation variability
+
+of estimates. We found that the standard application of MICE was more capable of modeling main effects but can
+
+lead to severely biased interaction estimates. In addition, apparent inconsistencies between the total variance and the
+
+true total variance arose, resulting in undesirable performance on between-variance. These results were as expected,
+
+since MICE does not automatically incorporate nonlinear relationships between variables without imputers specifying
+
+any possible complex structures in the data. On the other hand, mice.cart and mixgb, were the best at reserving
+
+quadratic or interaction effects. Meanwhile, they also performed well on imputation variance. Imputation with random
+
+forests within the MICE framework (mice-rf) or missRanger slightly reduced biases for interaction terms, but
+
+its ability to accommodate non-linearity was inferior to that of mixgb or mice.cart. Furthermore, mice-rf and
+
+missRanger underperformed on reflecting appropriate imputation variabilities. As a result, they can sometimes lead to
+
+inaccurate estimates of the coverage rate and width of the confidence interval. The performance of random forests-based
+
+implementations was not as good as expected. This may be due to the fact that the number of features in our simulated
+
+dfoarteasstestsisarepq, uwitheicshmcaolul l(dp
+
+= 10), and the highly affect the
+
+default number performance of
+
+of features selected at each random forests in relatively
+
+node for splitting in random low dimensional data.
+
+12
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+With regard to computational efficiency, mixgb shows superior performance across datasets with different sizes. The only competitor is missRanger, which tends to outperform mixgb for datasets with fewer observations and a larger number of categorical features. Using random forests within the MICE framework is the slowest among all methods, even with its default setting num.trees=10. Imputation with missRanger is substantially faster than mice.rf when the same number of trees is used. Even though mice.cart achieved satisfactory results on imputation performance, it is evidently slower than missRanger or mixgb.
+Applying machine learning algorithms to multiple imputation has attracted growing interest. However, some implementations can only undertake single imputation tasks, while others focus on accurately recovering the true data as a prediction task instead of reflecting suitable variability of missing data for more reliable statistical inferences. To the best of our knowledge, this is the first attempt to implement and evaluate multiple imputation through XGBoost with bootstrapping and predictive mean matching. We show that by using bootstrapping, and with the aid of predictive mean matching for continuous variables, mixgb can achieve imputation performances as good as that of mice.cart, which was previously considered to be the best at capturing complex data structure (Doove et al., 2014). In addition, we found that mixgb is exceptionally faster than MICE-based methods including mice.cart. Even though missRanger can rival mixgb on some occasions in terms of computational efficiency, its imputation quality based on the bias and variance criteria was inferior to mixgb. Our findings suggest that mixgb would be a promising automated MI approach for large and complex datasets.
+However, our findings may be limited to scenarios similar to simulation studies in this paper and may not generalize well to all scenarios. Although our simulation studies covered both continuous and categorical data, we have not investigated the imputation performance on data that includes categorical features with more than three levels. Additionally, it is worth noting that the speed and quality of imputation generally depend on hyperparameter settings of different methods, such as the number of trees in mice.cart and missRanger, the number of rounds in XGBoost and the number of threads when a multicore processor is available. Future work should therefore evaluate imputation performance with other data settings and a wider range of hyperparameter configurations.
+Supplementary Materials
+All supplementary materials except the R package misle are available at https://github.com/agnesdeng/mixgb.
+Additional tables and figures: The document supplement.pdf contains all simulation results for data generation models 3.1-3.6.
+R-package: R-package misle includes the implementation of mixgb. It is available at https://github.com/ agnesdeng/misle.
+Simulation R code: Code for simulation studies in Section 3 can be found in the folder simulation.
+Datasets and R code for computational time: Details for datasets and code used in Section 4 can be found in the folder time.
+R code for data example: R code for generating figures shown in Section 5 can be found in the folder example.
+References
+Awada, Z., Bouaoun, L., Nasr, R., Tfayli, A., Cuenin, C., Akika, R., Boustany, R.-M., Makoukji, J., Tamim, H., Zgheib, N. K., and Ghantous, A. (2021), "LINE-1 Methylation Mediates the Inverse Association Between Body Mass Index and Breast Cancer Risk: A Pilot Study in the Lebanese Population," Environmental Research, 197, 111094.
+Breiman, L. (2001), "Random Forests," Machine Learning, 45, 5­32.
+Breslow, N. E., and Chatterjee, N. (1999), "Design and Analysis of Two-Phase Studies with Binary Outcome Applied to Wilms Tumour Prognosis," Journal of the Royal Statistical Society: Series C (Applied Statistics), 48, 457­468.
+Breslow, N. E., Lumley, T., Ballantyne, C. M., Chambless, L. E., and Kulich, M. (2009), "Using the Whole Cohort in the Analysis of Case-Cohort Data," American Journal of Epidemiology, 169, 1398­1405.
+Chen, T., and Guestrin, C. (2016), "XGBoost: A Scalable Tree Boosting System," in Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, New York, NY, USA: Association for Computing Machinery, pp. 785­794.
+Chen, T., and Lumley, T. (2020), "Optimal Multiwave Sampling for Regression Modeling in Two-Phase Designs," Statistics in Medicine, 39, 4912­4921.
+13
+
+Multiple Imputation Through XGBoost
+
+A PREPRINT
+
+D'Angio, G. J., Breslow, N., Beckwith, J. B., Evans, A., Baum, E., Delorimier, A., Fernbach, D., Hrabovsky, E., Jones, B., Kelalis, P. et al. (1989), "Treatment of Wilms' Tumor. Results of the Third National Wilms' Tumor Study," Cancer, 64, 349­360.
+Doove, L. L., van Buuren, S., and Dusseldorp, E. (2014), "Recursive Partitioning for Missing Data Imputation in the Presence of Interaction Effects," Computational Statistics & Data Analysis, 72, 92­104.
+Efron, B. (1979), "Bootstrap Methods: Another Look at the Jackknife," The Annals of Statistics, 7, 1­26.
+Fuente-Soro, L., Fernández-Luis, S., López-Varela, E., Augusto, O., Nhampossa, T., Nhacolo, A., Bernardo, E., Burgueño, B., Ngeno, B., Couto, A., Guambe, H., Tibana, K., Urso, M., and Naniche, D. (2021), "Community-Based Progress Indicators for Prevention of Mother-to-child Transmission and Mortality Rates in HIV-exposed Children in Rural Mozambique," BMC Public Health, 21, 520.
+Lall, R., and Robinson, T. (2021), "The MIDAS Touch: Accurate and Scalable Missing-Data Imputation with Deep Learning," Political Analysis, 1­18.
+Li, K. H., Raghunathan, T. E., and Rubin, D. B. (1991), "Large-Sample Significance Levels from Multiply Imputed Data Using Moment-Based Statistics and an F Reference Distribution," Journal of the American Statistical Association, 86, 1065­1073.
+Little, R. J. (1988), "Missing-Data Adjustments in Large Surveys," Journal of Business & Economic Statistics, 6, 287­296.
+Mayer, M. (2019), MissRanger: Fast Imputation of Missing Values, R package version 2.1.0.
+Rubin, D. B. (1978), "Multiple Imputations in Sample Surveys-A Phenomenological Bayesian Approach to Nonresponse," in Proceedings of the Survey Research Methods Section of the American Statistical Association, American Statistical Association, vol. 1, pp. 20­34.
+-- (1986), "Statistical Matching using File Concatenation with Adjusted Weights and Multiple Imputations," Journal of Business & Economic Statistics, 4, 87­94.
+-- (1987), Multiple Imputation for Nonresponse in Surveys, New York: Wiley.
+-- (1996), "Multiple Imputation After 18+ Years," Journal of the American Statistical Association, 91, 473­489.
+Shah, A. D., Bartlett, J. W., Carpenter, J., Nicholas, O., and Hemingway, H. (2014), "Comparison of Random Forest and Parametric Imputation Models for Imputing Missing Data using MICE: a CALIBER Study," American Journal of Epidemiology, 179, 764­774.
+Stekhoven, D. J., and Bühlmann, P. (2012), "MissForest­Non-Parametric Missing Value Imputation for Mixed-Type Data," Bioinformatics, 28, 112­118.
+Su, Y. S., Gelman, A., Hill, J., and Yajima, M. (2011), "Multiple Imputation with Diagnostics (mi) in R: Opening Windows into the Black Box," Journal of Statistical Software, 45, 1­31.
+van Buuren, S. (2018), Flexible Imputation of Missing Data, 2nd Ed., Boca Raton: Chapman & Hall/CRC Press.
+van Buuren, S., and Groothuis-Oudshoorn, K. (2011), "Mice: Multivariate Imputation by Chained Equations in R," Journal of Statistical Software, 45, 1­67.
+Wendt, F. R., Pathak, G. A., Levey, D. F., Nuñez, Y. Z., Overstreet, C., Tyrrell, C., Adhikari, K., De Angelis, F., Tylee, D. S., Goswami, A., Krystal, J. H., Abdallah, C. G., Stein, M. B., Kranzler, H. R., Gelernter, J., and Polimanti, R. (2021), "Sex-Stratified Gene-by-Environment Genome-Wide Interaction Study of Trauma, Posttraumatic-Stress, and Suicidality," Neurobiology of Stress, 14, 100309.
+Wright, M. N., and Ziegler, A. (2017), "Ranger: A Fast Implementation of Random Forests for High Dimensional Data in C++ and R," Journal of Statistical Software, 77, 1­17.
+Yingling, J. (2019), "Multiple Imputation of Missing Data via Gradiant Boosted Trees," Master's thesis, University of Central Arkansas, Department of Applied Mathematics.
+Zhang, X., Yan, C., Gao, C., Malin, B., and Chen, Y. (2019), "XGBoost Imputation for Time Series Data," in 2019 IEEE International Conference on Healthcare Informatics (ICHI), pp. 1­3.
+
+14
+
+

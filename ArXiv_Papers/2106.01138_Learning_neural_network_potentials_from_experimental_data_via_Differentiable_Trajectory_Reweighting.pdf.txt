@@ -1,0 +1,874 @@
+arXiv:2106.01138v1 [physics.chem-ph] 2 Jun 2021
+
+Learning neural network potentials from experimental data via Differentiable Trajectory Reweighting
+Stephan Thaler and Julija Zavadlav
+Professorship of Multiscale Modeling of Fluid Materials, Department of Mechanical Engineering, Technical University of Munich, Germany
+Abstract In molecular dynamics (MD), neural network (NN) potentials trained bottom-up on quantum mechanical data have seen tremendous success recently. Top-down approaches that learn NN potentials directly from experimental data have received less attention, typically facing numerical and computational challenges when backpropagating through MD simulations. We present the Differentiable Trajectory Reweighting (DiffTRe) method, which bypasses differentiation through the MD simulation for time-independent observables. Leveraging thermodynamic perturbation theory, we avoid exploding gradients and achieve around 2 orders of magnitude speed-up in gradient computation for top-down learning. We show effectiveness of DiffTRe in learning NN potentials for an atomistic model of diamond and a coarse-grained model of water based on diverse experimental observables including thermodynamic, structural and mechanical properties. Importantly, DiffTRe also generalizes bottom-up structural coarse-graining methods such as iterative Boltzmann inversion to arbitrary potentials. The presented method constitutes an important milestone towards enriching NN potentials with experimental data, particularly when accurate bottom-up data is unavailable.
+1 Introduction
+Molecular modeling has become a cornerstone of many disciplines, including computational chemistry, soft matter physics, and material science. However, simulation quality critically depends on the employed potential energy model that defines particle interactions. There are two distinct approaches for model parametrization [1, 2]: Bottom-up approaches aim at matching data from high fidelity simulations, providing labeled data of atomistic configurations with corresponding target outputs. Labeled data allows straightforward differentiation for gradient-based optimization, at the expense of inherently limiting model accuracy to the quality imposed by the underlying datagenerating simulation. On the other hand, top-down approaches optimize the potential energy model such that simulations match experimental data. From experiments, however, labeled data on the atomistic scale are not available. Experimental observables are linked only indirectly to the potential model via an expensive molecular mechanics simulation, complicating optimization.
+stephan.thaler@tum.de julija.zavadlav@tum.de
+1
+
+A class of potentials with tremendous success in recent years are neural network (NN) potentials due their flexibility and capacity of learning many-body interactions [3, 4]. The vast majority of NN potentials are trained via bottom-up methods [5­16]. The objective is to match energies and/or forces from a data set, most commonly generated via density functional theory (DFT) for small molecules in vacuum [17]. State-of-the-art NN potentials have already reached the accuracy limit imposed by DFT, with the test error in predicting potential energy being around 2 orders of magnitude smaller than the corresponding expected DFT accuracy [11,18]. Deviations of predicted observables from experiments are therefore attributable to uncertainty in DFT simulations [11] in line with literature reporting DFT being sensitive to employed functionals [19]. More precise computational quantum mechanics models, e.g. the coupled cluster CCSD(T) method, improve DFT accuracy at the expense of significantly increased computational effort for data set generation [20,21]. However, for larger systems such as macromolecules, quantum mechanics computations will remain intractable in the foreseeable future, preventing ab initio data set generation all together. Thus, the main obstacle in bottom-up learning of NN potentials is currently limited availability of highly precise data sets.
+Top-down approaches circumvent the need for reliable data-generating simulations. Leveraging experimental data in the potential optimization process has contributed greatly to the success of classical atomistic [22, 23] and coarse-grained [24] (CG) force fields [1]. Training difficulties have so far impeded a similar approach for NN potentials: Only recent advances in automatic differentiation (AD) [25] software have enabled end-to-end differentiation of molecular dynamics (MD) observables with respect to potential energy parameters [26, 27], by applying AD through the dynamics of a MD simulation [26­29]. This direct reverse-mode AD approach saves all simulator operations on the forward pass to be used during gradient computation on the backward pass, resulting in excessive memory usage. Thus, direct reverse-mode AD for systems with more than hundred particles and a few hundred time steps is typically intractable [26­29]. Numerical integration of the adjoint equations [30, 31] represents a memory efficient alternative that requires to save only those atomic configurations that directly contribute to the loss. However, both approaches backpropagate the gradient through the entire simulation, which dominates computational effort and is prone to exploding gradients, as stated by Ingraham et al. [28] and shown below.
+Addressing the call for NN potentials trained on experimental data [1], we propose the Differentiable Trajectory Reweighting (DiffTRe) method. DiffTRe offers end-to-end gradient computation and circumvents the need to differentiate through the simulation by combining AD with previous work on MD reweighting schemes [32­35]. For the common use case of time-independent observables, DiffTRe avoids exploding gradients and reduces computational effort of gradient computations by around 2 orders of magnitude compared to backpropagation through the simulation. Memory requirements are comparable to the adjoint method. We showcase the broad applicability of DiffTRe on three numerical test cases: First, we provide insight into the training process on a toy example of ideal gas particles inside a double-well potential. Second, we train the state-of-the-art graph neural network potential DimeNet++ [11, 12] for an atomistic model of diamond from its experimental stiffness tensor. Finally, we learn a DimeNet++ model for CG water based on pressure, as well as radial and angular distribution functions. The last example shows how DiffTRe also generalizes bottom-up structural coarse-graining methods such as the iterative Boltzmann inversion [36] or inverse Monte Carlo [37] to many-body correlation functions and arbitrary potentials. DiffTRe allows to enhance NN potentials with experimental data, which is particularly relevant for systems where bottom-up data is unavailable or not sufficiently accurate.
+2
+
+2 Differentiable Trajectory Reweighting
+
+Top-down potential optimization aims to match the K outputs of a molecular mechanics simulation O to experimental observables O~. Therefore, the objective is to minimize a loss function L(), e.g.
+a mean squared error (MSE)
+
+1K L() =
+K
+
+Ok (U )
+
+- O~k
+
+2
+,
+
+(1)
+
+k=1
+
+where denotes the ensemble average, and Ok(U) depends on the potential energy U parametrized by . We will focus on the case where a MD simulation approximates Ok(U) - with Monte Carlo [38] being a usable alternative. With standard assumptions on ergodicity and thermody-
+namic equilibrium, the ensemble average Ok(U) is approximated via a time average
+
+1N
+
+Ok(U) N Ok(Si, U) ,
+
+(2)
+
+i=1
+
+where {Si}Ni=1 is the trajectory of the system, i.e. a sequence of N states consisting of particle positions and momenta. Due to the small time step size necessary to maintain numerical stability
+in MD simulations, states are highly correlated. Subsampling, i.e. only averaging over every 100th
+or 1000th state, reduces this correlation in Eq. 2.
+As the generated trajectory depends on , every update of  during training would require a re-
+computation of the entire trajectory. However, by leveraging thermodynamic perturbation theory [39], it is possible to re-use decorrelated states obtained via a reference potential ^. Specifically, the
+time average is reweighted to account for the altered state probabilities p(Si) from the perturbed potential  [32, 33, 39]:
+
+Ok (U )
+
+N
+wiOk(Si, U) with wi =
+i=1
+
+p (Si )/p^(Si )
+
+N j=1
+
+p
+
+(Sj
+
+)/p^(Sj
+
+)
+
+.
+
+(3)
+
+Assuming a canonical ensemble, state probabilities follow the Boltzmann distribution p(Si)  eH(Si), where H(Si) is the Hamiltonian of the state (sum of potential and kinetic energy),  =
+1/(kBT ), kB Boltzmann constant, T temperature. Inserting p(Si) into Eq. 3 allows computing
+weights as a function of  (the kinetic energy cancels)
+
+e- (U (Si )-U^(Si ))
+
+wi =
+
+N i=j
+
+e-(U(Sj )-U^(Sj ))
+
+.
+
+(4)
+
+For the special case of  = ^, wi = 1/N , recovering Eq. 2. Note that similar expressions to Eq. 4 could be derived for other ensembles, e.g. the isothermal­isobaric ensemble, via respective state probabilities p(Si). In practice, the reweighting ansatz is only applicable given small potential energy differences. For large differences between  and ^, by contrast, few states dominate the average. In this case, the effective sample size [34]
+
+Neff  e-
+
+N i=1
+
+wi
+
+ln(wi)
+
+(5)
+
+is reduced and the statistical error in Ok(U) increases (Eq. 3).
+
+3
+
+...
+
+...
+
+...
+
+1
+
+0.6
+
+2
+
+3
+
+0.4
+
+4
+
+5
+
+0.2
+
+1 2 3 4 5 0.0
+
+Figure 1: Differentiable Trajectory Reweighting (DiffTRe). a Based on an initial state Sinit and reference potential parameters ^, a reference trajectory is generated, of which only subsampled states are retained (blue diamonds), while the majority of visited states are discarded (gray diamonds). For each retained state Si (represented by a generic molecular system), the potential energy U(Si) and weight wi are computed under the current potential parameters . wi allow computation of reweighted observables Ok(U) , the loss L(), its gradient L and subsequently, updating  via the optimizer. The updating procedure is repeated until the effective sample size Neff < N¯eff , at which point a new reference trajectory needs to be generated starting from the last sampled state SN . b Computation of U(Si) from the pairwise distance matrix D, which is fed into the learnable potential Umodel (e.g. a graph neural network - GNN) and U prior (e.g. a pairwise repulsive potential).
+Reweighting can be exploited for two purposes that are linked to speed-ups in the forward and backward pass, respectively: First, reweighting reduces computational effort as decorrelated states from previous trajectories can often be re-used [34]. Second, and most importantly, reweighting establishes a direct functional relation between Ok(U) and . This relation via w provides an alternative end-to-end differentiable path for computing the gradient of the loss L: Differentiating through the reweighting scheme replaces the backward pass through the simulation. Leveraging this alternative differentiation path, while managing the effective sample size Neff , are the central ideas behind the DiffTRe method.
+The workflow of the DiffTRe algorithm consists of the following steps: First, an initial reference trajectory is generated from the canonical ensemble, e.g. via a stochastic or deterministic thermostat, from an initial state Sinit and reference potential ^ (Fig. 1 a). Initial equilibration states are disregarded and the following states are subsampled yielding decorrelated states {Si}Ni=1. Together with their reference potential energies {U^(Si)}Ni=1, these states are saved for re-use during reweighting. In the next step, the reweighting scheme is employed to compute L with respect to current parameters , where initially  = ^. An optimizer subsequently uses L to improve . This procedure of reweighting, gradient computation and updating is repeated as long as the
+4
+
+statistical error from reweighting is acceptably small, i.e. Neff is larger than a predefined N¯eff . As soon as Neff < N¯eff , a new reference trajectory needs to be sampled using the current  as the new ^. At least one  update per reference trajectory is ensured because initially Neff = N . Using the last generated state SN as Sinit for the next trajectory counteracts overfitting to a specific initial configuration. Additionally, p^(Sinit) is reasonably high when assuming small update steps, reducing necessary equilibration time for trajectory generation. Saving only {Si}Ni=1 and {U^(Si)}Ni=1 from the simulation entails low memory requirements similar to the adjoint method.
+Computation of L via reverse-mode AD through the reweighting scheme comprises a forward pass starting with computation of the potential U(Si) and weight wi for each Si (Eq. 4 ; Fig. 1 a). Afterwards, reweighted observables Ok(U) (Eq. 3) and the resulting loss L() (Eq. 1) are calculated. The corresponding backward pass starts at L() and stops at parameters  in the
+potential energy computation U(Si). The differentiation path defined by the reweighting ansatz is therefore independent of the trajectory generation.
+Evaluation of U(Si) (Fig. 1 b) involves computing the pairwise distance matrix D from atom positions of Si, that are fed into a learnable potential Umodel and a prior potential U prior. Both potential components are combined by adding the predicted potential energies
+
+U(Si) = Umodel(D) + U prior(D).
+
+(6)
+
+In subsequent examples of diamond and CG water, Umodel is a graph neural network operating iteratively on the atomic graph defined by D. U prior is a constant potential approximating a-priori
+known properties of the system, such as the Pauli exclusion principle (e.g. Eq. 12). Augmenting
+NN potentials with a prior is common in the bottom-up coarse-graining literature [8, 10] to provide
+qualitatively correct behavior in regions of the potential energy surface (PES) not contained in the
+data set, but reachable by the CG model. By contrast, DiffTRe does not rely on pre-computed
+data sets. Rather, the prior serves to control the data (trajectory) generation in the beginning of the optimization. Additionally, U prior reformulates the problem from learning Umodel directly to learning the difference between U prior and the optimal potential given the data [10]. A well-chosen U prior therefore represents a physics-informed initialization accelerating training convergence. Note that U prior is not a prior in the Bayesian sense providing a pervasive bias on learnable parameters in the small data regime. If U prior is in contradiction with the data, Umodel will correct for U prior as a result of the optimization. In the next section, we further illustrate for a toy problem the interplay
+between prior, gradients and the learning process in DiffTRe, and provide a comparison to direct
+reverse-mode AD through the simulation.
+
+3 Results
+
+Double-well toy example
+
+We consider ideal gas particles trapped inside a one-dimensional double-well potential (Fig. 2 a)
+
+parametrized by
+
+U (x) = kBT  2500(x - 0.5)6 - 10(x - 0.55)2 .
+
+(7)
+
+The goal is to learn  such that U(x) = Umodel(x) + U prior(x) matches U (x). We select a cubic spline as Umodel and a harmonic single-well potential as the prior potential U prior(x) = (x - 0.5)2, with scale  = 75. This encodes the prior knowledge that particles cannot escape the double-well.
+
+5
+
+a
+Double-well
+
+c
+4 3
+
+Prior Prediction Target
+
+L t in s || L||
+/0
+
+2
+Prior 1
+
+b
+100
+
+10 1
+
+10 2
+
+10 3
+
+Loss
+
+10 4
+
+Time per update
+
+0
+
+50
+
+100
+
+150
+
+Update step
+
+40 35 30 25 20 15 10 5 0 200
+
+0
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+x/X
+
+d 1019
+1016
+
+Direct AD DiffTRe
+
+1013
+
+1010
+
+107
+
+104
+
+101
+
+500 1000 1500 2000 2500 3000 3500 4000 Time steps
+
+Figure 2: Double-well toy example. a Sketch of the double-well and prior potential with corresponding example states of ideal gas particles (green circles). The learned potential results in a normalized density /0 that matches the target closely (b). Successful learning is reflected in the loss curve L, where significant reduction in wall-clock time per parameter update t towards the end of the optimization is achieved through re-using previously generated trajectories (c). Gradients computed via DiffTRe have constant magnitudes while gradients obtained from direct reverse-mode automatic differentiation through the simulation suffer from exploding gradients for longer trajectories (d).
+
+We choose the normalized density profile (x)/0 of ideal gas particles as the target observable. The resulting loss function is
+
+1K L=
+
+(xk)
+
+- ~(xk)
+
+2
+,
+
+(8)
+
+K
+k=1
+
+0
+
+0
+
+where (x) is discretized via K bins. (xk) are approximated based on N = 10000 states after skipping 1000 states for equilibration, where a state is retained every 100 time steps. We minimize Eq. 8 via an Adam [40] optimizer with learning rate decay. For additional DiffTRe and simulation parameters, see Supplementary Method 1.1.
+Initially, /0 resulting from U prior(x) deviates strongly from the target double-well density (Fig.
+
+6
+
+2 b). The loss curve illustrates successful optimization over 200 update steps (Fig. 2 c). After optimization, the target density is matched well: The learned potential energy function Umodel(x) recovers the data-generating potential U (x) (Supplementary Figure 1 a). The wall-clock time per parameter update t clearly shows two distinct levels: At the start of the optimization, update steps are rather large, significantly reducing Neff . Hence a new reference trajectory generation is triggered with each update (average t  39.2 s). Over the course of the simulation, updates of Umodel(x) become smaller and reference trajectories are occasionally re-used (average t  2.76 s).
+The effect of U prior on the training process is twofold: First, by encoding prior knowledge, it simplifies convergence, as Umodel(x) only needs to adapt the single-well prior instead of learning large energy barriers from scratch. Second, U prior also impacts the information content of the gradient by controlling the generation of trajectories in the beginning of the optimization (Eq. 15). The local support of the cubic spline allows analyzing this relation empirically (Supplementary Figure 1 b): The gradient is non-zero only in regions of the PES that are included in the reference trajectory. Hence, other regions of the PES are not optimized despite delivering a non-zero contribution to the loss. A well-chosen prior potential should therefore yield trajectories that are as close as possible to trajectories sampled from the true potential. However, satisfactory learning results can be obtained for a sensible range of prior scales (Supplementary Figure 2).
+For comparison, we have implemented gradient computation via direct reverse-mode AD through the simulation. This approach clearly suffers from the exploding gradients problem (Fig. 2 d): The gradient magnitude increases exponentially as a function of the simulation length. Without additional modifications (e.g. as implemented by Ingraham et al. [28]), these gradients are impractical for longer trajectories. By contrast, gradients computed via DiffTRe show constant magnitudes irrespective of the simulation length.
+To measure the speed-up over direct reverse-mode AD empirically, we simulate the realistic case of an expensive potential by substituting the numerically inexpensive spline by a fully-connected neural network with 2 hidden layers and 100 neurons each. We measure speed-ups of sg = 486 for gradient computations and s = 3.7 as overall speed-up per update when a new reference trajectory is sampled. However, these values are rather sensitive to the exact computational and simulation setup. Memory overflow in the direct AD method constrained trajectory lengths to 10 retained states and a single state for equilibration (a total of 1100 time steps). Measuring speed-up for one of the real-world problems below would be desirable, but is prevented by the memory requirements of direct AD.
+The measured speed-up values are in line with theoretical considerations: While direct AD backpropagates through the whole trajectory generation, DiffTRe only differentiates through the potential energy computation of decorrelated states {Si}Ni=1 (Fig. 1). From this algorithmic difference, we expect speed-up values that depend on the subsampling ratio n, the number of skipped states during equilibration Nequilib and the cost multiple of backward passes with respect to forward passes G (details in Supplementary Method 2)
+
+sg  Gn (1 + Nequilib/N ) ; s  G + 1 .
+
+(9)
+
+For this toy example setup, the rule-of-thumb estimates in Eq. 9 yield sg = 330 and s = 4, agreeing with the measured values. In the next sections, we showcase the effectiveness of DiffTRe in real-world, top-down learning of NN potentials.
+
+7
+
+Atomistic model of Diamond
+
+To demonstrate applicability of DiffTRe to solids on the atomistic scale, we learn a DimeNet++ [12]
+
+potential for diamond from its experimental elastic stiffness tensor C. Due to symmetries in the
+diamond cubic crystal, C only consists of three distinct stiffness moduli C~11 = 1079 GPa, C~12 = 124 GPa and C~44 = 578 GPa [41] (in Voigt notation). Additionally, we assume the crystal to be in a
+
+stress-free state  = 0 for vanishing infinitesimal strain = 0. These experimental data define the
+
+loss
+
+L
+
+=
+
+ 9
+
+i=3,j=3
+i2j
+
++
+
+C 3
+
+(C11 - C~11)2 + (C11 - C~12)2 + (C44 - C~44)2
+
+,
+
+(10)
+
+i=1,j=1
+
+where loss weights  and C counteract the effect of different orders of magnitude of observables. To demonstrate learning, we select the original Stillinger-Weber potential [42] parametrized for silicon as U prior. We have adjusted the length and energy scales to SW = 0.14 nm and SW = 200 kJ/mol, reflecting the smaller size of carbon atoms. Simulations are run with a cubic box of size L  1.784 nm containing 1000 carbon atoms (Fig. 3 a), which exactly matches the experimental density ( = 3512 kg/m3) [41]. The stress tensor  is computed via Eq. 13 and the stiffness tensor C via the stress fluctuation method (Eq. 14). Further details are summarized in Supplementary Method 3.
+Fig. 3 visualizes convergence of the stress (b) and stiffness components (c). Given that the model is only trained on rather short trajectories of 40 ps length, we test the trained model on a trajectory of 10 ns length to ensure that the model neither overfitted to initial conditions nor drifts away from the targets. The resulting stress and stiffness values 1 = 0.0323 GPa, 4 = -9.1 · 10-4 GPa, C11 = 1079.50 GPa, C12 = 124.64 GPa, and C44 = 578.35 GPa are in excellent agreement with the target values. The corresponding inverse stress-strain relation is given by the compliance tensor S = C-1, which can be constructed from by Young's modulus E = 1053.7 GPa, shear modulus G = 578.35 GPa and Poisson's ratio  = 0.104. The training loss curve and wall-clock time per update t are displayed in Supplementary Figure 3 a. As shown by t, the majority of update steps can re-use a saved reference trajectory, resulting in considerable computational savings.
+Computing the stress-strain curve (Supplementary Figure 3 b) from the trained model in the linear regime ( i < 0.005) verifies that computing C via Eq. 14 yields the same result as explicitly straining the box and measuring stresses. Additionally, this demonstrates that the DimeNet++ potential generalizes from the training box ( = 0) to boxes under small strain. We also strained the box beyond the linear regime to test generalization. The predicted stress-strain curve in Fig. 3 d shows good agreement with DFT data [43] for medium-sized natural strains e1 = log(1 + 1) < 0.02. For large strains the deviation quickly increases due to limited extrapolation capacities of NN potentials: States under large strain are never encountered during training, leading to large uncertainty in predicted forces. Incorporating additional observables into the optimization, such as the point of maximum stress, should improve predictions for large strains.
+
+Coarse-grained water model
+Finally, we learn a DimeNet++ potential for CG water. Water is a common benchmark problem due to its relevance in bio-physics simulations and its pronounced 3-body interactions, which are challenging for classical potentials [44]. We select a CG-mapping, where each CG particle is centered at the oxygen atom of the corresponding atomistic water molecule (Fig. 4 a). This allows using experimental oxygen-oxygen radial (RDF) and angular distribution functions (ADF) as target
+
+8
+
+a
+c 1200
+1000 800 600
+
+C11 C12 C44 targets 10 ns
+
+b
+
+20
+
+15
+
+10
+
+5
+
+1
+4
+Target 10 ns
+
+i in GPa
+
+0
+
+5
+
+10
+
+15
+
+20
+
+0 100 200 300 400 500 600 700 Update step
+
+d
+
+200
+
+DFT DiffTRe
+
+150
+
+100
+
+1 in GPa
+
+Cij in GPa
+
+400
+
+200
+
+0 0
+
+100 200 300 400 500 600 700 Update step
+
+50
+
+0 0.00
+
+0.05
+
+0.10
+
+0.15 e1
+
+0.20
+
+0.25
+
+0.30
+
+Figure 3: Atomistic model of diamond. The simulation box consists of 5 diamond unit cells in each direction, whose primary crystallographic directions [1, 0, 0], [0, 1, 0] and [0, 0, 1] are aligned with the x, y and z axes of the simulation box (a). Stress i (b) and stiffness values Cij (c) converge to their respective targets during the optimization. These results are robust to long simulation runs of 10 ns (marked with crosses). The stress-strain curve over normal natural strains e1 agrees with DFT data [43] for medium-sized strains (e1 <= 0.02), but deviates for large strains due to limited extrapolation capabilities of NN potentials (d).
+
+observables. Given that the reference experiment [45] was carried out at ambient conditions, we can additionally target a pressure p~ = 1 bar. Hence, we minimize
+
+1 L=
+G
+
+G
+
+(RDF (dg)
+
+-
+
+RD~ F (dg))2
+
++
+
+1 M
+
+M
+(ADF (m) - AD~ F (m))2 + p(p - p~)2 .
+
+(11)
+
+g=1
+
+m=1
+
+As the prior potential, we select the repulsive term of the Lennard-Jones potential
+
+U prior(d) = R
+
+R d
+
+12
+.
+
+(12)
+
+We have chosen the length scale of the SPC [46] water model as R = 0.3165 nm as well as a reduced energy scale of R = 1 kJ / mol to counteract the missing Lennard-Jones attraction term in Eq.
+
+9
+
+RDF
+
+a
+c
+2.5 2.0 1.5 1.0 0.5
+
+p in 103 bar
+
+b
+12 10
+8 6 4 2 0
+0
+
+d
+
+Prior
+
+Predicted
+
+0.8
+
+Target
+
+0.6
+
+Predicted Target 10 ns
+50 100 150 200 250 300 Update step Prior Predicted Target
+
+ADF
+
+0.4
+
+0.2
+
+0.0
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+d in nm
+
+0.0
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 in rad
+
+Figure 4: Coarse-grained model of water. Coarse-grained particles representing water molecules are visualized as blue balls in the simulation box (a). The pressure p converges quickly towards its target of 1 bar during optimization and the subsequent 10 ns simulation (black cross; p  12.9 bar) verifies the result (b). Over a 10 ns simulation, the learned potential reconstructs the experimental RDF and ADF well (c and d).
+
+12. The cubic box of length 3 nm with 901 CG particles implies a density of  = 998.28 g/l, which is close to the experimental density of  = 997.87 g/l. For additional details, see Supplementary Method 2.3.
+Fig. 4 b - d displays properties predicted by the final trained model during a 10 ns production run: DiffTRe is able to train a DimeNet++ potential that simultaneously matches experimental oxygen RDF, ADF and pressure to the line thickness. For the loss and wall-clock times per update, see Supplementary Figure 4. As an additional out-of-sample observable, we compute the tetrahedral order parameter q [47]. q  0.569 matches the experimental value of q~ = 0.576 closely. This is expected as q considers the structure of 4 nearest neighbor particles, which is closely related to the ADF.
+The accuracy of predicted 2 and 3-body interactions (Fig. 4 c and d) showcases the potency of graph neural network potentials in top-down molecular modeling: Capturing 3-body interactions is
+
+10
+
+essential for modeling water given that pair potentials trained via force matching fail to reproduce both RDF and ADF of the underlying high-fidelity model [44]. Other top-down CG water models with simple functional form tend to deviate from the experimental RDF [48, 49]. Deviations from experimental structural properties, albeit smaller in size, also arise in DFT simulations [19, 50], limiting the accuracy of bottom-up trained NN potentials [8].
+4 Discussion
+In this work, we demonstrate numerically efficient learning of NN potentials from experimental data. Main advantages of our proposed DiffTRe method are its flexibility and simplicity: DiffTRe is applicable to solid and fluid materials, coarse-grained and atomistic models, thermodynamic, structural and mechanical properties, as well as potentials of arbitrary functional form. To apply DiffTRe, practitioners only need to set up a MD simulation with corresponding observables and a loss function, while gradients are computed conveniently in an end-to-end fashion via AD. The demonstrated speed-ups and limited memory requirements promote application to larger systems.
+Without further adaptations, DiffTRe can also be applied as a bottom-up model parametrization scheme. In this case, a high-fidelity simulation, rather than an experiment, provides target observables. For CG models, DiffTRe generalizes structural coarse-graining schemes such as iterative Boltzmann inversion [36] or Inverse Monte Carlo [37]. DiffTRe overcomes the main limitations of these approaches: First, structural coarse-graining is no longer restricted to one-dimensional potentials and matching many-body correlation functions (e.g. ADFs) is therefore feasible. Second, the user can integrate additional observables into the optimization without relying on hand-crafted iterative update rules, for instance for pressure-matching [36, 51]. This is particularly useful if an observable needs to be matched precisely (e.g. pressure in certain multiscale simulations [52]). Matching many-body correlation functions will likely allow structural bottom-up coarse-graining to take on significance within the new paradigm of many-body CG potentials [8­10].
+For practical application of DiffTRe, a few limitations need to be considered. The reweighting scheme renders DiffTRe invariant to the sequence of states in the trajectory. Hence, dynamical properties cannot be employed as target observables. Additionally, the NN potential test cases considered in this work required a reasonably chosen prior potential. Lastly, two distinct sources of overfitting when learning from experimental data for a single system need to be accounted for [1]: To avoid overfitting to a specific initial state, DiffTRe uses a different initial state for each reference trajectory. Moreover, increasing the system size and trajectory length ensures representative reference trajectories. Irrespective of overfitting, generalization to different systems and thermodynamic state points remains to be addressed, for instance via training on multi-systemic experimental data sets. To this end, an in-depth assessment of out-of-sample properties of top-down learned NN potentials is required.
+From a machine learning (ML) perspective, DiffTRe belongs to the class of end-to-end differentiable physics approaches [53­55]. These approaches are similar to reinforcement learning in that the target outcome of a process (here a MD simulation) represents the data. A key difference is availability of gradients through the process, allowing for efficient training. Differentiable physics approaches, increasingly popular in control applications [31,56­58], enable direct training of the ML model via the physics simulator, advancing the ongoing synthesis of ML and physics-based methods.
+Finally, the combination of bottom-up and top-down approaches for learning NN potentials, i.e. considering information from both the quantum and macroscopic scale, represents an exciting
+11
+
+avenue for future research. For top-down approaches, pre-training NN potentials on bottom-up data sets can serve as a sensible extrapolation for the PES in areas unconstrained by the experimental data. In DiffTRe, a pre-trained model could also circumvent the need for a prior potential. Bottomup trained NN potentials, on the other hand, can be enriched with experimental data, which enables targeted refinement of the potential. This is particularly helpful for systems in which DFT accuracy is insufficient or generation of a quantum mechanical data set is computationally intractable.
+
+5 Methods
+
+Differentiable histogram binning
+
+To
+
+obtain
+
+an
+
+informative
+
+gradient
+
+L 
+
+,
+
+predicted
+
+observables
+
+need
+
+to
+
+be
+
+continuously
+
+differentiable.
+
+However, many common observables in MD, including density and structural correlation functions,
+
+are computed by discrete histogram binning. To obtain a differentiable observable, the (discrete)
+
+Dirac function used in binning can be approximated by a narrow Gaussian probability density
+
+function (PDF) [31]. Similarly, we smooth the non-differentiable cut-off in the definition of ADFs via
+
+a Gaussian cumulative distribution function (CDF) centered at the cut-off (details on differentiable
+
+density, RDF and ADF in Supplementary Method 3).
+
+Stress-strain relations
+Computing the virial stress tensor V for many-body potentials, e.g. NN potentials, under periodic boundary conditions requires special attention. This is due to the fact that most commonly used formulas are only valid for non-periodic boundary conditions or pairwise potentials [59]. Therefore, we resort to the formulation proposed by Chen et al. [60], which is well suited for vectorized computations in NN potentials.
+
+V
+
+=
+
+ 1  -
+
+Np
+
+mkvk  vk - FT R +
+
+U h
+
+
+T
+h ,
+
+(13)
+
+k=1
+
+where Np is the number of particles,  represents the dyadic or outer product, mk and vk are mass and thermal excitation velocity of particle k, R and F are (Np × 3) matrices containing all particle positions and corresponding forces, h is the (3 × 3) lattice tensor spanning the simulation box, and  = det(h) is the box volume.
+Due to the equivalence of the ensemble averaged virial stress tensor V and the Cauchy stress tensor  [61], we can compute the elastic stiffness tensor from MD simulations and compare it to continuum mechanical experimental data (details in Supplementary Method 5). In the canonical ensemble, the isothermal elastic stiffness tensor C can be calculated at constant strain via the stress fluctuation method [62]:
+
+Cijkl
+
+=
+
+ iVj  kl
+
+= CiBjkl - 
+
+iBj kBl - iBj kBl
+
++
+
+Np 
+
+(ik j l
+
++
+
+il j k )
+
+,
+
+(14)
+
+with
+
+the
+
+Born
+
+contribution
+
+to
+
+the
+
+stress
+
+tensor
+
+iBj
+
+=
+
+1 
+
+ 
+
+U
+ij
+
+,
+
+the
+
+Born
+
+contribution
+
+to
+
+the
+
+stiffness
+
+tensor
+
+CiBjkl
+
+=
+
+1 
+
+2U ij  kl
+
+and
+
+Kronecker
+
+delta
+
+ij .
+
+Eq.
+
+14
+
+integrates
+
+well
+
+into
+
+DiffTRe
+
+by
+
+reweighting
+
+individual ensemble average terms (Eq. 3) and combining the reweighted averages afterwards.
+
+12
+
+Implementing the stress fluctuation method in differentiable MD simulations is straightforward: AD circumvents manual derivation of strain-derivatives, which is non-trivial for many-body potentials [63].
+
+Statistical mechanics foundations
+
+Thermodynamic
+
+fluctuation
+
+formulas
+
+allow
+
+to
+
+compute
+
+the
+
+gradient
+
+L 
+
+from
+
+ensemble
+
+averages
+
+[64­66]. Specifically, considering a MSE loss for a single observable O(U) in the canonical ensemble
+
+[64],
+
+L  = 2( O(U)
+
+- O~)
+
+O(U) -  
+
+O(U
+
+)
+
+U 
+
+- O(U)
+
+U 
+
+.
+
+(15)
+
+It
+
+can
+
+be
+
+seen
+
+that
+
+the
+
+AD
+
+routine
+
+in
+
+DiffTRe
+
+estimates
+
+L 
+
+by
+
+approximating
+
+ensemble
+
+averages
+
+in
+
+Eq. 15 via reweighting averages (Derivation in Supplementary Method 5). End-to-end differentia-
+
+tion through the reweighting scheme simplifies optimization by combining obtained gradients from
+
+multiple observables. This is particularly convenient for observables that are not merely averages
+
+of instantaneous quantities, e.g. the stiffness tensor C (Eq. 14).
+
+DimeNet++
+We employ a custom implementation of DimeNet++ [11, 12] that fully integrates into Jax MD [26]. Our implementation takes advantage of neighbor lists for an efficient computation of the sparse atomic graph. We select the same NN hyperparameters as in the original publication [12] except for the embedding sizes, which we reduced by factor 4. This modification allowed for a significant speedup while retaining sufficient capacity for the problems considered in this work. For diamond, we have reduced the cut-off to 0.2 nm yielding an atomic graph, where each carbon atom is connected to its 4 covalently bonded neighbors. A comprehensive list of employed DimeNet++ hyperparameters is provided in Supplementary Method 6.
+
+6 Data availability
+Simulation setups and trained DimeNet++ models will be available at https://github.com/tummfm/difftre. All data that support the findings of this study are available in the paper or in the supplementary materials.
+
+7 Code availability
+The code for DiffTRe and its application to the three test cases will be available at https://github.com/tummfm/difftre after acceptance of the paper.
+
+References
+[1] Fr¨ohlking, T., Bernetti, M., Calonaci, N. & Bussi, G. Toward empirical force fields that match experimental observables. J. Chem. Phys. 152, 230902 (2020).
+[2] Noid, W. G. Perspective: Coarse-grained models for biomolecular systems. J. Chem. Phys. 139, 090901 (2013).
+
+13
+
+[3] Schu¨tt, K. T., Arbabzadah, F., Chmiela, S., Mu¨ller, K. R. & Tkatchenko, A. Quantum-chemical insights from deep tensor neural networks. Nat. Commun. 8, 13890 (2017).
+[4] No´e, F., Tkatchenko, A., Mu¨ller, K. R. & Clementi, C. Machine Learning for Molecular Simulation. Annu. Rev. Phys. Chem. 71, 361­390 (2020).
+[5] Behler, J. & Parrinello, M. Generalized neural-network representation of high-dimensional potential-energy surfaces. Phys. Rev. Lett. 98, 146401 (2007).
+[6] Schu¨tt, K. T. et al. SchNet: A continuous-filter convolutional neural network for modeling quantum interactions. In Advances in Neural Information Processing Systems, vol. 30 (2017).
+[7] Gilmer, J., Schoenholz, S. S., Riley, P. F., Vinyals, O. & Dahl, G. E. Neural message passing for quantum chemistry. In Proceedings of the 34th International Conference on Machine Learning, 1263­1272 (2017).
+[8] Zhang, L., Han, J., Wang, H., Car, R. & Weinan, W. E. DeePCG: Constructing coarse-grained models via deep neural networks. J. Chem. Phys. 149, 034101 (2018).
+[9] Wang, J. et al. Machine Learning of Coarse-Grained Molecular Dynamics Force Fields. ACS Cent. Sci. 5, 755­767 (2019).
+[10] Husic, B. E. et al. Coarse Graining Molecular Dynamics with Graph Neural Networks. J. Chem. Phys. 153, 194101 (2020).
+[11] Klicpera, J., Groß, J. & Gu¨nnemann, S. Directional Message Passing for Molecular Graphs. In 8th International Conference on Learning Representations, ICLR (2020).
+[12] Klicpera, J., Giri, S., Margraf, J. T. & Gu¨nnemann, S. Fast and Uncertainty-Aware Directional Message Passing for Non-Equilibrium Molecules (2020). Preprint at https://arxiv.org/abs/ 2011.14115.
+[13] Qiao, Z., Welborn, M., Anandkumar, A., Manby, F. R. & Miller, T. F. OrbNet: Deep learning for quantum chemistry using symmetry-adapted atomic-orbital features. J. Chem. Phys. 153, 124111 (2020).
+[14] Vlachas, P. R., Zavadlav, J., Praprotnik, M. & Koumoutsakos, P. Accelerated simulations of molecular systems through learning of their effective dynamics (2021). Preprint at https: //arxiv.org/abs/2011.14115.
+[15] Jain, A. C. P., Marchand, D., Glensk, A., Ceriotti, M. & Curtin, W. A. Machine learning for metallurgy III: A neural network potential for Al-Mg-Si. Phys. Rev. Mater. 5, 053805 (2021).
+[16] Ko, T. W., Finkler, J. A., Goedecker, S. & Behler, J. A fourth-generation high-dimensional neural network potential with accurate electrostatics including non-local charge transfer. Nat. Commun. 12, 398 (2021).
+[17] Ramakrishnan, R., Dral, P. O., Rupp, M. & Von Lilienfeld, O. A. Quantum chemistry structures and properties of 134 kilo molecules. Sci. Data 1, 1­7 (2014).
+[18] Faber, F. A. et al. Prediction Errors of Molecular Machine Learning Models Lower than Hybrid DFT Error. J. Chem. Theory Comput. 13, 5255­5264 (2017).
+14
+
+[19] Gillan, M. J., Alf`e, D. & Michaelides, A. Perspective: How good is DFT for water? J. Chem. Phys. 144, 130901 (2016).
+[20] Smith, J. S. et al. Approaching coupled cluster accuracy with a general-purpose neural network potential through transfer learning. Nat. Commun. 10, 2930 (2019).
+[21] Sauceda, H. E., Vassilev-Galindo, V., Chmiela, S., Mu¨ller, K. R. & Tkatchenko, A. Dynamical strengthening of covalent and non-covalent molecular interactions by nuclear quantum effects at finite temperature. Nat. Commun. 12, 442 (2021).
+[22] Cornell, W. D. et al. A second generation force field for the simulation of proteins, nucleic acids, and organic molecules. J. Am. Chem. Soc. 117, 5179­5197 (1995).
+[23] Oostenbrink, C., Villa, A., Mark, A. E. & Van Gunsteren, W. F. A biomolecular force field based on the free enthalpy of hydration and solvation: The GROMOS force-field parameter sets 53A5 and 53A6. J. Comput. Chem. 25, 1656­1676 (2004).
+[24] Marrink, S. J., Risselada, H. J., Yefimov, S., Tieleman, D. P. & De Vries, A. H. The MARTINI force field: Coarse grained model for biomolecular simulations. J. Phys. Chem. B 111, 7812­ 7824 (2007).
+[25] Baydin, A. G., Pearlmutter, B. A., Radul, A. A. & Siskind, J. M. Automatic Differentiation in Machine Learning: a Survey. J. Mach. Learn. Res. 18, 1­43 (2018).
+[26] Schoenholz, S. S. & Cubuk, E. D. A Framework for Differentiable Physics. In Advances in Neural Information Processing Systems, vol. 33 (2020).
+[27] Doerr, S. et al. Torchmd: A deep learning framework for molecular simulations. J. Chem. Theory Comput. 17, 2355­2363 (2021).
+[28] Ingraham, J., Riesselman, A., Sander, C. & Marks, D. Learning Protein Structure with a Differentiable Simulator. In 7th International Conference on Learning Representations, ICLR (2019).
+[29] Goodrich, C. P., King, E. M., Schoenholz, S. S., Cubuk, E. D. & Brenner, M. P. Designing self-assembling kinetics with differentiable statistical physics models. Proc. Natl. Acad. Sci. 118, e2024083118 (2021).
+[30] Chen, R. T. Q., Rubanova, Y., Bettencourt, J. & Duvenaud, D. Neural Ordinary Differential Equations. In Advances in Neural Information Processing Systems, vol. 31 (2018).
+[31] Wang, W., Axelrod, S. & G´omez-Bombarelli, R. Differentiable Molecular Simulations for Control and Learning. In ICLR 2020 Workshop on Integration of Deep Neural Models and Differential Equations (2020).
+[32] Norgaard, A. B., Ferkinghoff-Borg, J. & Lindorff-Larsen, K. Experimental parameterization of an energy function for the simulation of unfolded proteins. Biophys. J. 94, 182­192 (2008).
+[33] Li, D. W. & Bru¨schweiler, R. Iterative optimization of molecular mechanics force fields from NMR data of full-length proteins. J. Chem. Theory Comput. 7, 1773­1782 (2011).
+15
+
+[34] Carmichael, S. P. & Shell, M. S. A new multiscale algorithm and its application to coarsegrained peptide models for self-assembly. J. Phys. Chem. B 116, 8383­8393 (2012).
+[35] Wang, L. P., Chen, J. & Van Voorhis, T. Systematic Parametrization of Polarizable Force Fields from Quantum Chemistry Data. J. Chem. Theory Comput. 9, 452­460 (2013).
+[36] Reith, D., Pu¨tz, M. & Mu¨ller-Plathe, F. Deriving effective mesoscale potentials from atomistic simulations. J. Comput. Chem. 24, 1624­1636 (2003).
+[37] Lyubartsev, A. P. & Laaksonen, A. Calculation of effective interaction potentials from radial distribution functions: A reverse Monte Carlo approach. Phys. Rev. E 52, 3730­3737 (1995).
+[38] Binder, K., Heermann, D., Roelofs, L., Mallinckrodt, A. J. & McKay, S. Monte Carlo Simulation in Statistical Physics. Comput. Phys. 7, 156 (1993).
+[39] Zwanzig, R. W. High-Temperature Equation of State by a Perturbation Method. I. Nonpolar Gases. J. Chem. Phys. 22, 1420­1426 (1954).
+[40] Kingma, D. P. & Ba, J. L. Adam: A method for stochastic optimization. In 3rd International Conference on Learning Representations, ICLR (2015).
+[41] McSkimin, H. J., Andreatch, P. & Glynn, P. The elastic stiffness moduli of diamond. J. Appl. Phys. 43, 985­987 (1972).
+[42] Stillinger, F. H. & Weber, T. A. Computer simulation of local order in condensed phases of silicon. Phys. Rev. B 31, 5262­5271 (1985).
+[43] Jensen, B. D., Wise, K. E. & Odegard, G. M. Simulation of the Elastic and Ultimate Tensile Properties of Diamond, Graphene, Carbon Nanotubes, and Amorphous Carbon Using a Revised ReaxFF Parametrization. J. Phys. Chem. A 119, 9710­9721 (2015).
+[44] Scherer, C. & Andrienko, D. Understanding three-body contributions to coarse-grained force fields. Phys. Chem. Chem. Phys. 20, 22387­22394 (2018).
+[45] Soper, A. K. & Benmore, C. J. Quantum differences between heavy and light water. Phys. Rev. Lett. 101, 065502 (2008).
+[46] Berendsen, H. J. C., Postma, J. P. M., van Gunsteren, W. F. & Hermans, J. Interaction models for water in relation to protein hydration. In Intermolecular forces, 331­342 (Springer, 1981).
+[47] Errington, J. R. & Debenedetti, P. G. Relationship between structural order and the anomalies of liquid water. Nature 409, 318­321 (2001).
+[48] Molinero, V. & Moore, E. B. Water modeled as an intermediate element between carbon and silicon. J. Phys. Chem. B 113, 4008­4016 (2009).
+[49] Chan, H. et al. Machine learning coarse grained models for water. Nat. Commun. 10, 379 (2019).
+[50] Distasio, R. A., Santra, B., Li, Z., Wu, X. & Car, R. The individual and collective effects of exact exchange and dispersion interactions on the ab initio structure of liquid water. J. Chem. Phys. 141, 084502 (2014).
+16
+
+[51] Wang, H., Junghans, C. & Kremer, K. Comparative atomistic and coarse-grained study of water: What do we lose by coarse-graining? Eur. Phys. J. E 28, 221­229 (2009).
+[52] Thaler, S., Praprotnik, M. & Zavadlav, J. Back-mapping augmented adaptive resolution simulation. J. Chem. Phys. 153, 164118 (2020).
+[53] Belbute-Peres, F. D. A., Smith, K. A., Allen, K. R., Tenenbaum, J. B. & Kolter, J. Z. Endto-End Differentiable Physics for Learning and Control. In Advances in Neural Information Processing Systems, vol. 31 (2018).
+[54] Innes, M. et al. A Differentiable Programming System to Bridge Machine Learning and Scientific Computing (2019). Preprint at https://arxiv.org/abs/1907.07587.
+[55] Hu, Y. et al. DiffTaichi: Differentiable Programming for Physical Simulation. In 8th International Conference on Learning Representations, ICLR (2020).
+[56] Degrave, J., Hermans, M., Dambre, J. & Wyffels, F. A differentiable physics engine for deep learning in robotics. Front. Neurorobot. 13, 6 (2019).
+[57] Holl, P., Koltun, V. & Thuerey, N. Learning to Control PDEs with Differentiable Physics. In 8th International Conference on Learning Representations, ICLR (2020).
+[58] Sch¨afer, F., Kloc, M., Bruder, C. & L¨orch, N. A differentiable programming method for quantum control. Mach. Learn. Sci. Technol. 1, 35009 (2020).
+[59] Thompson, A. P., Plimpton, S. J. & Mattson, W. General formulation of pressure and stress tensor for arbitrary many-body interaction potentials under periodic boundary conditions. J. Chem. Phys. 131, 154107 (2009).
+[60] Chen, X. et al. TensorAlloy: An automatic atomistic neural network program for alloys. Comput. Phys. Commun. 250, 107057 (2020).
+[61] Subramaniyan, A. K. & Sun, C. T. Continuum interpretation of virial stress in molecular simulations. Int. J. Solids Struct. 45, 4340­4346 (2008).
+[62] Van Workum, K., Yoshimoto, K., De Pablo, J. J. & Douglas, J. F. Isothermal stress and elasticity tensors for ions and point dipoles using Ewald summations. Phys. Rev. E - Stat. Nonlinear, Soft Matter Phys. 71, 061102 (2005).
+[63] Van Workum, K., Gao, G., Schall, J. D. & Harrison, J. A. Expressions for the stress and elasticity tensors for angle-dependent potentials. J. Chem. Phys. 125, 144506 (2006).
+[64] Di Pierro, M. & Elber, R. Automated optimization of potential parameters. J. Chem. Theory Comput. 9, 3311­3320 (2013).
+[65] Wang, L. P. et al. Systematic improvement of a classical molecular model of water. J. Phys. Chem. B 117, 9956­9972 (2013).
+[66] Wang, L. P., Martinez, T. J. & Pande, V. S. Building force fields: An automatic, systematic, and reproducible approach. J. Phys. Chem. Lett. 5, 1885­1891 (2014).
+17
+
+8 Contributions
+S.T. conceptualized, implemented, and applied the DiffTRe method and conducted MD simulations as well as postprocessing. S.T. and J.Z. planned the study, analyzed and interpreted results and wrote the paper.
+9 Competing interests
+The authors declare no competing interests.
+18
+
+

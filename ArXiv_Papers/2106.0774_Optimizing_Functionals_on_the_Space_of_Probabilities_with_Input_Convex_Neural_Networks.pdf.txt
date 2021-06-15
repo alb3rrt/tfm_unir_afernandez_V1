@@ -1,0 +1,1808 @@
+Optimizing Functionals on the Space of Probabilities with Input Convex Neural Networks
+
+arXiv:2106.00774v1 [stat.ML] 1 Jun 2021
+
+David Alvarez-Melis Microsoft Research daalvare@microsoft.com
+
+Yair Schiff IBM Watson yair.schiff@ibm.com
+
+Youssef Mroueh IBM Research AI mroueh@us.ibm.com
+
+Abstract
+Gradient flows are a powerful tool for optimizing functionals in general metric spaces, including the space of probabilities endowed with the Wasserstein metric. A typical approach to solving this optimization problem relies on its connection to the dynamic formulation of optimal transport and the celebrated Jordan-KinderlehrerOtto (JKO) scheme. However, this formulation involves optimization over convex functions, which is challenging, especially in high dimensions. In this work, we propose an approach that relies on the recently introduced input-convex neural networks (ICNN) to parameterize the space of convex functions in order to approximate the JKO scheme, as well as in designing functionals over measures that enjoy convergence guarantees. We derive a computationally efficient implementation of this JKO-ICNN framework and use various experiments to demonstrate its feasibility and validity in approximating solutions of low-dimensional partial differential equations with known solutions. We also explore the use of our JKOICNN approach in high dimensions with an experiment in controlled generation for molecular discovery.
+1 Introduction
+Numerous problems in machine learning and statistics can be formulated as finding a probability distribution that minimizes some objective function of interest. One recent example of this formulation is generative modeling, where one seeks to model a data-generating distribution data by finding, among a parametric family , the distribution that minimizes some notion of discrepancy to data, i.e., min D(, data). Different choices of discrepancies give rise to various training paradigms, such as generative adversarial networks [23] (Jensen-Shannon divergence), Wasserstein GAN [3] (1-Wasserstein distance) and maximum likelihood estimation (KL divergence) [29, 35, 43]. In general, such problems can be cast as finding  = argmin F (), for a functional F on distributions.
+Beyond machine learning and statistics, optimization on the space of probability distributions is prominent in applied mathematics, particularly in the study of partial differential equations (PDE). The seminal work of Jordan et al. [28], and later Otto [37], Ambrosio et al. [1], and several others, showed that many classic PDEs can be understood as minimizing certain functionals defined on distributions. Central to these works is the notion of gradient flows on the probability space endowed with the Wasserstein metric. Jordan, Kinderlehrer, and Otto [28] set the foundations of a theory establishing connections between optimal transport, gradient flows, and differential equations. In addition, they proposed a general iterative method, popularly referred to as the JKO scheme, to solve PDEs of the Fokker-Planck type. This method was later extended to more general PDEs and in turn to more general functionals over probability space [1]. The JKO scheme can be seen as a generalization of the implicit Euler method on the probability space endowed with the Wasserstein metric. This approach has various appealing theoretical convergence properties owing to a notion of convexity of probability functionals, known as geodesic convexity (see the excellent monograph of Santambrogio [46] for more details).
+Preprint. Under review.
+
+Several computational approaches to JKO have been proposed, among them an elegant method introduced in [7] that reformulates the JKO variational problem on probability measures as an optimization problem on the space of convex functions. This reformulation is made possible thanks to Brenier's Theorem [9]. However, the appeal of this computational scheme comes at a price: computing updates involves solving an optimization over convex functions at each step, which is challenging in general. The practical implementations in [7] make use of space discretization to solve this optimization problem, which limits their applicability beyond two dimensions.
+In this work, we propose a computational approach to the JKO scheme that is scalable in highdimensions.At the core of our approach are Input-Convex Neural Networks (ICNN) [2], a recently proposed class of deep models that are convex with respect to their inputs. We use ICNNs to find parametric solutions to Benamou et al.'s [7] reformulation of the JKO problem as optimization on the space of convex functions. This leads to an approximation of the JKO scheme that we call JKOICNN. In practice, we implement JKO-ICNN with finite samples from distributions and optimize the parameters of ICNNs with adaptive gradient descent using automatic differentiation.
+To evaluate the soundness of our approach, we first conduct experiments on well-known PDEs in low dimensions that have exact analytic solutions, allowing us to quantify the approximation quality of the gradient flows evolved with our method. We then use our approach in a high-dimensional setting, where we optimize a dataset of molecules to satisfy certain properties, such as drug-likeness (QED). The results show that our JKO-ICNN approach is successful at approximating solutions of PDEs and has the unique advantage of scalability in terms of optimizing generic probability functionals on the probability space in high dimensions.
+
+2 Background
+
+Notation Let X be a Polish space equipped with metric d, and P(X ) the set of non-negative Borel
+
+measures with finite second-order moment on that space. The space P(X ) contains both continuous
+
+and discrete measures, the latter represented as an empirical distribution:
+
+N i=1
+
+pixi ,
+
+where
+
+x
+
+is
+
+a
+
+Dirac at position x  X . For a measure  and measurable map T : X  X , we use T  to denote the
+
+push-forward measure, and JT the Jacobian of T . For a function u : X  R, u is the gradient and
+
+Hu(x) is the Hessian. · denotes the divergence operator. For a matrix A, |A| denotes its determinant.
+
+When clear from the context, we use  interchangeably to denote a measure and its density.
+
+Gradient flows in Wasserstein space Consider first a functional F : X  R and a point x0  X . A gradient flow is an absolutely continuous curve x(t) that evolves from x0 in the direction of steepest descent of F . When X is Hilbertian and F is sufficiently smooth, its gradient flow can be succinctly expressed as the solution of a differential equation x (t) = -F (x(t)), with initial condition x(0) = x0.
+Gradient flows can be defined in probability space too, as long as a suitable notion of distance between probability distributions is chosen. Formally, let us consider P(X ) equipped with the p-Wasserstein distance, which for measures ,   P(X ) is defined as:
+
+Wp(, ) min
+
+x-y
+
+2 2
+
+d(x,
+
+y).
+
+(1)
+
+(,)
+
+Here (, ) is the set of couplings (transportation plans) between  and , formally: (, )
+
+{  P(X × X ) | P1  = , P2  = }. Endowed with this metric, the Wasserstein space
+
+Wp(X ) = (P(X ), Wp) is a complete and separable metric space. In this case, given a functional in probability space F : P(X )  R, its gradient flow in Wp(X ) is a curve (t) : R+  P(X )
+
+that satisfies t(t) = -W2 F ((t)). Here W2 is a natural notion of gradient in Wp(X ) given
+
+by: W2 F () = - ·
+
+
+
+F 
+
+where
+
+F 
+
+is the first variation of the functional F . Therefore, the
+
+gradient flow of F solves the following PDE:
+
+tt -  ·
+
+t
+
+F 
+
+(t)
+
+=0
+
+(2)
+
+also known as a continuity equation.
+
+2
+
+3 Gradient flows via JKO scheme and input convex neural networks
+
+In this section, we introduce the JKO scheme for solving gradient flows, show how it can be cast as an optimization over convex functions, and propose a method to solve the resulting optimization problem via parametrization with ICNNs.
+
+3.1 JKO scheme on probability measures
+
+Throughout this work we consider problems of the form minP(X ) F (), where F : P(X )  R is a functional over probability measures that encodes some objective of interest. Following the gradient
+
+flow literature (e.g., [46, 47]), we will focus on three fairly general families of functionals:
+
+1 F() = f ((x)) dx, V() = V (x) d, W() =
+2
+
+W (x - x ) d(x) d(x ), (3)
+
+where f : R  R is convex and superlinear and V, W : X  R are convex and sufficiently smooth.
+
+These functionals are appealing for various reasons. First, their gradient flows enjoy desirable
+
+convergence properties, as we discuss below. Second, they have a physical interpretation as internal,
+
+potential, and interaction energies, respectively. Finally, their corresponding continuity equation (2)
+
+turn out to recover various classic PDEs (see Table 1 for equivalences). Thus, in this work, we focus
+
+on objectives that can be written as linear combinations of these three types of functionals.
+
+Table 1: Equivalence between gradient flows and PDEs. In each case, the gradient flow of the functional F () in Wasserstein space in the rightmost column satisfies the PDE in the middle column.
+
+Class
+
+PDE t =
+
+Flow Functional F () =
+
+Heat Equation Advection Fokker-Planck Porous Media
+Adv. + Diff. + Interaction
+
+  · (V )  +  · (V ) (m) +  · (V )
+ · (f () +V + (W ))
+
+(x) log (x) dx
+
+V (x) d(x)
+
+(x) log (x) dx + V (x) d(x)
+
+1 m-1
+
+(x)m dx +
+
+V (x) d(x)
+
+V (x) d(x) + f ((x)) dx +
+
+1 2
+
+W (x-x ) d(x) d(x )
+
+For a functional F of this form, it can be shown that the corresponding gradient flow defined in
+
+Section 2 converges exponentially fast to a unique minimizer [46]. This suggests solving the opti-
+
+mization problem min F () by following the gradient flow, starting from some initial configuration 0. A convenient method to study this PDE is through the time discretization provided by the
+
+Jordan­Kinderlehrer­Otto (JKO) iterated movement minimization scheme [28]:
+
+t+1
+
+
+
+argmin
+W2(X )
+
+F ()
+
++
+
+1 2
+
+W22(, t ),
+
+(4)
+
+where  > 0 is a time step parameter. This scheme will form the backbone of our approach.
+
+3.2 From measures to convex functions
+The general JKO scheme (4) discretizes the gradient flow (and therefore, the corresponding PDE) in time, but it is still formulated on --potentially infinite-dimensional, and therefore intractable-- probability space P(X ). Obtaining an implementable algorithm requires recasting this optimization problem in terms of a space that is easier to handle than that of probability measures. As a first step, we do so using convex functions.
+
+One of the cornerstones of optimal transport theory states that for absolutely continuous measures and suitable cost functions, the solution of the Kantorovich problem concentrates around a deterministic map T (the Monge map). Furthermore, for the quadratic cost, Brenier's theorem [9] states that this map is given by the gradient of a convex function u, i.e., T (x) = u(x). Hence given a measure , the mapping u  cvx(X )  (u)   P(X ) can be seen as a parametrization, which depends on , of the space of probabilities [34]. We furthermore have for any u  cvx(X ):
+
+W22(, (u) )) =
+
+u(x) - x
+
+2 2
+
+d.
+
+(5)
+
+X
+
+Using this expression and the parametrization  = (u) t with u  cvx(X ) in Problem 4 we obtain
+
+a reformulation of Wasserstein gradient flows as optimization over convex functions [7]:
+
+ut+1
+
+
+
+argmin F ((u)
+ucvx(X )
+
+t )
+
++
+
+1 2
+
+X
+
+u(x) - x
+
+2 2
+
+dt
+
+,
+
+(6)
+
+3
+
+which implicitly defines a sequence of measures via t+1 = (ut+1)#(t ). For potential and interaction functionals, Lemma 3.1 shows that the first term in this scheme can be written in a form
+amenable to optimization on u.
+
+Lemma 3.1 (Potential and Interaction Energies). Let t be the measure at time t of the JKO iterations. For the pushforward measure  = (u) t, the functionals V and W can be written as:
+
+1
+
+V() =
+
+(V  u)(x) dt(x) and
+
+W() = 2
+
+W (u(x) - u(y)) dt(y) dt(x). (7)
+
+Crucially, t appears here only as the integrating measure. We will exploit this property for finitesample computation in the next section. In the case of internal energies F, however, the integrand itself depends on t, which poses difficulties for computation. To address this, we start in Lemma 3.2 by tackling the change of density when using strictly convex potential pushforward maps:
+
+Lemma 3.2 (Change of Variable). Given a strictly convex potential u  cvx(X ), u is invertible, and (u)-1 = u, where u is the convex conjugate of u, u(y) = supxdom(u) x, y - u(x).
+Given a measure  with density , the density  of the measure  = (u)  is given by:
+
+ (y)
+
+=
+
+ |Hu|
+
+
+
+(u)-1(y)
+
+=
+
+ |Hu|
+
+
+
+u(y).
+
+(8)
+
+In other words log (y) = log (u(y)) - log(|Hu(u(y))|). Iterating Lemma 3.2 across time in the JKO steps we obtain:
+
+Corollary 3.3 (Iterated Change of Variables in JKO). Assume 0 has a density. Let T1:t = ut · · ·  u1 , where ut are optimal convex potentials in the JKO sequence that we assume are strictly convex. We use the convention T1:0(x) = x. We have (T1:t)-1 = (u1 )  · · ·  (ut ) where (ut ) is the convex conjugate of ut . At time t of the JKO iterations we have: t(x) = T1:t0(x), and therefore:
+
+
+
+
+
+t
+
+log (t ) = log (0) - log(|Hus (T1:s-1)|)  (T1:t)-1.
+
+(9)
+
+s=1
+
+From Corollary 3.3, we see that the iterates in the JKO scheme imply a change of densities that shares similarities with normalizing flows [26, 43], where the depth of the flow network in [43] corresponds to the time in JKO. Whereas the normalizing flows in [43] draw connections to the Fokker-Planck equation in the generative modeling context, JKO is more general and allows for rigorous optimization of generic functionals on the probability space.
+Armed with this expression of t , we can now write F in terms of the convex potential u:
+
+Lemma 3.4 (Internal Energy). Let t be the measure at the time t of the JKO iterations. Using notations of Corollary 3.3, for the pushforward measure  = (u) t = (u  T1:t) 0 we have:
+
+F =
+
+f
+
+0(x) |Hu(T1:t(x))||JT1:t (x)|
+
+|Hu(T1:t(x))||JT1:t (x)| dx
+
+(10)
+
+Letting (x) =
+
+0 (x) |Hu(T1:t(x))||JT1:t (x)|
+
+and
+
+assuming
+
+0
+
+>
+
+0,
+
+we
+
+have:
+
+F
+
+
+
+=
+
+Ex0
+
+f  
+
+(x).
+
+3.3 From convex functions to finite parameters
+Solving problem (6) requires: (i) a tractable parametrization of cvx(X ), the space of convex functions, (ii) a method to evaluate and compute gradients of the Wasserstein distance term, and (iii) a method to evaluate and compute gradients of the functionals as expressed in Lemmas 3.1 and 3.4.
+
+For (i), we rely on the recently proposed Input Convex Neural Networks [2]. See Appendix B.1 for a
+
+background
+
+on
+
+ICNN.
+
+Given
+
+0
+
+=
+
+1 n
+
+n i=1
+
+xi
+
+we
+
+solve
+
+for
+
+t
+
+=
+
+1
+
+.
+
+..
+
+T:
+
+t+1  argmin L()
+: uICNN(X )
+
+F ((xu(x))
+
+t )
+
++
+
+1 2
+
+X
+
+xu(x) - x
+
+2 2
+
+dt
+
+,
+
+(11)
+
+where ICNN(X ) is the space of Input Convex Neural Networks, and the  denotes parameters of the ICNN. Equation (11) defines a JKO sequence of measures via t+1 = (xut+1 )#(t ). We call this
+
+4
+
+iterative process JKO-ICNN, where each optimization problem can be solved with gradient descent on the parameter space of the ICNN, using backpropagation and automatic differentiation.
+
+For
+
+(ii),
+
+we
+
+note
+
+that
+
+this
+
+term
+
+can
+
+be
+
+interpreted
+
+as
+
+an
+
+expectation,
+
+namely,
+
+1 2
+
+Ext
+
+xu(x) -
+
+x of
+
+2 2
+
+,
+
+so
+
+we
+
+previous
+
+can approximate it with finite samples
+
+cloud
+
+points
+
+in
+
+JKO
+
+sequence:
+
+1 2 n
+
+(ni=pa1rticlxeus)o(xf i)t-obxtiain22e, d{xvii}anit=h1e
+
+(iii) we first note that the V and W functionals can also be written as expectations
+
+pushforward map  t . Finally, for over t :
+
+V (xu) t
+
+=E
+xt
+
+V
+
+(x
+
+u
+
+(x)),
+
+W
+
+(xu) t
+
+=
+
+1 2
+
+E
+x,yt
+
+W
+
+(x u (x)
+
+-
+
+x u (y )).
+
+(12)
+
+Thus, as long as we can parametrize the functions V and W in a differentiable manner, we can
+
+estimate the value and gradients of these two functionals through finite samples too. In many cases
+
+V and W will be simple analytic functions, such as in the PDEs considered in Section 5. To model
+
+more complex optimization objectives with these functionals we can leverage ICNNs once more to
+
+parametrize the functions V and W as neural networks in a way that enforces their convexity. This is
+
+what we do in the molecular discovery experiments in Section 6.
+
+Particular cases of internal energies Equation (10) simplifies for some choices of f . For example, for f (t) = t log t (which yields the heat equation) and assuming strict convexity of u we get:
+
+F (u) t =
+
+t(x) |Hu (x)|
+
+log
+
+t(x) |Hu (x)|
+
+|Hu
+
+(x)
+
+dx = F (t) -
+
+log |Hu (x)|t(x) dx (13)
+
+where we drop  from the notation for simplicity. This expression has a notable interpretation: pushing
+
+forward measure t by u increases its entropy by a log-determinant barrier term on u's Hessian.
+
+Note that only the second term in Equation (13) depends on u, and that it can be approximated --as in
+
+the previous cases-- by an empirical expectation, so F (xu) t = - Ext log |Hu (x)|. This suggests using the latter as a surrogate objective for optimization.
+
+Another notable case is f (t)
+
+=
+
+1 m-1
+
+tm,
+
+m
+
+>
+
+1,
+
+which
+
+yields
+
+a
+
+nonlinear
+
+diffusion
+
+term
+
+as
+
+in
+
+the porous medium equation (Table 1). In this case, the expression in Lemma 3.4 takes the form
+
+F
+
+
+
+=
+
+1 m-1
+
+Ex0
+
+
+
+(x)m-1
+
+,
+
+which
+
+has
+
+following
+
+gradient
+
+w.r.t.
+
+:
+
+-
+
+E
+x0
+
+exp{(m
+
+-
+
+1)
+
+log
+
+
+
+(x)}
+
+log
+
+|Hu
+
+(T1:t
+
+(x))|
+
+(14)
+
+All surrogate objectives are summarized in Table 3 in the Appendix.
+
+Algorithm 1: JKO-ICNN: JKO variational scheme using input convex neural networks
+
+Input: F () to optimize , > 0 JKO learning rate (outer loop),  > 0 Learning rate for ICNN
+
+(inner loop), nu number of iterations the inner loop, T number of JKO steps
+
+Initialize
+
+u
+
+
+
+ICNN,
+
+
+
+parameters
+
+of
+
+ICNN,
+
+0
+
+=
+
+1 N
+
+N i=1
+
+xi
+
+.
+
+for t = 0 to T - 1 do
+
+for i = 1 to nu do
+
+{JKO inner loop: Updating ICNN }
+
+L()
+
+=
+
+F
+
+((xu)#t )
+
++
+
+1 2
+
+Et
+
+||x
+
+-
+
+x u (x)||2
+
+  Adam(, , L)
+
+end for
+
+{JKO outer loop: Updating point cloud (measures) } t+1 = x(u)#t end for
+Output: T
+
+Implementation and practical considerations We implement the proposed JKO-ICNN scheme (Algorithm 1) in pytorch [38], relying on automatic differentiation to solve the inner optimization loop. The finite-sample approximations of V and W (Eq. (12)) can be used directly, but the computation of the surrogate objectives for internal energies F (i.e., Eqs. (13), (14)) require computing Hessian log-determinants, which is prohibitive in high dimensions. Thus, we use a stochastic log-trace estimator based on the Hutchinson method [27], as used by Huang et al. [26] (see §B.4 for details). To enforce strong convexity on the ICNN, we clip its weights to positive values after each update. When needed (e.g., for evaluation), we estimate the true internal energy functional F by using Corollary 3.3 to compute densities. We provide further implementation details in Appendix B.5.
+
+5
+
+4 Related Work
+Computational gradient flows Gradient flows have been implemented through various computational methods. Benamou et al. [6] propose an augmented Lagrangian approach for convex functionals based on the dynamical optimal transport implementation of Benamou and Brenier [5]. Another approach relying on the dynamic formulation of JKO and an Eulerian discretization of measures (i.e. via histograms) is the recent primal dual algorithm of Carrillo et al. [12]. Closer to our work is the formulation of Benamou et al. [7] that casts the problem as an optimization over convex functions. This work relies on a Lagrangian discretization of measures, via cloud points, and on a representation of convex functions and their corresponding subgradients via their evaluation at these points. This method does not scale well in high dimensions since it computes Laguerre cells in order to find the subgradients. A different approach by Peyré [40] defines entropic gradient flows using Eulerian discretization of measures and Sinkhorn-like algorithms that leverage an entropic regularization of the Wasserstein distance. Frogner and Poggio [21] propose kernel approximations to compute gradient flows. Finally, blob methods have been considered in Craig and Bertozzi [16] and Carrillo et al. [13] for the aggregation and diffusion equations. Blob methods regularize velocity fields with mollifiers (convolution with a kernel) and allow for the approximation of internal energies.
+ICNN, optimal transport, and generative modeling ICNN architectures were originally proposed by Amos et al. [2] to allow for efficient inference in settings like structured prediction, data imputation, and reinforcement learning. Since their introduction, they have been exploited in various other settings that require parametrizing convex functions, including optimal transport. For example, Makkuva et al. [33] propose using them to learn an explicit optimal transport map between distributions, which under suitable assumptions can be shown to be the gradient of a convex function [9]. The ICNN parametrization has been also exploited in order to learn continuous Wasserstein barycenters by Korotin et al. [30]. Using this same characterization, Huang et al. [26] recently proposed to use ICNNs to parameterize flow-based invertible probabilistic models, an approach they call convex potential flows. These type of flows, popularized in the normalizing flow literature and which should not be confused with gradient flows, are useful for learning generative models when samples from the target (i.e., optimal) distributions are available and when the goal is to to learn a parametric generative model. Our use of ICNNs differs from these prior works and other approaches to generative modeling. First, we consider the setting where no samples from the target distribution are given; instead, only a functional characterization of this distribution is provided, i.e., as a minimizer of an optimization problem over distributions. Additionally, in terms of usage, we leverage ICNNs not for solving a single optimal transport problem, but rather for a sequence of JKO step optimization problems that involve various terms, one of which is a Wasserstein distance.
+
+5 Evolving PDEs with known solutions
+
+We first evaluate our method on gradient flows whose corresponding PDEs have known solutions. We
+focus on three examples from Carrillo et al. [12] that combine the three types of functionals considered
+here (§3): porous medium, non-linear Fokker-Planck, and aggregation equations. Throughout this section, we use our JKO-ICNN with  =  = 10-3 in the notation of Algorithm 1.
+
+5.1 Porous medium equation on Barenblatt-Pattle profiles
+
+The porous medium equation is a classic non-linear diffusion PDE. We consider in particular a
+
+diffusion-only system: t = m, m > 1, corresponding to a gradient flow of the internal energy
+
+functional
+
+F ()
+
+=
+
+1 m-1
+
+m(x) dx, which we implement using our JKO-ICNN with objective (14).
+
+A known family of exact solutions of this PDE is given by Barenblatt-Pattle profiles [4, 39, 51]:
+
+1
+
+(x, t) = t-
+
+C - k x 2t-2
+
+m-1
+,
+
++
+
+x  Rd, t > 0,
+
+where C > 0 is a constant and  = d/(d(m - 1) + 2),  = /d, and k = (m - 1)/(2md).
+
+This exact solution provides a trajectory of densities to compare our JKO-ICNN approach against. Specifically, starting from particles sampled from (x, 0), we can compare the trajectory ^t(x) estimated with our method to the exact density (x, t). Although this system has no steady-state solution, its asymptotic behavior can be expressed analytically too. For the case d = 1, m = 2, C = (3/16)1/3, Figure 1a shows that our method is able to reproduce the dynamics of the exact solution
+(here the flow density is estimated from particles via KDE and aggregated over 10 repetitions with random initialization), and that the objective value F(^) has the correct asymptotic behavior.
+
+6
+
+(a) Porous medium equation with pure diffusion §5.1.
+
+(b) Fokker-Planck with nonlinear diffusion §5.2.
+
+(c) Aggregation equation §5.3.
+
+Figure 1: Flows on PDEs with known solution. We use KDE on the flowed particles for the density plots, and the iterated push-forward density method (Corollary 3.3) to evaluate F in (a) and (b).
+
+5.2 Nonlinear Fokker-Planck equation Next, we consider a Fokker-Planck equation with a non-linear diffusion term as before:
+
+t =  · (V ) + m, V : Rd  R, m > 1.
+
+(15)
+
+This
+
+PDE
+
+corresponds
+
+to
+
+a
+
+gradient
+
+flow
+
+of
+
+the
+
+objective
+
+F ()
+
+=
+
+1 m-1
+
+m(x) dx +
+
+V (x) d(x).
+
+For certain choices of V , the solutions of this equation approach a unique steady state [10]:
+
+1
+
+(x) =
+
+C-
+
+m-1 m
+
+V
+
+(x)
+
+, m-1
++
+
+(16)
+
+where the constant C depends on the initial mass of the data. For d = 1, m = 2, and V (x) = x2,
+we solve this PDE using JKO-ICNN with objectives (12) and (14), using initial data drawn from a Normal distribution with parameters (µ, 2) = (0, 0.2). Unlike the previous example, in this case we do not have a full solution (x, t) to compare against, but we can instead evaluate convergence of the flow to (x). Figure 1b shows that the density ^t(x) derived from the JKO-ICNN flow converges to the steady state (x), and so does the value of the objective, i.e., F (^t)  F ().
+
+5.3 Aggregation equation
+
+Next, we consider an aggregation equation: t =  · (W  ), W : Rd  R, which corresponds
+
+to
+
+a
+
+gradient
+
+flow
+
+on
+
+an
+
+interaction
+
+functional
+
+W ()
+
+=
+
+1 2
+
+W (x - x ) d(x) d(x ). We consider
+
+the
+
+same setting as Carrillo
+
+et
+
+al.
+
+[12]:
+
+d = 1,
+
+0
+
+
+
+N (0, 1),
+
+and
+
+the kernel
+
+W (x)
+
+=
+
+1 2
+
+|x|2
+
+-
+
+log(|x|),
+
+which enforces repulsion at short length scales and attraction at longer scales. This choice of W has
+
+the
+
+advantage
+
+of
+
+yielding
+
+a
+
+unique
+
+steady-state
+
+equilibrium
+
+[11],
+
+given
+
+by
+
+(x)
+
+=
+
+1 
+
+(2 - x2)+.
+
+Our JKO-ICNN encodes W using the objective (12). As in the previous section, we investigate the
+
+convergence of this flow to this steady state distribution. Figure 1c shows that in this case too we
+
+observe convergence of densities ^t(x)  (x) and objective values F (^t)  F ().
+
+6 Molecular discovery with JKO-ICNN
+
+To demonstrate the flexibility and efficacy of our approach, we apply it in an important high dimensional setting: controlled generation in molecular discovery. For the reader less familiar with molecular generation, this application is analogous to conditional image generation and editing. In our experiments, our goal is to increase the drug-likeness of a given distribution of molecules while staying close to the original distribution, an important task in drug discovery and drug re-purposing. Formally, given an initial distributions of molecules 0 and a convex potential energy function V (·) that models the property of interest, the functional we wish to minimize is:
+min F () := 1EV (x) + 2D(, 0),
+P(X )
+
+7
+
+where D is a divergence. In particular, we use either the 2-Wasserstein distance with entropic regular-
+
+ization [17] or the Maximum Mean Discrepancy [24] with a Gaussian kernel (MMD). Finally, we use
+
+our JKO-ICNN scheme (Algorithm 1) to optimize this functional on the space of probability measures,
+
+given
+
+an
+
+initial
+
+distribution
+
+0(x)
+
+=
+
+1 N
+
+N i=1
+
+xi (x)
+
+where
+
+xi
+
+is
+
+a
+
+molecular
+
+embedding.
+
+In what follows, we show how we model each component of this functional via : i) training a molecular embedding using a Variational Auto-encoder (VAE), ii) training a surrogate potential V to model the drug-likeness, iii) using automatic differentiation via the distance D.
+
+Embedding of molecules using VAEs We start by training a VAE, which is a generative model that aims to reconstruct molecule representations but is trained with a regularization term that ensures smoothness of the encoder's latent space [25, 29]. The VAE is trained on a string representation of molecules [15, 41] known as SMILES [50]. We train the VAE on a popular molecular dataset known as QM9 [42, 45], which contains about 134k molecules across the training and test sets. Given a molecule, we embed it using the encoder of the VAE and represent it with a vector xi  R128.
+
+Training a convex surrogate for the desired property (high QED) The quantitative estimate of drug-likeness (QED) [8] can be computed with the RDKit library [31, 32] but is not differentiable nor convex. Hence, we propose to learn a convex surrogate using Residual ICNNs [2, 26]. This ensures that it can be used as convex potential functional V, as described in Section 3. To do so we process the QM9 dataset via RDKit and obtain a labeled set with all QED values. We set a QED threshold of 0.85 and give a lower value label for all QED values above that threshold and a higher value label for all QED values below it so that minimizing the potential functional with this convex surrogate will lead to higher QED values. Given VAE embeddings of the molecules, we train a ICNN classifier on this dataset. See Appendix D for experimental details.
+
+Automatic differentiation via D When D is the entropy-regularized Wasserstein distance, we use the Sinkhorn algorithm [17] to compute it (and henceforth denote it as Sinkhorn). We backpropagate through this objective as proposed by Genevay et al. [22], using the geomloss toolbox for efficiency [19]. We also use geomloss for evaluation and backpropagation when D is chosen to be MMD.
+
+Molecule SMILES Strings
+
+VAE decoder
+
+Molecule embeddings
+
+JKO-ICNN
+
+NC1=CC2=C(O1)C=CC2
+
+VAE encoder
+QED annotation
+
+(Convex) QED
+classifier
+
++ (Distribution distance)
+
+Figure 2: Molecular discovery Setup. We apply JKO-ICNN to the controlled molecular generation problem. Drug likeness and closeness to 0 are maximized in the encoding space of a VAE.
+
+Optimization with JKO With the molecule embeddings coming from the VAE serving as the point cloud to be transported and the potential functional defined by the convex QED classifier, we run Algorithm 1 to move an initial point cloud of molecule embeddings 0 with low drug-likeness (QED < 0.7) to a region of the latent space that decodes to molecules with distribution T with higher drug-likeness. The divergence D between the initial point cloud and subsequent point clouds of embeddings, allows us to control for other generative priorities, such as staying close to the original set of molecules. Following the notation of Algorithm 1, we used the following hyperparameters for the JKO-ICNN in this setting. N , number of original embeddings, was 1,000. The JKO rate  was set to 1e-4 and the outer loop steps T was set to 100. For the inner loop, the number of iterations nu was set to 500, and the inner loop learning rate  was set to 1e-3. Finally, for the JKO ICNN, we used a fully-connected ICNN with two hidden layers, each of dimension 100. The full pipeline for this experiment setting is displayed in Figure 2. All computation for this pipeline, was done in a compute environment with 1 CPU and 1 V100 GPU submitted as resource-restricted jobs to a cluster.
+Evaluation We fixed 1 = 1 for all experiments, and used either Sinkhorn or MMD for D. The weight 2 on D was set to either 1,000 or 10,000. We start JKO with an initial cloud point 0 of embedding that have QED < 0.7 randomly sampled from the QM9 test set. In the Table 2, we
+
+8
+
+Table 2: Molecular discovery results. Measures of validity, uniqueness, and median QED are reported in each row for the corresponding point cloud of embeddings. The first row shows these metrics for the initial dataset, and the subsequent rows correspond to the datasets obtained with JKO-ICNN for different D (Sinkhorn or MMD) and weight parameter 2. Each measurement value cell contains mean values ± one standard deviation for 5 repeated runs with different random initialization seeds. Using Sinkhorn with weight 10,000 yields improved QED (higher is better) without sacrificing validity and uniqueness of the decoded SMILES strings.
+
+Measure D
+
+2
+
+Validity
+
+Uniqueness QED Median
+
+0
+
+N/A
+
+N/A 100.000 ± 0.000 99.980 ± 0.045 0.630 ± 0.001
+
+TTT
+
+Sinkhorn 1,000 92.460 ± 2.096 69.919 ± 4.906 0.746 ± 0.016 Sinkhorn 10,000 93.020 ± 1.001 99.245 ± 0.439 0.769 ± 0.002 MMD 1,000 94.560 ± 1.372 51.668 ± 2.205 0.780 ± 0.009
+
+T
+
+MMD 10,000 92.020 ± 3.535 53.774 ± 3.013 0.776 ± 0.014
+
+Figure 3: Histograms of QED values for the decoded SMILES strings corresponding to t = 0 and t = T = 100 for the JKO-ICNN experiment ( D = Sinkhorn, 2=10,000). We observe a shift to the right in the QED distribution, which corresponds to increased drug-likeness of the decoded molecule.
+report several measurements. First is validity, which is the proportion of the decoded embeddings that have valid SMILES strings according to RDKit. Of the valid strings, we calculate the percent that are unique. Finally, we use RDKit to get the QED annotation of the decoded embeddings and report median values for the point cloud. We re-ran experiments five times with different random seed initializations and report means and standard deviations. In the first row of Table 2, we report the initial values for the point cloud at time t = 0. In the last four rows of the table, we report the measurements for different hyperparameter configurations at the end of the JKO scheme for t = T = 100. We see that the JKO-ICNN is able to optimize the functional objective and leads to molecules that satisfy low energy potential, i.e. with improved drug-likeness. The results are stable across different runs as can be seen from the reported standard deviations from the different random initializations. We notice that Sinkhorn divergence with 2 =10,000 prevents mode collapse and preserves uniqueness of the transported embedding via JKO-ICNN. While MMD yields higher drug-likeness, it leads to a deterioration in uniqueness. Using Sinkhorn allows for a matching between the transformed point cloud and the original one, which preserves better uniqueness than MMD, which merely matches mean embeddings of the distributions. Finally, in Figure 3 we display the histograms of the QED values for the decoded SMILES strings corresponding to the point clouds at time step t = 0 and t = T = 100 for D = Sinkhorn, 2=10,000.
+7 Discussion
+In this paper we proposed JKO-ICNN, a scalable method for computing Wasserstein gradient flows. Key to our approach is the parameterization of the space of convex functions with Input Convex Neural Networks. We showed that JKO-ICNN succeeds at optimizing functionals on the space of probability distributions, both in low-dimensional settings involving known PDES, as well as in large-scale and high-dimensional experiments on molecular discovery via controlled generation. Studying the convergence of solutions of JKO-ICNN is an interesting open question that we leave for future work. The potential risks or benefits of a method of this kind depend on the area of application. For the controllable molecule discovery problem tackled here, there are clear potential societal benefits, ranging from drug discovery [48] to vaccine development [36]. To mitigate potential risks, any biochemical discoveries made with an automated system such as the one proposed in this work should be independently verified in the laboratory, in vitro and in vivo, before being deployed.
+9
+
+References
+[1] L. Ambrosio et al. Gradient flows in metric spaces and in the Wasserstein space of probability measures. Lectures in Mathematics. ETH Zürich. Birkhäuser Basel, 2005.
+[2] B. Amos et al. "Input Convex Neural Networks". In: Proceedings of the 34th International Conference on Machine Learning. Ed. by D. Precup and Y. W. Teh. Vol. 70. Proceedings of Machine Learning Research. PMLR, 2017, pp. 146­155.
+[3] M. Arjovsky et al. "Wasserstein Generative Adversarial Networks". In: Proceedings of the 34th International Conference on Machine Learning. Ed. by D. Precup and Y. W. Teh. Vol. 70. Proceedings of Machine Learning Research. PMLR, 2017, pp. 214­223.
+[4] G. I. Barenblatt. "On some unsteady motions of a liquid and gas in a porus medium". In: Prikl. Mat. Mekh. 16 (1952), pp. 67­78.
+[5] J.-D. Benamou and Y. Brenier. "A computational fluid mechanics solution to the MongeKantorovich mass transfer problem". In: Numerische Mathematik (2000).
+[6] J.-D. Benamou et al. "An augmented Lagrangian approach to Wasserstein gradient flows and applications". In: ESAIM: ProcS 54 (2016), pp. 1­17.
+[7] J.-D. Benamou et al. Discretization of functionals involving the Monge-Ampère operator. 2014. arXiv: 1408.4536 [math.NA].
+[8] G. R. Bickerton et al. "Quantifying the chemical beauty of drugs". In: Nature chemistry 4.2 (2012), pp. 90­98.
+[9] Y. Brenier. "Polar factorization and monotone rearrangement of vector-valued functions". In: Communications on Pure and Applied Mathematics 44.4 (1991), pp. 375­417.
+[10] J. A. Carrillo and G. Toscani. "Asymptotic L1-decay of Solutions of the Porous Medium Equation to Self-similarity". In: Indiana Univ. Math. J. 49.1 (2000), pp. 113­142.
+[11] J. A. Carrillo et al. "A mass-transportation approach to a one dimensional fluid mechanics model with nonlocal velocity". In: Adv. Math. 231.1 (Sept. 2012), pp. 306­327.
+[12] J. A. Carrillo et al. "Primal Dual Methods for Wasserstein Gradient Flows". In: Found. Comut. Math. (Mar. 2021).
+[13] J. A. Carrillo et al. A blob method for diffusion. 2019. arXiv: 1709.09195 [math.AP]. [14] R. T. Q. Chen et al. "Residual Flows for Invertible Generative Modeling". In: Advances in
+Neural Information Processing Systems. Ed. by H. Wallach et al. Vol. 32. Curran Associates, Inc., 2019. [15] V. Chenthamarakshan et al. "Cogmol: Target-specific and selective drug design for covid-19 using deep generative models". In: arXiv preprint arXiv:2004.01215 (2020). [16] K. Craig and A. L. Bertozzi. A Blob Method for the Aggregation Equation. 2014. arXiv: 1405.6424 [math.NA]. [17] M. Cuturi. "Sinkhorn Distances: Lightspeed Computation of Optimal Transport". In: Advances in Neural Information Processing Systems 26. Ed. by C. J. C. Burges et al. Curran Associates, Inc., 2013, pp. 2292­2300. [18] W. Falcon et al. "PyTorch Lightning". In: GitHub. Note: https://github.com/PyTorchLightning/pytorch-lightning 3 (2019). [19] J. Feydy et al. "Interpolating between Optimal Transport and MMD using Sinkhorn Divergences". In: The 22nd International Conference on Artificial Intelligence and Statistics. 2019, pp. 2681­2690. [20] R. Flamary et al. "POT: Python Optimal Transport". In: Journal of Machine Learning Research 22.78 (2021), pp. 1­8. [21] C. Frogner and T. Poggio. "Approximate Inference with Wasserstein Gradient Flows". In: Proceedings of the Twenty Third International Conference on Artificial Intelligence and Statistics. Ed. by S. Chiappa and R. Calandra. Vol. 108. Proceedings of Machine Learning Research. PMLR, Aug. 2020, pp. 2581­2590. [22] A. Genevay et al. "Learning Generative Models with Sinkhorn Divergences". In: International Conference on Artificial Intelligence and Statistics. Vol. 84. PMLR, 2018, pp. 1608­1617. [23] I. Goodfellow et al. "Generative Adversarial Nets". In: Advances in Neural Information Processing Systems. Ed. by Z. Ghahramani et al. Vol. 27. Curran Associates, Inc., 2014.
+10
+
+[24] A. Gretton et al. "A Kernel Two-sample Test". In: JMLR (2012).
+[25] I. Higgins et al. "beta-vae: Learning basic visual concepts with a constrained variational framework". In: (2016).
+[26] C.-W. Huang et al. "Convex Potential Flows: Universal Probability Distributions with Optimal Transport and Convex Optimization". In: International Conference on Learning Representations. 2021.
+[27] M. F. Hutchinson. "A Stochastic Estimator of the Trace of the Influence Matrix for Laplacian Smoothing Splines". In: Communications in Statistics - Simulation and Computation 18.3 (Jan. 1989), pp. 1059­1076.
+[28] R. Jordan et al. "The Variational Formulation of the Fokker­Planck Equation". In: SIAM J. Math. Anal. 29.1 (Jan. 1998), pp. 1­17.
+[29] D. P. Kingma and M. Welling. "Auto-encoding variational bayes". In: arXiv preprint arXiv:1312.6114 (2013).
+[30] A. Korotin et al. "Continuous Wasserstein-2 Barycenter Estimation without Minimax Optimization". In: International Conference on Learning Representations. 2021.
+[31] G. Landrum. RDKit: A software suite for cheminformatics, computational chemistry, and predictive modeling. 2013.
+[32] G. Landrum. RDKit: Open-source cheminformatics. [33] A. Makkuva et al. "Optimal transport mapping via input convex neural networks". In: Pro-
+ceedings of the 37th International Conference on Machine Learning. Ed. by H. D. I. A. Singh. Vol. 119. PMLR, 2020, pp. 6672­6681. [34] R. J. McCann. "A Convexity Principle for Interacting Gases". In: Advances in Mathematics 128.1 (1997), pp. 153­179. [35] K. P. Murphy. Machine Learning: A Probabilistic Perspective. Adaptive Computation and Machine Learning series. MIT Press, 2012.
+[36] E. Ong et al. "COVID-19 coronavirus vaccine design using reverse vaccinology and machine learning". en. In: Front. Immunol. (July 2020).
+[37] F. Otto. "The geometry of dissipative evolution equations: the porous medium equation". In: Comm. Partial Differential Equations 26.1-2 (Jan. 2001), pp. 101­174.
+[38] A. Paszke et al. "PyTorch: An Imperative Style, High-Performance Deep Learning Library". In: Advances in Neural Information Processing Systems 32. Ed. by H. Wallach et al. Curran Associates, Inc., 2019, pp. 8024­8035.
+[39] R. E. Pattle. "Diffusion from an instantaneous point source with a concentration-dependent coefficient". en. In: Quart. J. Mech. Appl. Math. 12.4 (Jan. 1959), pp. 407­409.
+[40] G. Peyré. "Entropic Approximation of Wasserstein Gradient Flows". In: SIAM J. Imaging Sci. 8.4 (Jan. 2015), pp. 2323­2351.
+[41] D. Polykovskiy et al. "Molecular Sets (MOSES): A Benchmarking Platform for Molecular Generation Models". In: Frontiers in Pharmacology (2020).
+[42] R. Ramakrishnan et al. "Quantum chemistry structures and properties of 134 kilo molecules". In: Scientific data 1.1 (2014), pp. 1­7.
+[43] D. Rezende and S. Mohamed. "Variational Inference with Normalizing Flows". In: Proceedings of the 32nd International Conference on Machine Learning. Ed. by F. Bach and D. Blei. Vol. 37. Proceedings of Machine Learning Research. Lille, France: PMLR, July 2015, pp. 1530­1538.
+[44] R. T. Rockafellar. Convex analysis. Princeton Mathematical Series. Princeton, N. J.: Princeton University Press, 1970.
+[45] L. Ruddigkeit et al. "Enumeration of 166 billion organic small molecules in the chemical universe database GDB-17". In: Journal of chemical information and modeling 52.11 (2012), pp. 2864­2875.
+[46] F. Santambrogio. "{Euclidean, metric, and Wasserstein} gradient flows: an overview". In: Bull. Math. Sci. 7.1 (Apr. 2017), pp. 87­154.
+[47] F. Santambrogio. Optimal Transport for Applied Mathematicians: Calculus of Variations, PDEs, and Modeling. Birkhäuser, Cham, 2015.
+[48] J. M. Stokes et al. "A Deep Learning Approach to Antibiotic Discovery". In: Cell 180.4 (Feb. 2020), 688­702.e13.
+11
+
+[49] S. Ubaru et al. "Fast Estimation of $tr(f(A))$ via Stochastic Lanczos Quadrature". In: SIAM Journal on Matrix Analysis and Applications 38.4 (2017), pp. 1075­1099.
+[50] D. Weininger. "SMILES, a chemical language and information system. 1. Introduction to methodology and encoding rules". In: Journal of chemical information and computer sciences 28.1 (1988), pp. 31­36.
+[51] Y. B. Zel'dovich and A. S. Kompaneetz. "Towards a theory of heat conduction with thermal conductivity depending on the temperature". In: Collection of papers dedicated to 70th birthday of Academician AF Ioffe, Izd. Akad. Nauk SSSR, Moscow (1950), pp. 61­71.
+12
+
+A Proofs
+A.1 Proof of Lemma 3.1 Starting from the original form of the potential energy functional V in Equation (3), and using the expression  = (u) t we have:
+
+V() = V (u) t = V (x) d [(u) t] = (V  u) dt
+
+(17)
+
+On the other hand, for an interaction functional W we first note that it can be written as
+
+1
+
+1
+
+W() =
+
+W (x - x ) d(x ) d(x) = (W  )(x) d(x).
+
+(18)
+
+2
+
+2
+
+In addition, we will need the fact that
+
+W  [(u) ] = W (x - y) d [(u) (y)] = W (x - u(y)) d(y).
+
+(19)
+
+Hence, combining the two equations above we have:
+
+1
+
+W (u) t
+
+= 2
+
+1 =
+2
+
+1 =
+2
+
+(W  (u) t)(x) d [(u) t(x)] W (x - u(y)) dt(y) d [(u) t(x)]
+W (u(x) - u(y)) dt(y) dt(x),
+
+which completes the proof.
+
+A.2 Proof of Lemma 3.2
+
+Following Santambrogio [46] we note that using standard change-of-variables techniques, whenever
+
+u is convex and  is absolutely continuous, then  = T  is absolutely continuous too, with a density
+
+given by
+
+ =   T -1
+
+(20)
+
+|JT |
+
+where JT is the Jacobian matrix of T . In our case  = (u) t , so that
+
+(y) = t  (u)-1 (y) = t (u)-1(y)
+
+(21)
+
+|Hu|
+
+Hu (u)-1(y)
+
+where H is the Hessian of u. When u is strictly convex it is known that it is invertible and that (u)-1 = u, where u is the convex conjugate of u (see e.g. Rockafellar [44] ).
+
+A.3 Proof of Corollary 3.3
+
+We drop in this proof the index  . As before, we use the change of variables t = (ut) t-1. Thus,
+
+by induction,
+
+t = (ut  ut · · ·  u1) 0
+
+(22)
+
+Let T1:t = (ut  ut · · ·  u1), so that t = (T1:t) 0 = (ut  T1:t-1) 0. The Jacobian of this map is given by the chain rule as:
+
+JT1:t x = Hut (T1:t-1(x))JT1:t-1 (x)
+
+(23)
+
+Hence by induction we have:
+
+JT1:t x = ts=1Hus (T1:s-1(x))
+
+(24)
+
+On the other hand, using the fact that (whenever the inverses exist) (f  g)-1 = g-1  f -1, in our case iterating this we have
+T1-:t1 = (ut)-1  · · ·  (u1)-1 = ut  · · ·  u1
+
+13
+
+Hence,
+
+t(y) =
+
+0 |JT1:t |
+
+
+
+T1-:t1
+
+(y) =
+
+0 ts=1|Hus (T1:s-1)|
+
+
+
+T1-:t1
+
+(y)
+
+0 T1-:t1(y) = ts=1|Hus (T1:s-1  T1-:t1(y))| ,
+
+and finally taking the log we obtain:
+
+
+
+
+
+t
+
+log (t) = log (0) - log(|Hus (T1:s-1)|)  (T1:t)-1.
+
+(25)
+
+s=1
+
+A.4 Proof of Lemma 3.4
+
+As before, we use the change of variables t+1 = (ut+1) t. Thus, by induction,
+
+t+1 = (ut+1  ut · · ·  u1) 0
+
+(26)
+
+Let T1:t = (ut  ut · · ·  u1), so that t+1 = (T1:t+1) 0 = (ut+1  T1:t) 0. The Jacobian of this map is given by the chain rule as:
+
+J x T1:t+1 = Hut+1 (T1:t(x))JT1:t (x)
+
+(27)
+
+On the other hand, using the fact that (whenever the inverses exist) (f  g)-1 = g-1  f -1, in our
+
+case we have
+
+T1-:t1+1 = T1-:t1  u-t+11,
+
+(28)
+
+Using (26) and (20), we can write the density of t+1 as
+
+t+1(y) =
+
+0 |JT1:t+1 |
+
+ T1-:t1+1
+
+(y)
+
+=
+
+0 T1-:t1+1(y) |JT1:t+1 T1-:t1+1(y)
+
+|
+
+=
+
+0 T1-:t1  u-t+11(y) |Hut+1 (u-t+11(y))||JT1:t (T1-:t1  -1ut+1(y))|
+
+(29) (30)
+
+Finally, using the change of variables y = ut+1  T1:t(x), x = T1-:t1  u-t+11(y), in the integral in the definition of F, we get
+
+F t+1 =
+
+f
+
+0(x) |Hut+1 (T1:t(x))||JT1:t (x)|
+
+|Hut+1 (T1:t(x))||JT1:t (x)| dx
+
+ = Ex0 f
+
+0(x) |Hut+1 (T1:t(x))||JT1:t (x)|
+
+
+|Hut+1 (T1:t(x))||JT1:t (x)| 
+0(x)
+
+This completes the proof.
+
+B Practical Considerations
+
+B.1 Input Convex Neural Networks
+Input Convex Neural Networks were introduced by Amos et al. [2]. A k-layer fully input convex neural network (FICNN) is one in which each layer has the form:
+
+zi+1 = gi Wi(z)zi + Wi(y)y + bi i = 0, . . . , k - 1
+
+(31)
+
+where gi are activation functions. Amos et al. [2] showed that the function f : x  zk is convex with respect to x if all the Wi(:zk)-1 are non-negative, and all the activation functions gi are convex and non-decreasing. Residual skip connections from the input with linear weights are also allowed and
+preserve convexity [2, 26].
+
+14
+
+In our experiments, we parametrize the Brenier potential u as a FICNN with two hidden layers, with (100, 20) hidden units for the simple PDE experiments in Section 5 and (100, 100) for the molecule
+
+generation experiments in Section 6. In order to preserve the convexity of the network, we clip the
+
+weights of Wi(:zk)-1 after every gradient update using wij  max{wij, 10-8}. Alternatively, one can
+
+add a small term +
+
+x
+
+2 2
+
+to enforce strong convexity.
+
+In all our simple PDE experiments (§5), we
+
+use the ADAM optimizer with 10-3 initial learning rate, and a JKO step-size  = 10-3. Optimization
+
+details for the molecular experiments are provided in that section (§6).
+
+B.2 Surrogate loss for entropy
+
+For the choice f (t) = t log t in the internal energy functional F, we don't use Lemma 3.4 but rather derive the expression from first principles:
+
+F (xu) t = =
+
+t(x) |Hu (x)|
+
+log
+
+t(x) |Hu (x)|
+
+|Hu
+
+(x)
+
+dx
+
+log
+
+t(x) |Hu (x)|
+
+t(x)
+
+dx
+
+=
+
+t(x) log t(x) dx -
+
+log
+
+|Hu
+
+(x)|t(x)
+
+dx
+
+=
+
+F
+
+(t)
+
+-
+
+E [log
+xt
+
+|Hu
+
+(x)|]
+
+As mentioned earlier, this expression has an interesting interpretation as reducing negative entropy (increasing entropy) of t by an amount given by a log-determinant barrier term on u's Hessian. We see that the only term depending on  is
+
+-
+
+E
+xt
+
+[log
+
+|Hu
+
+(x)|]
+
+. We discuss how to estimate the log determinant and backpropagate through the hessian in Section B.4.
+
+B.3 Surrogate losses for internal energies
+Let rx(u) = log((x)) = log(0(x)) - log |Hu (T1:t(x))| - log(|J1:T (x)|)
+
+From Lemma 3.4, our point-wise loss is :
+
+L(u )
+
+=
+
+f
+
+ exp(rx(u)) exp(rx (u ))
+
+Computing gradient w.r.t i parameters of u:
+
+ L(u)
+i
+
+=
+
+f
+
+(exp(rx
+
+(u
+
+)))[exp(rx
+
+(u
+
+))]2
+
+ i
+
+rx
+
+(u
+
+)
+
+-
+
+exp(rx
+
+(u
+
+))
+
+ i
+
+rx
+
+(u
+
+)f
+
+[exp(rx (u )]2
+
+
+
+exp(rx (u ))
+
+=
+
+f (exp(rx(u))) exp(rx(u)) - f (exp(rx(u))) exp(rx (u ))
+
+ i rx(u)
+
+
+
+
+
+i
+
+rx(u)
+
+=
+
+- i
+
+log
+
+|Hu (T1:t(x))|
+
+Hence the Surrogate loss that has same gradient can be evaluated as follows:
+
+L(u) = -
+
+f (exp(rx(u))) exp(rx(u)) - f (exp(rx(u))) exp(rx (u ))
+
+log |Hu (T1:t(x))|
+
+no grad
+
+For
+
+the
+
+particular
+
+case
+
+of
+
+porous
+
+medium
+
+internal
+
+energy.
+
+Let
+
+a
+
+=
+
+exp(r).
+
+For
+
+f (a)
+
+=
+
+1 m-1
+
+am
+
+=
+
+1 m-1
+
+exp(m
+
+log(a))
+
+=
+
+1 m-1
+
+exp(mr))
+
+we
+
+have f
+
+(a)
+
+=
+
+m m-1
+
+am-1
+
+=
+
+m m-1
+
+exp((m
+
+-
+
+1)
+
+log(a))
+
+f
+
+(a)
+
+=
+
+m m-1
+
+exp((m
+
+-
+
+1)r).
+
+f (a) m
+
+1
+
+f (a) -
+
+=
+
+exp((m - 1)r) -
+
+exp((m - 1)r) = exp((m - 1)r)
+
+a m-1
+
+m-1
+
+15
+
+Hence we have finally the surrogate loss: L(u) = - exp((m - 1)rx(u)) log |Hu (T1:t(x))|,
+no grad
+for which we discuss estimation in Section B.4. Table 3 summarizes surrogates losses for common energies in gradient flows.
+
+Table 3: Surrogate optimization objectives used for computation. Here E^ denotes an empirical expectation, and (x) is defined in Lemma 3.4.
+
+Functional Type
+
+Exact Form F ()
+
+Surrogate Objective F^(u)
+
+Potential energy Interaction energy
+Neg-Entropy Nonlinear diffusion
+
+V (x) d(x)
+
+W (x - x ) d(x) d(x )
+
+(x) log (x) dx
+
+1 m-1
+
+(x)m
+
+dx
+
+E^xt V (xu(x))
+
+1 2
+
+E^ x,yt
+
+W
+
+(xu
+
+(x)
+
+-
+
+xu
+
+(y))
+
+-E^xt log |Hu (x)|
+
+-E^ x0 e(m-1)STOPGRAD(log (x)) log |Hu (T1:t(x))|
+
+B.4 Stochastic log determinant estimators
+For numerical reasons, we use different methods to evaluate and compute gradients of Hessian log-determinants.
+
+Evaluating log-determinants Following [26] we use Stochastic Lanczos Quadrature (SLQ) [49] to estimate the log determinants we refer to this estimation step as LOGDETESTIMATOR.
+
+Estimating gradients of log-determinants The SLQ procedure involves an eigendecomposition, which is unstable to back-propagate through. Thus, to compute gradients, Huang et al. [26], inspired by Chen et al. [14], instead use the following expression of the Hessian log-determinant:
+
+ 
+
+log |H|
+
+=
+
+1 |H|
+
+ 
+
+|H|
+
+=
+
+1 |H|
+
+tr(adj(H)
+
+H 
+
+)
+
+=
+
+tr(H-1
+
+H 
+
+)
+
+=
+
+E
+v
+
+v
+
+H-1
+
+H 
+
+v
+
+(32)
+
+where v is a random Rademacher vector. This last step is the celebrated Hutchinson trace estimator [27]. Still following Huang et al. [26], we avoid constructing and inverting the Hessian in this expression by instead solving a problem that requires computing only Hessian-vector products:
+
+argmin
+z
+
+1 2
+
+z
+
+Hz - v
+
+z
+
+(33)
+
+Since H is symmetric positive definite, this strictly convex problem has a unique mini- Algorithm 2: Density estimation for JKO-ICNN
+
+mizer, z, that satisfies z = H-1v. This
+
+problem can be solved using the conjugate gra-
+
+dient method with a fixed number of iterations
+
+or a error stopping condition. Thus, comput-
+
+ing the last expression in Eq. (32) can be done
+
+with automatic differentiation by: (i) sampling
+
+a Rademacher vector v, (ii) running conju-
+
+gate gradient for m iterations on problem (33)
+
+to
+
+obtain
+
+zm,
+
+(iii)
+
+computing
+
+ 
+
+[(zm
+
+)
+
+Hv]
+
+with automatic differentiation.
+
+1: Input: Query point x, sequence of Brenier potentials {ui}Ti=0 obtained with JKO-ICNN, initial density evaluation function 0(·).
+2: Initialize yt  x 3: for t = T to 1 do
+4: yt-1  argmaxy yt, y - ut(y)
+5: {yt-1 satisfies (ut)(yt-1) = yt} 6: end for
+7: x0  y0 8: for t = 0 to T - 1 do
+
+B.5 Implementation Details
+Apart from the stochastic log-determinant estimation (Section B.4) needed for computing internal energy functionals, the other main procedure that requires discussion is the density estimation. This is needed, for example, to
+
+9: xt+1  ut(xt) 10: end for
+11: {Compute  log |JT1:t (x0)|} 12:  LOGDETESTIMATOR(x0, xT ) 13: p  log 0(y0) -  14: Output: p satisfying p = log t(x)
+
+obtain exact evaluation of the internal energy functionals F, and requires having access to the exact
+
+density (or an estimate thereof, e.g., via KDE) from which the initial set of particles where sampled
+
+from. For this, we rely on Lemma 3.2 and Corollary 3.3, which combined provide a way to estimate the density T (x) using 0(x), the sequence of Brenier potentials {ui}Ti=1, and their combined Hessian log-determinant. This procedure is summarized in Algorithm 2.
+
+16
+
+B.6 Assets Software Our implementation of JKO-ICNN relies on various open-source libraries, including pytorch [38] (license: BSD), pytorch-lightning [18] (Apache 2.0), POT [20] (MIT), geomloss [19] (MIT), rdkit [31, 32] (BSD 3-Clause). Data All the data used in Section 5 is synthetic. The dataset used in Section 6 does not explicitly provide a license in their website nor data files.
+C Additional qualitative results on 2D datasets
+Figure 4: Evolution of flow using entropy functional (i.e., heat equation) on 2D point cloud with density estimated via KDE.
+C.1 Experimental details: PDEs with known solutions
+D Experimental details: Molecular Discovery with JKO-ICNN
+All Molecular discovery JKO-ICNN experiments were run in a compute environment with 1 CPU and 1 V100 GPU submitted as resource-restricted jobs to a cluster. This applies to both Convex QED surrogate classifier training and evaluation runs and to the JKO-ICNN flows for each configuration of hyperparameters and random seed initialization. Convex QED Surrogate Classifier In this section, we describe the hyperparameters and results of the convex surrogate that was trained to predict high (> 0.85) and low (< 0.85) QED values from molecule embeddings coming from a pre-trained VAE. Molecules with high QED were given lower value labels compared to the low QED molecules so that when this model would be used as potential, minimizing this functional would lead to higher QED values. For this convex surrogate, we trained a Residual ICNN [2, 26]. model with four hidden layers, each with dimension 128, which was the dimensionality of the input molecule embeddings as well. We trained the model with binary cross-entropy loss. To maintain convexity in the potential functional however, we used the last layer before the sigmoid activation for V . The model was trained with an initial learning rate of 0.01, batch sizes of 1,024, Adam optimizer, and a learning rate scheduler that decreased learning rate on validation set loss plateau. The model was trained for 100 epochs, and the weights from the final epoch were used to initialize the convex surrogate in the potential functional. For this epoch, the model achieved 85% accuracy on the validation set. In Figure 5, we display the validation set confusion matrix for this final epoch. JKO-ICNN QED Histogram values In Table 4, we present the same results as in Section 6 but include mean and standard QED values for the point clouds. JKO-ICNN QED Histogram Trajectories In Figure 6, we present several time steps of the histograms of the QED values for the decoded SMILES strings corresponding to the point clouds for the experiment that used Sinkhorn as the distribution distance with weight 10,000.
+17
+
+Figure 5: Confusion matrix for the convex surrogate trained to predict QED labels from molecule embeddings.
+
+Table 4: Molecular discovery with JKO-ICNN experiment results: Measures of validity, uniqueness, and median, average, and standard deviation QED are reported in each row for the corresponding point cloud of embeddings. For each point cloud, we decode the embeddings to get SMILES strings and use RDKit to determine whether the corresponding string is valid and get the associated QED value. In the first row, we display the point cloud at time step zero of JKO-ICNN. In the subsequent rows, we display the values for each measurement at the final time step T of JKO-ICNN for different hyperparameter configurations of distribution distance D (either Sinkhorn or MMD) and weight on this distance 2 (either 1,000 or 10,000). Each measurement value cell contains mean values ± one standard deviation for five repeated runs of the experiment with different random initialization seeds. We find that the setup that uses Sinkhorn with weight 10,000 yields the best results in terms of moving the point cloud towards regions with higher QED without sacrificing validity and uniqueness of the decoded SMILES strings.
+
+Measure D
+
+2
+
+Validity
+
+Uniqueness
+
+QED Median
+
+QED Avg.
+
+QED Std.
+
+0
+
+N/A
+
+N/A
+
+100.000 ± 0.000 99.980 ± 0.045 0.630 ± 0.001 0.621 ± 0.000 0.063 ± 0.002
+
+TTTT
+
+Sinkhorn Sinkhorn MMD MMD
+
+1,000 10,000 1,000 10,000
+
+92.460 ± 2.096 93.020 ± 1.001 94.560 ± 1.372 92.020 ± 3.535
+
+69.919 ± 4.906 99.245 ± 0.439 51.668 ± 2.205 53.774 ± 3.013
+
+0.746 ± 0.016 0.769 ± 0.002 0.780 ± 0.009 0.776 ± 0.014
+
+0.735 ± 0.009 0.754 ± 0.003 0.767 ± 0.013 0.767 ± 0.009
+
+0.110 ± 0.003 0.112 ± 0.002 0.107 ± 0.012 0.102 ± 0.011
+
+18
+
+Figure 6: Histograms of QED values for the decoded SMILES strings corresponding to the point clouds at time step t = 0, 10, 20...100 for the JKO-ICNN experiment that uses Sinkhorn as the distribution distance with weight 10,000. We observe a clear shift to the right in the distribution, which corresponds to increased drug-likeness of the decoded molecule strings.
+19
+
+

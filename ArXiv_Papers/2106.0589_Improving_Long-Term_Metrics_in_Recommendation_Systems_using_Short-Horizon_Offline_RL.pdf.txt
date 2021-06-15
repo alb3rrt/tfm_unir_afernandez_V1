@@ -1,0 +1,1359 @@
+Improving Long-Term Metrics in Recommendation Systems using Short-Horizon Offline RL
+
+arXiv:2106.00589v1 [cs.LG] 1 Jun 2021
+
+Bogdan Mazoure
+bogdan.mazoure@mail.mcgill.ca McGill University & MILA Canada
+
+Paul Mineiro
+Microsoft Research USA
+
+Pavithra Srinath
+Microsoft Research USA
+
+Reza Sharifi Sedeh
+Microsoft USA
+
+Doina Precup
+McGill University & MILA & CIFAR & DeepMind Canada
+
+Adith Swaminathan
+Microsoft Research USA
+
+ABSTRACT
+We study session-based recommendation scenarios where we want to recommend items to users during sequential interactions to improve their long-term utility. Optimizing a long-term metric is challenging because the learning signal (whether the recommendations achieved their desired goals) is delayed and confounded by other user interactions with the system. Immediately measurable proxies such as clicks can lead to suboptimal recommendations due to misalignment with the long-term metric. Many works have applied episodic reinforcement learning (RL) techniques for session-based recommendation but these methods do not account for policy-induced drift in user intent across sessions. We develop a new batch RL algorithm called Short Horizon Policy Improvement (SHPI) that approximates policy-induced distribution shifts across sessions. By varying the horizon hyper-parameter in SHPI, we recover well-known policy improvement schemes in the RL literature. Empirical results on four recommendation tasks show that SHPI can outperform matrix factorization, offline bandits, and offline RL baselines. We also provide a stable and computationally efficient implementation using weighted regression oracles.
+
+are imperfect proxies for the true long-term rewards (LTR). For example, clicks may not correlate perfectly with conversions on an e-commerce site. Optimizing click-through rates in such an application can recommend items which are frequently clicked but infrequently converted.
+Reinforcement learning (RL) techniques have been directly applied to optimizing recommendations for LTR [48]. These techniques require very many user interactions, with the sample complexity of RL growing with the horizon of the problem [3, 45]. In real-world scenarios the long-term metrics can span months (e.g., monthly revenue on an e-commerce site) or years (e.g., renewal of annual subscriptions) [6] and current RL techniques do not scale to such long horizons.
+
+KEYWORDS
+session-based recommendation, long-term user engagement, reinforcement learning, offline learning
+
+1 INTRODUCTION
+High quality recommendations can provide personalized experiences for users and drive increased usage, revenue and utility for service providers. These recommendations do not occur as isolated interactions, but rather via repeated sequential interactions. For instance, mobile health interventions nudge users over time towards achieving their long-term goals [20], e-commerce sites personalize product suggestions within user sessions so as to maximize their likelihood of purchases [26], and marketing campaigns adaptively target user populations to optimize their sales journey and improve renewal/re-subscription rates.
+Traditionally recommender systems use immediately measurable user feedback (e.g., implicit feedback like clicks or explicit feedback like item ratings) to identify good recommendations. For sequential interactions driving towards long-term goals these myopic metrics
+Work done while interning at Microsoft Research.
+
+Figure 1: Distribution of session lengths in a real-world recommendation dataset. Consecutive interactions in a session happen within 15 minutes. This histogram indicates that most sessions last fewer than 6 interactions.
+A tractable alternative has been session-based recommendation, which exploits the phenomenon that user interactions typically occur in short bursts. We illustrate user sessions in a large-scale real-world recommendation service (which will be our motivating example throughout the paper) in Figure 1. Episodic RL algorithms are well-suited for optimizing session-based recommendations because the typical length of a session is small. However, these algorithms assume that the starting state distribution of any session is
+
+Mazoure et al.
+
+the same regardless of the recommendation policy, which can be problematic. For instance, optimizing for session-based metrics (e.g., conversions) can yield an adverse outcome on monthly revenue if such recommendations skew user behavior to decrease the typical number of sessions the user population initiates in any month.
+Can we optimize for better session-based recommendations without paying the statistical costs of long horizons? In the example above, this would require estimating the impact of a new recommendation policy on the number of user-initiated sessions in a month without actually deploying a new policy for months. In this paper we demonstrate a practical offline RL algorithm that can approximately reason about such induced effects. There are two key insights: (1) rather than relying on myopic and confounded proxies like clicks, we use concepts from RL like value functions and advantage functions to construct adaptive and cleaner proxies of LTR which are guaranteed to yield policy improvement; (2) we invoke episodic RL algorithms with an additional bonus on episode termination that attempts to capture policy-induced distribution shifts in user sessions. We show how this scheme allows us to efficiently approximate a long (potentially intractable) horizon RL problem with a short horizon sub-problem that can be tractably solved using well-known weighted regression techniques.
+Contributions: We propose SHPI, a novel batch RL algorithm which performs strategic exploitation by reasoning over a fixed length false horizon, and apply it to tune LTR-optimizing recommendations. The algorithm can be efficiently implemented via a weighted least-squares regression oracle (or a greedy contextual bandit), which makes training and deployment more tractable and stable than using online RL.
+We provide theoretical guarantees on the improvement that our algorithm can achieve over the existing deployed policy, using arguments analogous to those of conservative policy iteration [14]. We conduct experiments in four relevant domains: a task where the reward surface is a challenging non-convex function, a recommender system benchmark with a sub-modular reward function [30], a realworld private dataset and an HIV treatment domain with delayed rewards [5]. Our experiments show that SHPI is able to outperform classic matrix factorization techniques, offline contextual bandits, as well as offline RL agents across all these domains.
+2 RELATED WORK
+Recommendations for LTR. Prior work on long-term signals for personalized recommendations has mostly studied online off-policy methods: Pan et al. [28] and Ma et al. [25] use the actor-critic framework to tackle the problem while Wu et al. [44] combined short-term and long-term objectives based on clicks for improving customer conversion. Session-based recommendations are a widelystudied challenging task: most state-of-the-art approaches rely on session summarization mechanisms (e.g. attention or RNN) to capture long sequences of user interactions [12, 19, 21, 47]. Despite advances in deep neural architectures for session-based recommendations, evidence suggests simpler approaches are competitive [24].
+Apart from supervised sequence models, reinforcement learning agents are another commonly used class of session-based recommender systems. A number of session-based recommenders relying
+
+on reinforcement learning have been proposed through the past years, but they rely on access to an environment simulator [35, 40].
+Batch RL techniques. Successful applications of offline RL agents in recommendation tasks constrain the state and action spaces, ensure proper diversity of recommendations, and balance interpolation and extrapolation errors [9]. SHPI offers a different way to extrapolate from logged user interactions. Batch RL methods combat extrapolation error over poorly visited state-action pairs by either regularizing towards the data or optimizing objectives robust to the distribution shift. For example, SPIBB [18] and MBS [23] estimate a coverage measure over the state-action space, and define conservative updates when this measure falls below a threshold; BCQ [8] and MBS both use a variational auto-encoder for the coverage measure, while we resort to proximal regularization via distribution matching. BRPO [36] learns a soft threshold/weighting of the state coverage measure inspired by an asymptotic analysis; however we show that it is critical to address how a batch RL algorithm behaves with finite-sample estimators. Model-based methods such as MOReL [16] and MOPO [46] are state-of-the-art but are not immediately applicable due to the difficulty of modeling transitions in user behaviors.
+Truncated horizon reasoning in other settings. GAE [33] is a widely used on-policy RL algorithm. Su et al. [38] used a truncated horizon estimator for off-policy evaluation and Kalweit et al. [15] proposed a truncated horizon modification for off-policy online control. Recent work such as THOR [39] and MAMBA [2] also use a truncated horizon objective for imitation learning. Unlike SHPI which works in an offline setting, both THOR and MAMBA assume interactive access to the environment. Our work provides an off-policy analogue to the policy improvement schemes of Tang et al. [41], if we view the policy update step as a Taylor expansion approximation. All of these works are in the online interactive RL setting distinct from our batch RL setting. Finally, previous works have studied the impact of choosing higher discount factors (another way of truncating horizon) on planning [13] and control [31].
+3 MOTIVATING EXAMPLE
+Consider an e-commerce site optimizing its recommendations for monthly conversions. When users visit the site, they have a limited amount of patience to interact and find an appropriate product. Within a user session, we might recommend many different kinds of products. We may recommend attractive impulse purchase products which advertises our item inventory for a user's future shopping needs or we may recommend more functional products that address their immediate need. This situation is illustrated in Figure 2 where the side-chains correspond to user sessions, and the main chain describes the total number of sessions in a month.
+Consider first a recommender that has been tuned to optimize click-through rates (CTR) in this example. Such a recommender will excessively show attractive but distracting products, exhaust users' patience and not achieve any conversions. This is depicted in Figure 2 where in states  (end of sessions when the user is about to leave) the policy does not recommend a functional item.
+Suppose instead we optimized session-based recommendations using episodic RL where each episode corresponds to a user session.
+
+Improving Long-Term Metrics in Recommendation Systems using Short-Horizon Offline RL
+
+Figure 2: Stylized example of e-commerce recommendations. A session  lasts for up to two interactions 1, 2 and ends in a conversion (green) or not (red). Solid arrows indicate the sequence of interactions seen by the system, dashed arrows represent how the user's session initiation intent is updated. Good discovery recommendations (11) can increase the number of sessions and total conversions.
+Such a policy would recommend functional items which increase the chance of a conversion. This is strictly better than the CTRoptimizing policy.
+However observe that we can do better than the CTR-optimizing and session-based conversion-optimizing policies. The number of sessions in a month can also be influenced by our recommendation policy. If we only ever recommend functional items, our users may revisit the site only rarely (when they have similar needs again). However, if we exploit the fact that users have finite patience, and first recommend some engaging products we may increase the odds of users returning to our site. We see this in Figure 2 where a discovery recommendation at 11 causes the user to initiate a future session 21 which they would not have done otherwise. A good recommendation policy will carefully balance exposure of current and potential future needs in order to both satisfy users and encourage repeat visitation.
+4 PROBLEM SETTING
+In the following, we will formulate the problem as an episodic Markov Decision Process (MDP) with a long horizon (one month in the motivating example), describe several policy improvement schemes, develop a new batch RL algorithm which performs false horizon reasoning (a single user session in the example), and provide a scalable implementation for session-based recommendation.
+Notation. Uppercase letters  represent random variables, uppercase bold letters A represent matrices, lowercase bold letters  represent vectors, calligraphic letters T represent tensors and/or spaces. Index notation is the equivalence : = {, +1, .., -1,  }. For a space X, (X) represents the set of distributions with support X.
+4.1 Markov Decision Processes
+For ease of exposition, we study finite horizon episodic MDPs. The results translate in a straightforward manner to infinite horizon discounted objectives. Let X be the state space, A the action space,  : X × A  R the bounded reward function, and   [0, 1] the
+
+discount factor. Let T : X × A  (X) be a Markov transition function and let 0  (X) be the initial state distribution. At each  = 0, 1, 2, .., , the learner observes   X and picks an action   A based on some behavior policy  : X  (A).  denotes
+
+the episode horizon and can be a random variable (e.g., number of
+
+
+
+user interactions in a month). Let P0: denote "rolling-in" with :
+
+0
+
+
+
+0, 0
+
+
+
+(0), . . . 
+
+
+
+T (-1, -1)
+
+and
+
+
+P
+
+denote
+
+"rolling
+
+out"
+
+with
+
+:
+
+
+P
+
+=
+
+E [T ( |-1, -1)].
+
+The state value function under any policy  is
+
+ -
+
+
+
+
+
+
+(
+
+)
+
+=
+
+EP
+
+[
+
+
+
+
+
+
+(
+
++,
+
+
+
++
+
+)
+
+|
+
+=
+
+ ],
+
+=0
+
+the state-action value function is
+
+ -
+
+
+
+
+
+
+( ,  )
+
+=
+
+EP
+
+[
+
+
+
+
+(
+
++
+
+,
+
+
+
++
+
+)
+
+|
+
+=
+
+ , 
+
+=
+
+ ]
+
+=0
+
+and
+
+the
+
+advantage
+
+function
+
+is
+
+
+
+
+(
+
+,
+
+
+
+)
+
+=
+
+
+
+
+(
+
+,
+
+
+
+)
+
+-
+
+
+
+
+(
+
+).
+
+Note that we have time-indexed value and advantage functions;
+
+for infinite horizon problems we can use their time-independent
+
+stationary counterparts. The expected return is 
+
+=
+
+E0
+
+[ 
+0
+
+(
+
+0
+
+)
+
+]
+
+=
+
+EP0: [
+
+ -1  =0
+
+
+
+
+
+
+
++
+
+
+
+
+
+(
+
+)]
+
+=
+
+EP0:
+
+[
+
+ -1  =0
+
+
+
+
+
+
+
++
+
+
+
+
+
+( ,  )]
+
+for
+
+any
+
+1   .
+
+In a typical recommendation setting,   X is a high-dimensional
+
+vector describing user demographics and their current context, A
+
+is discrete, containing a small number of actions, 0 has a very large support (many unique users), T induces highly stochastic dynamics which are difficult to model, and  is typically  100.
+
+Rewards  are sparse and only observed after several interactions
+
+(e.g., capturing user engagement after they have consumed several
+
+recommendations during a session).
+
+4.2 Batch/Offline RL
+In this paper, we will assume access to a dataset D of trajectories collected from  -- these are the logged user interactions collected
+from an existing recommendation system (for instance, one that is tuned to get good CTR). The goal is to use D to find a new policy  such that  is near-optimal. The challenge is that we cannot deploy every possible  to estimate  , nor do we know the rewards for actions not taken by  in D. This can be an impossible goal if  is always deterministic, so in the sequel we assume that  is stochastic (e.g., -greedy with respect to a ^ in production).
+
+Regression oracle. We assume access to a weighted regression
+
+oracle, for instance an efficient least-squares implementation over
+
+some model space F , denoted
+
+
+
+ORACLEF (D) = arg min
+
+ { (, ) -  }2, (1)
+
+  F (,,, ) D
+
+where 
+
+:
+
+X
+
+
+
++
+R
+
+is
+
+a
+
+weighting
+
+function.
+
+Such
+
+regression
+
+ora-
+
+cles have been used in batch contextual bandit problems (an MDP
+
+with  = 1 or T ( |, ) = Pr( ), , ) [4, 7]. A policy can be
+
+retrieved from  by either considering the greedy  ( | ) =
+1arg maxA  ( ,) ( ) or softmax  ( | )    ( , ) . The ap-
+
+proach of Foster et al. [7] calls ^ = ORACLEF (D) with  (, ) =
+
+1  ( |)
+
+and shows that the resulting
+
+greedy policy, under suitable
+
+assumptions in contextual bandit settings, is near-optimal.
+
+4.3 Solution Strategies
+Policy Gradient. A typical interactive RL strategy attempts to maximize   arg max EP [ (, )] (we omit time-indexing notation in informal discussions of policy optimization) by collecting
+samples from  interacting with the environment to estimate the expectation P and the advantages  . If online learning is impossible due to the absence of a simulator or is too costly (e.g., in
+medical treatment domains), an improved policy  can still be found
+for a given dataset gathered by behavior policy . One approach uses ideas inspired by the policy gradient of  , and essentially maximizes EP [ (, )]. However the policy improvement step when following this strategy tends to be very small (see Kakade
+and Langford [14] for a detailed discussion).
+
+Conservative Policy Improvement. Another strategy uses a performance difference lemma [14] to relate  -  = EP [- (, )] = EP [ (, )]. Batch RL techniques that attempt to maximize policy improvement by optimizing EP [ (, )] face the challenge of extrapolation errors, since  estimated from samples collected
+from  may not be reliable in important regions of the state-action
+space queried by . Techniques that optimize EP [ (, )] suffer from distribution shift since samples collected from  may not
+reliably estimate expectations w.r.t P .
+
+Optimizing an LTR Model. A common industry practice is to train reward oracles (as done for contextual bandits) but with long-term
+
+metrics as the regression target. For instance, we can train an LTR
+
+model via supervised learning on D = {(1,  ,  ,
+
+   =
+
+-  )
+
+
+
+D}, ^ = ORACLEF (D). Suppose we want to model user retention;
+
+a batch of longitudinal data tracking retention essentially predicts
+
+^(, )   (, ) or ^()    (). This is often an important
+
+proxy to construct when we cannot store the longitudinal data;
+
+e.g., because the data contains sensitive information about the user
+
+such as their medical diagnoses, or privacy laws might require to
+
+delete the long-term reward signal after some time period. Greedily maximizing an LTR model on a dataset D amounts to maximizing EP [ (, )] which is an instance of a policy gradient solution.
+
+Model-based RL. We can instead perform model-based reasoning
+
+by separately estimating the instantaneous reward  and user transition dynamics T using empirical statistics observed in D. Given estimates of ^ and T^ , we can use approximate dynamic program-
+
+ming or other planning methods to decode a near-optimal ^ in the
+
+approximate MDP. The statistical and computational difficulty of
+
+these approaches scales with horizon  .
+
+Truncated horizon. We can solve an artificially shorter horizon RL problem, by either treating our horizon  <  or by decreasing the discount factor   < . User sessions are a natural and popular
+choice for defining truncated episodes  .
+
+4.4 Pitfalls of Existing Strategies
+Artificially truncating horizon to  (or equivalently, decreasing the discount ) essentially assumes that the state +1  0 whereas in reality +1  Pr( |  ,  ). This can be a problematic assumption as we saw in Figure 2 when policy actions within a user session
+or truncated horizon episode had a significant effect on the user population who initiated sessions, Pr (1)  0.
+
+Mazoure et al.
+
+Model-based RL approaches are impractical for our recommendation setting. We need to estimate T , which is a highly stochastic dynamics of high-dimensional vectors X.  is potentially easier to estimate but we need reliable enough (^, T^ ) estimates to perform planning over long horizons   100. Such precise estimates will require an impractically large dataset D.
+One step of policy gradient typically leads to a very small policy improvement step. Consider Figure 2 where a CTR-maximizing  almost always recommends discovery items, and it takes a sustained sequence of good recommendations within a session for user engagement or conversion. In such sparse reward scenarios, one-step deviations from  at session start as estimated via ^  (1, )  0 (even for a good recommendation ). If we had considered systematic deviations from  throughout a user session, we would have seen that a policy improvement is possible -- this observation is the key insight of our proposed approach.
+Multiple steps of policy gradient on a fixed batch of data is typically unreliable. For instance if we greedily optimized an LTR model, finite sample errors in estimating ^ can propagate to a very unreliable policy update. This is why conservative policy update schemes carefully regularize the resulting greedy policy towards  to guarantee reliable improvement (e.g., CPI, TRPO, PPO, etc.). We discuss such proximal regularization for our approach in Section 6.3.
+Finally, policy improvement techniques that rely on  require a large number of samples that scales with the horizon  for reliable off-policy estimation. In Figure 2, to estimate  we need to consider months-long deviations; the probability of seeing all the actions taken by  in a dataset collected from -greedy exploration is vanishingly small.
+In summary, existing batch RL techniques either make very small policy updates and/or rely on future data collection to correct estimation errors. Having the tightest lower bound on policy improvement is essential to maximizing performance in this problem. We now sketch how we use -step reasoning and false horizon estimators, leveraging our prior knowledge of the session structure of the interactions but without the pitfalls of assuming Pr (+1)  0.
+
+5 ALGORITHM 5.1 Reducing the task horizon
+
+As previously mentioned, the main limitation of offline RL methods is the quadratic (or worse) dependence on the episode horizon [45]. That is, for a fixed error threshold, learning on episode sequences that are twice longer requires at least four times as much data, motivating reduction in the horizon. Empirically, user interactions occur in bursts (see Figure 1), therefore we propose reducing the task horizon by scoring the terminal state of short bursts of user interaction by the value of the user under the behavior policy.
+We use an approach combining MC samples and a direct model to estimate -step advantages from the dataset akin to MAGIC [42]:
+
+ -1
+
+
+
+
+A ( ) ,
+
+( ,  )
+
+=
+
+EP: +
+
+[
+
+
+
+
+(
+
++
+
+,
+
+
+
++
+
+)
+
+=0
+
+(2)
+
++
+
+
+
+
+
+
++
+
+( +
+
+) |
+
+,
+
+
+
+]
+
+-
+
+
+
+
+
+(
+
+).
+
+These advantages estimate the effect of starting in state  at time , taking action  , then rolling-in for ( - 1)-steps with  before
+
+Improving Long-Term Metrics in Recommendation Systems using Short-Horizon Offline RL
+
+reverting to  till the end of the episode. Furthermore the baseline
+
+that is subtracted from this -function is the estimated value of
+
+following
+
+
+
+from
+
+state  .
+
+Note
+
+that
+
+A(1),
+
+
+
+
+.
+
+
+Since the training dataset was collected by  and not , we use
+
+PDIS [29] to rewrite the expectation in terms of :
+
+ -1
+
+
+A ( ) ,
+
+( ,
+
+
+
+)
+
+=
+
+EP: +
+
+[
+
+
+
+ + 
+
+
+
+
++1
+
+
+
+
+
+( + ,
+
+ + )
+
+=0
+
+(3)
+
++++1
+
+
+
+
+
+
++
+
+( +
+
+)| ,
+
+
+
+]
+
+-
+
+
+
+
+
+(
+
+),
+
+where 2 =
+1
+
+2 =1
+
+ ( | )  ( | )
+
+when 1
+
+ 2, 1 otherwise. To miti-
+
+gate potentially large values of 2 we use weight clipping[11].
+1
+
+The finite sample version of our estimator from  Monte Carlo
+
+sample paths is
+
+ -1
+
+A^ (),
+
+:=
+
+1 
+
+ [
+
+ ^ ,++1^(,+, ,+)
+
+=1 =0
+
+(4)
+
++^ ,++1^  (,+ ) - ^  ( ) .
+
+We train a value function model ^  using Bellman residual
+
+minimization on samples collected from :
+
+^  = arg min  ( +  ( ) -  ())2 .
+
+(5)
+
+ (,,,)  D
+
+Truncated horizon advantages (Equation 3) have been used in other applications ­ for online RL using generalized advantage estimates [33], for off-policy evaluation [38], for imitation learning [39], etc. Our core insight is that these false horizon advantages can often be feasibly estimated from batch data, and they allow us to witness a policy improvement that other advantage estimates can miss. This is particularly evident in interaction scenarios where the task horizon ( ) is long, and we need sequences of good recommendations to realize rewards (1 <    ). For example, this is the case in the private real-world dataset, where user interactions with the online recommender system occur in short bursts of 2-3 interactions interleaved by 15 minute delays.
+In Section 6.2 we will derive a straightforward generalization of the performance difference lemma that generalizes the 1-step deviation reasoning inherent in advantage functions to instead consider our -step deviations to guarantee a better policy improvement.
+
+5.2 Short-Horizon Policy Iteration
+
+We sketch a batch policy improvement algorithm with repeated
+
+calls to a weighted regression oracle in Algorithm 1. We can see
+
+that SHPI solves the following optimization problem via a modified
+
+approximate policy iteration (API) scheme [1] by leveraging the
+
+regression oracle in (1):
+
+
+
+arg min
+
+(
+
+
+
+(,
+
+)
+
+-
+
+
+A()
+
+)
+
+2
+,
+
+(6)
+
+  F (,,A() )
+
+There are two questions about SHPI: (i) Using infinite-sample estimates of ^ , ^, ^  , does Algorithm 1 guarantee a policy improvement step (is the algorithm consistent?) and (ii) if some state-action pairs are poorly covered by , is it still possible to find an improved policy (is the algorithm efficient)? In Section 6.2 we show that SHPI is both consistent and efficient.
+
+Algorithm 1: SHPI
+
+Input : Dataset D  , regression oracle ORACLE, false
+
+horizon , clipping coefficients 1, 2, iteration
+
+number 
+
+for (X, A, r, X)  D do ^   (5) with X, A, r, X;
+
+/* Randomly initialize  (0)  
+
+*/
+
+ (0)  (A)
+
+for  = 1, ..,  do
+
+w^  clip({
+
+ + = +1
+
+ ( -1) ( | )  ( | )
+
+}=1, 1, 2);
+
+A^ ()  (4) with r, estimated w^ and ^  ;
+
+/* Call to ORACLE
+
+*/
+
+ ( )  ORACLEF ( ( -1), X, A, 1, A^ () )
+
+end
+
+end
+
+6 ANALYSIS
+The computational and storage costs of SHPI scale linearly with , since the quantity A^ () can be computed in a single pass through the data. SHPI also requires the pre-computation, or access to a scoring function ^  over user contexts under the behavior policy.
+
+6.1 Choice of reward estimator
+In the -step advantages of Equation 4, we typically use Monte Carlo samples  (,+, ,+) to estimate the instantaneous stateaction reward. However these rewards may be sparse ­ for instance,
+product purchases may be a very small fraction of user interactions. When we have access to a value function   ^  ( ) as in Equation 5, we can replace the ^ estimate by recognizing that   ^  ( ) - ^  (+1). We recommend using ^ =  - -1 = (1 - B) , where ^0 = 0 and B denotes the backshift operator. The backshift reward estimator has two additional redeeming proper-
+ties: (i) it isolates the effect of action  on  using a dense shaping reward ^ = ^( ,  ), and (ii) it eliminates stationary additive bias in the learned value functions or additive exogenous reward noise
+in the environment, if any.
+
+6.2 Policy improvement guarantees
+
+The following theorem connects the advantage estimate maximized by Algorithm 1 to the performance difference between  and .
+
+Theorem 6.1. Let  and  be two arbitrary policies acting in a  -horizon episodic MDP and let 1     . Then,
+
+ -1
+
+ -1
+
+
+
+EP
+
+[
+
+( )
+
+-
+
+
+
+
+
+(
+
+)]
+
+=
+
+
+
+EP
+
+[A( ) ,
+
+( ,  )]+
+
+ =1
+
+ =0
+
+
+
+
+EP
+
+EP: +
+
+[ (+
+
+( +
+
+)
+
+-
+
+
+
+
+
+
++
+
+( +
+
+))].
+
+The proof follows from a re-arrangement of terms of the classic performance difference lemma [14]. SHPI optimizes the first term in the RHS by greedily maximizing A(), for every 1. The LHS is
+1This also explains why we initialize SHPI away from  so that  and A() do not coincide at the first iteration of the algorithm.
+
+akin to a cumulative performance difference over  timesteps. If  = 1, ignoring the terms can be a severe under-estimate of the true
+
+performance difference (as we observed in the motivating example).
+
+However if  =  , then the first term is equivalent to optimizing
+
+A
+
+and the second
+
+term
+
+is
+
+equal to 0 (since  
+
+
+=
+
+0 for all 
+
+  ).
+
+So, SHPI with  = 1 is a policy gradient step, while with  =  it is
+
+maximizing the performance difference.
+
+Lemma 6.2. Suppose ^  and ^() are estimated on separate independent datasets. Then
+
+EP+1: +
+
+[(A^ () (, )
+
+-
+
+
+A()
+
+(
+
+))2]
+
+
+
+(7)
+
+E
+
+P
+
+
++1:
+
++
+
++1
+
+[(A^ (+1)
+
+(,
+
+)
+
+-
+
+
+A ( +1)
+
+( ) ) 2 ]
+
+The proof is by direct induction. This lemma shows that we should not set  to be too large lest we have overwhelming estimation errors in the advantages. In practice we set  equal to the typical user session length.
+
+6.3 Conservative updates via proximal regularization
+
+Policy gradient methods are known to be unstable due to estimation errors in  over regions that are poorly covered by . There
+
+are many different approaches in the literature to introduce con-
+
+servatism in policy updates to remain robust to this failure mode.
+
+One class of approaches introduces a trust region or a proximal
+
+regularization of policy updates towards  to enforce conservatism
+
+(CPI [14], TRPO [32], PPO [34], etc.). Another class of approaches
+
+introduce pessimism in the estimated advantages to ensure safe
+
+policy updates (SPIBB [18], CQL [17], MBS [23], etc.). We will now
+
+discuss a notion of trust region that is weaker than those studied in
+
+the literature, and show how it can be incorporated into SHPI using
+
+penalized advantage estimates. This replaces the greedy updates
+
+of SHPI to ensure that updated policies are still well-supported by
+
+data collected from . A common trust region/proximal regularization constrains { :
+max ( (·|)|| (·|)) < }. With very small  only  remains in this policy set. Remember we want to find up to -step deviations from  which may require a large ( (·|)|| (·|)) for some .
+
+In the example of Figure 2 even if actions taken by a conversion-
+
+maximizing  are not likely in data collected from , the different
+
+user states are. So we relax the proximal constraint to instead reason
+
+about only the state distributions induced by  and . Let  =
+
+1 
+
+
+
+
+P . We introduce a constraint
+
+{
+
+:
+
+( || )
+
+<
+
+ }.
+
+Note
+
+now that even with very small , there can be several candidate
+
+policies that are allowed in this set. For an extreme case consider a contextual bandit ( = 1,   0); this state-based trust region admits all stationary policies while the typical action-constrained trust
+
+region only admits . The Lagrangian relaxation of this constraint
+
+is:
+
+arg max E [A() (, )] s.t. ( || )  .
+
+
+
+1 
+
+(8)
+
+
+
+arg max
+
+
+
+
+ =1
+
+A^ () (,  )
+
+-
+
+ log   
+
+( )
+
+Mazoure et al.
+
+for 
+
+ , 
+
+  ( ) and setting  
+
+
+=
+
+ . Incorporating these
+
+
+penalized advantages into the weighted regression oracle, we get,
+
+
+
+^()
+
+=
+
+arg min
+ F
+
+(
+
+,,A^ (
+
+)
+
+,
+
+ 
+
+(
+)
+
+(, )
+
+-
+
+(A^ ()
+
+-
+
+ log 
+
+ 
+
+))2,
+
+(9)
+
+where  > 0 is a parameter controlling the importance of what we call the distribution matching constraint. Let  () be the policy induced by  () for   0. Setting  = 0 recovers the solution to (6). If   0 then the distribution matching constraint dominates and  () will be the uniform random policy. For a well-tuned value of  we recover policies  () close to , i.e., ( || ) is small.
+
+Finally, we remark on a chicken-and-egg problem in successfully
+
+incorporating the proximal regularization.   is unknown and
+
+must be estimated from data, using techniques like DualDICE [27]. However, these techniques can fail when  is not well-supported by  . We introduce an assumption that avoids this difficulty:
+
+Assumption 6.3. There exists  > 0 s.t. for the initial policy 0:
+
+0 ()
+
+max log
+
+ .
+
+ X:0 ()>0   ( )
+
+This assumption can be enforced by initializing 0 to be a small perturbation of . The constrained optimization problem defined in Eq. 8 ensures that every  encountered during iterations of SHPI stays within the proximal set. However since the Lagrangian relaxation in Eq. 9 is only an approximation of the constrained problem in Eq. 8, we may potentially violate the proximal constraint. We find that this scheme still works well in our experiments (see Section 7.9) and we conjecture that this is because in real-world problems Assumption 6.3 holds for many more policies   . We have already shown that a contextual bandit satisfies this assumption    trivially with  = 0. Assumption 6.3 with  is reasonable for recommendation scenarios, where  may have explored many sequences of recommendations and we seek to find more optimal subsequences. In practice, if we find DualDICE weights that are too large during any step of SHPI, we conclude that distribution matching regularization is likely unreliable.
+
+7 EXPERIMENTS
+How does SHPI perform against offline contextual bandits and RL algorithms? How robust is it to bias in the reward oracle and to the choice of ? To answer these questions, we conducted experiments on three benchmarks and a private dataset: (i) a synthetic recommendation problem with a complex reward function [37], (ii) the RecoGym environment with a sub-modular reward function [30], and (iii) the HIV treatment simulator proposed in Ernst et al. [5]. Our choice of baselines is discussed in the Section 7.1.
+7.1 Experimental setup
+On all four domains, we first pre-train an online agent (deep SARSA), using a large number of interaction trajectories. This agent is then corrupted with -greedy noise, to simulate various thresholds of realistic performance. For instance, we study  = 0 (optimal logging policy),  = 0.3 and  = 1 (random uniform logging policy). This new agent is then deployed in the environment simulator in order to gather a fixed amount of trajectories which are used to train all
+
+Improving Long-Term Metrics in Recommendation Systems using Short-Horizon Offline RL
+
+compared methods. We use the weight clipping parameters 1 = 0.5 and 2 = 2 for all experiments.
+
+Test domains. The first domain implements a toy recommendation scenario in which each of |A| = 10 actions, with randomly sampled action features, affect the current context  of a user in an additive way. The policy's input context is a moving average of previous contexts; the reward function depends only on the accumulated  and is characterized by the non-convex Styblinski-Tang function [37]. The exact updates of the synthetic task of dimension  and temporal smoothing  > 0 are as follows:
+
+ 
+
+0
+
+=
+
+[0,
+
+0, ..,
+
+-10,
+
+..,
+
+0]
+
+
+
+R
+
+
+
+ 0
+
+
+
+N (0,
+
+I )
+
+(10)
+
+   (·| )
+
+
+
+   +1 
+
+=
+
+1 
+
+ -1  =0
+
+(
+
+-
+
++
+
+- )
+
+where 0 is a vector of dimension  with all elements equal to 0 except one, which is set to -10 uniformly at random and N denotes
+
+the Gaussian distribution. A sketch of this toy task is shown in
+
+Figure 3.
+
+tuning. We also added two additional baselines that are adapted from the RecoGym repo: (1) bandit with matrix factorization and (2) IPS estimator via neural net regression. The first method, shortened to CB+MF, alternates between a neural matrix factorization of userproduct instantaneous proxy rewards via SGD, and selecting the action with highest predicted proxy reward2. The second method, shortened to NN-IPS, assumes that data came from a contextual bandit ( = 1) problem and trains a neural network to approximate the inverse propensity scores (IPS)3. All experiments report undiscounted test performance on true environment rewards over 200 rollouts and 5 random seeds.
+7.2 Comparison to offline CB and RL
+The first experiment compares the performance of SHPI with that of offline contextual bandits and offline RL. Our results on the realistic
+
+Figure 3: Schematic view of the toy recommendation task.
+The second benchmark, RecoGym, is a personalization domain used to study click-based recommender systems using RL. We added a long-term reward signal to the domain which is a submodular function that depends on all previously clicked products.
+The third benchmark is the HIV treatment simulator which relies on differential equations to simulate the administration of treatment to a group of patients. While it has relatively small state and action spaces, the HIV simulator is considered a proxy for real-world recommendation tasks in the healthcare domain [22, 23].
+Our fourth and last domain consists of a private dataset  . The dataset  contains 120,000 unique user interactions collected from a live recommender system over the span of 3 weeks for 10,000 users. The recommendation setting is much closer to what practitioners in the field can expect to encounter, with |A| = 112 and |X| = 47. The role of the long-term value proxy is played by a supervised model, outputting scores in the interval [-1, 1] (where 1 is the best possible score). In this setting, the LTV corresponds to the likelihood of a certain user to be "retained", i.e. subscribe to some service.
+Choice of baselines. Our choice of baselines consists of representative recommendation and offline RL methods. We include a standard contextual bandit agent without exploration. Next, we include BCQ [8] as the batch RL baseline. BCQ is general enough to be suitable for all target domains, and does not require extensive
+
+Figure 4: RecoGym online evaluation of algorithms trained on a fixed dataset sampled from the logging policy.
+
+RecoGym domain show that SHPI outperforms both offline CB and RL benchmarks in recommendation scenarios. As we show later in the section, the underwhelming performance of offline RL is caused by a large interpolation error in estimating  .
+7.3 Scaling to real-world problems
+In the second experiment, we fitted a model to state transitions and rewards in the private dataset X with a ground-truth long-term value for users. This world model is more realistic than RecoGym: it incorporates a complex LTV function, richer user features and realistic state transitions. We ran all algorithms on a simulated batch from this environment logged by an -greedy policy and report online evaluation results of the resulting policies.
+
+Rewards Logging CB
+
+B.SHPI
+
+Offline RL NN-IPS
+
+Avg
+
+-0.69 ± 0.3 -1.53 ± 0.03 -0.29 ± 0.21 -1.02 ± 0.29 -0.98 ± 0.04
+
+Normed 1
+
+0.45
+
+2.37
+
+0.68
+
+0.70
+
+Table 1: Online evaluation of SHPI on real data.
+
+2see github.com/criteo-research/reco-gym/blob/master/recogym/agents/bandit_mf.py 3see github.com/criteo-research/reco-gym/blob/master/recogym/agents/nn_ips.py
+
+The results above suggest that our method indeed scales to realworld datasets, and performs better than offline CB and offline RL in larger and more complex recommendation scenarios.
+7.4 Perils of immediate reward proxies
+Is optimizing for LTV instead of clicks really necessary? Recent work postulates that as long as click are aligned (i.e. correlated) with LTV, then optimizing clicks also optimizes LTV [43]. In this experiment, we test this assumption within the RecoGym simulator. Below are evaluation rewards on the RecoGym task, where all algorithms are trained on their respective  (Click or LTV) but validated on LTV. Note that the LTV row corresponds to Fig. 4.
+
+ Logging CB
+
+B.SHPI Offline RL Bandit+MF NN IPS
+
+Click 0.05 ± 0.25 0.11 ± 0.16 0.02 ± 0.23 -0.03 ± 0.05 -0.20 ± 0.21 0.11 ± 0.31 LTV -0.13 ± 0.28 -0.02 ± 0.18 0.33 ± 0.17 0.08 ± 0.14 0.06 ± 0.19 0.25 ± 0.15
+
+Table 2: Average online returns obtained by training on short-term vs long-term rewards.
+
+The MF and IPS baselines are trained to directly maximize the LTV made available to them by the simulator, but without further reasoning beyond the current timestep. Under click rewards, we see that all algorithms are taking myopic decisions to maximize immediate rewards and do not optimize the long-term submodular metric as efficiently.
+
+7.5 Choice of k
+
+The scenario presented in Section 3 is only one example to illustrate
+
+the weakness of policy gradient or conservative policy iteration
+
+schemes in a batch RL setting. Suppose we perform  steps of value
+
+iteration in an MDP starting from an arbitrary initial value function (e.g.,   ). If the policy decoded from the th value function is
+
+close to optimal, then -step reasoning is sufficient regardless of the
+
+episode horizon. The example from Section 3 fits this characteriza-
+
+tion. There is an exciting opportunity to formally characterize such
+
+problems (reminiscent of Blackwell optimality [10]) which admit
+
+new
+
+solutions
+
+that
+
+use
+
+
+
+ (
+
+)
+
+rather
+
+than
+
+
+
+or
+
+;
+
+we
+
+defer
+
+this
+
+to future work. We report results on a length 50 chain MDP with
+
+length 5 sessions akin to Fig 2. Picking  too small indeed leads to
+
+suboptimal performance.
+
+Logging CB
+
+S.SHPI (k=4) S.SHPI (k=5) Offline RL
+
+54 ± 60 37 ± 25 39 ± 20
+
+60 ± 22
+
+40 ± 28
+
+Table 3: Online evaluation of SHPI and baselines on chain MDP from the motivational example.
+
+From theory,  cannot be set arbitrarily large ­ the growing finite-sample error will overwhelm the estimator. This was shown in Fig. 8, where  = 10, 20 breaks returns and  = 5 strikes the right trade-off. Table 4 provides additional results for ablations of .
+
+Mazoure et al.
+
+ =0
+
+ = 0.3
+
+=1
+
+1 0.48 ± 0.24 0.4 ± 0.16 0.61 ± 0.25 5 0.57 ± 0.25 0.63 ± 0.24 0.70 ± 0.24
+
+Table 4: Average online returns of S.SHPI on HIV simulator for different choices of false horizon .
+
+7.6 Influence of  on the estimation error
+We further conduct ablations on the role that the false horizon plays
+in the estimation error of the long-term advantages. To do so, we sample 200 states    () in the synthetic task and perform 30 online environment rollouts to estimate ground truth advantages
+for each , and report the mean squared error between offline and online estimates in Figure 5. The results show that using  = 5 yields lower MSE on average than A or A . The improved estimation quality also leads to better rewards on the toy task (the  baseline
+implements off-policy TD learning).
+
+ A^ 
+
+A^ 
+
+A^ 
+
+0.3 8411 ± 32 8097 ± 34 1499 ± 8005 0 8346 ± 180 8285 ± 269 4761 ± 6186
+
+Table 5: Average online returns of S.SHPI with A^  , A^  and A^  estimators.
+
+Figure 5: Mean-squared error between offline and online estimates of A() , A ,A for different choices of .
+7.7 Robustness to additive biased reward oracles
+This experiment investigates the robustness of SHPI to slowly varying non-stationary bias of large magnitude in the reward function  . Table 6 shows that performance of non-backshift algorithms suffers from the additive non-stationary bias in the oracle (large inter-seed variance), while backshift SHPI still performs well.
+In the synthetic task, the additive bias was explicitly simulated in the reward oracle. However, situations where the reward signal is noisy can arise in real-world scenarios as well. For example, the HIV simulator simulates its reward by discretizing a system of differential equations, which can introduce additional noise [5].
+
+Improving Long-Term Metrics in Recommendation Systems using Short-Horizon Offline RL
+
+Task
+
+S.SHPI B.SHPI
+
+Unbiased reward 8077 ± 992 8350 ± 183 Biased reward -557 ± 429 5714 ± 364
+
+Table 6: Online evaluation on synthetic task of simple (S.) and backshift (B.) estimators.
+
+However, note how SHPI achieves better results when learning from a uniform logging policy as opposed to a policy closer to the optimum. This highlights an instability when learning from an expert policy using directed exploration ­ a mismatch that is addressed in the next section.
+7.9 Stationary distribution matching
+When the logged data comes from an optimal expert, batch RL algorithms are prone to finding suboptimal policies unless there is a mechanism which regularizes towards data. In our case, it is played by the state distribution-matching of learned policy with the logging policy.
+
+Figure 6: Online evaluation on HIV simulator.
+
+Fig. 6 validates that the backshift + SHPI coupling is indeed helpful in the HIV task.
+7.8 Robustness to behavior policy
+We validate that SHPI is able to learn from data collected by various behavior policies. To do so, we re-use the online RL critic to create an -greedy  with  = 0.3 and random uniform ( = 1) policies. Table 7 and Fig. 7 show returns collected by offline and online baselines.
+
+
+
+S.SHPI
+
+B.SHPI Off.RL
+
+On.RL
+
+0.3 5125 ± 316 -13201 ± 426 8411 ± 32 8233 ± 271 8144 ± 311 1 77 ± 402 1592 ± 212 8346 ± 180 2669 ± 3085 8144 ± 311
+
+Table 7: Online evaluation on synthetic task.
+
+Figure 7: Online evaluation on HIV simulator.
+
+Figure 8: Ablation on the performance of S.SHPI with and without the distribution matching constraint on the synthetic task.
+Figure 8 shows the sensitivity of S.SHPI to the state distribution matching across  of the behavior policy. Lines show average test performance across 10 seeds and 200 rollouts, and shaded regions show 1 standard deviation. Note that returns are quite highvariance, which is due to learning in an offline regime from limited amounts of data (often of poor quality).
+8 DISCUSSION
+We have shown that a false horizon advantage estimate can be feasibly estimated from batch data, and allows us to witness a policy improvement that other advantage estimates can miss. SHPI uses these advantages with an optional distribution-matching constraint to provide batch RL policy improvement. Empirical results show that SHPI is particularly effective in driving LTR in session-based recommendation settings.
+There are several avenues for further research. Tuning the false horizon  in a problem-dependent way; incorporating -step advantage reasoning in other conservative batch RL algorithms like SPIBB, MBS, etc.; tuning the proximal regularization of policy updates in SHPI using better trust regions; incorporating SHPI into off-policy online RL algorithms; and finally, to study its performance in real-world deployment of interactive recommender systems.
+REFERENCES
+[1] Dimitri P Bertsekas and John N Tsitsiklis. 1995. Neuro-dynamic programming: an overview. In Proceedings of 1995 34th IEEE conference on decision and control, Vol. 1. IEEE, 560­564.
+[2] Ching-An Cheng, Andrey Kolobov, and Alekh Agarwal. 2020. Policy Improvement via Imitation of Multiple Oracles. Advances in Neural Information Processing Systems 33 (2020).
+
+[3] Christoph Dann and Emma Brunskill. 2015. Sample complexity of episodic fixed-horizon reinforcement learning. arXiv preprint arXiv:1510.08906 (2015).
+[4] Miroslav Dudík, John Langford, and Lihong Li. 2011. Doubly robust policy evaluation and learning. arXiv preprint arXiv:1103.4601 (2011).
+[5] Damien Ernst, Guy-Bart Stan, Jorge Goncalves, and Louis Wehenkel. 2006. Clini-
+cal data based optimal STI strategies for HIV: a reinforcement learning approach. In Proceedings of the 45th IEEE Conference on Decision and Control. IEEE, 667­672. [6] Eugene F Fama. 1998. Market Efficiency, Long-Term Returns and Behavioural Finance. J. Fin. Econ. 49 (1998), 283. [7] Dylan J Foster, Alekh Agarwal, Miroslav Dudík, Haipeng Luo, and Robert E Schapire. 2018. Practical contextual bandits with regression oracles. arXiv preprint arXiv:1803.01088 (2018). [8] Scott Fujimoto, David Meger, and Doina Precup. 2019. Off-policy deep reinforcement learning without exploration. In International Conference on Machine Learning. PMLR, 2052­2062. [9] Diksha Garg, Priyanka Gupta, Pankaj Malhotra, Lovekesh Vig, and Gautam Shroff.
+2020. Batch-Constrained Distributional Reinforcement Learning for Sessionbased Recommendation. arXiv preprint arXiv:2012.08984 (2020). [10] Arie Hordijk and Alexander A Yushkevich. 2002. Blackwell optimality. In Handbook of Markov decision processes. Springer, 231­267. [11] Edward L Ionides. 2008. Truncated importance sampling. Journal of Computational and Graphical Statistics 17, 2 (2008), 295­311. [12] Dietmar Jannach and Malte Ludewig. 2017. When recurrent neural networks meet the neighborhood for session-based recommendation. In Proceedings of the Eleventh ACM Conference on Recommender Systems. 306­310. [13] Nan Jiang, Alex Kulesza, Satinder Singh, and Richard Lewis. 2015. The dependence of effective planning horizon on model accuracy. In Proceedings of the 2015 International Conference on Autonomous Agents and Multiagent Systems. Citeseer, 1181­1189.
+[14] Sham Kakade and John Langford. 2002. Approximately optimal approximate reinforcement learning. In ICML, Vol. 2. 267­274.
+[15] Gabriel Kalweit, Maria Huegle, and Joschka Boedecker. 2019. Composite Q-
+learning: Multi-scale Q-function Decomposition and Separable Optimization. arXiv preprint arXiv:1909.13518 (2019). [16] Rahul Kidambi, Aravind Rajeswaran, Praneeth Netrapalli, and Thorsten Joachims. 2020. Morel: Model-based offline reinforcement learning. arXiv preprint arXiv:2005.05951 (2020). [17] Aviral Kumar, Aurick Zhou, George Tucker, and Sergey Levine. 2020. Conservative q-learning for offline reinforcement learning. arXiv preprint arXiv:2006.04779 (2020).
+[18] Romain Laroche, Paul Trichelair, and Remi Tachet Des Combes. 2019. Safe policy improvement with baseline bootstrapping. In International Conference on Machine Learning. PMLR, 3652­3661.
+[19] Jing Li, Pengjie Ren, Zhumin Chen, Zhaochun Ren, Tao Lian, and Jun Ma. 2017. Neural attentive session-based recommendation. In Proceedings of the 2017 ACM on Conference on Information and Knowledge Management. 1419­1428.
+[20] Peng Liao, Kristjan Greenewald, Predrag Klasnja, and Susan Murphy. 2020. Per-
+sonalized heartsteps: A reinforcement learning algorithm for optimizing physical activity. Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies 4, 1 (2020), 1­22. [21] Qiao Liu, Yifu Zeng, Refuoe Mokhosi, and Haibin Zhang. 2018. STAMP: short-
+term attention/memory priority model for session-based recommendation. In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining. 1831­1839. [22] Yao Liu, Omer Gottesman, Aniruddh Raghu, Matthieu Komorowski, Aldo A
+Faisal, Finale Doshi-Velez, and Emma Brunskill. 2018. Representation balancing mdps for off-policy policy evaluation. Advances in Neural Information Processing Systems 31 (2018), 2644­2653. [23] Yao Liu, Adith Swaminathan, Alekh Agarwal, and Emma Brunskill. 2020. Provably good batch reinforcement learning without great exploration. arXiv preprint arXiv:2007.08202 (2020). [24] Malte Ludewig and Dietmar Jannach. 2018. Evaluation of session-based recommendation algorithms. User Modeling and User-Adapted Interaction 28, 4-5 (2018), 331­390.
+[25] Jiaqi Ma, Zhe Zhao, Xinyang Yi, Ji Yang, Minmin Chen, Jiaxi Tang, Lichan Hong,
+and Ed H Chi. 2020. Off-policy learning in two-stage recommender systems. In Proceedings of The Web Conference 2020. 463­473. [26] Yifei Ma, Balakrishnan Narayanaswamy, Haibin Lin, and Hao Ding. 2020. Temporal-Contextual Recommendation in Real-Time. In Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining. 2291­2299.
+[27] Ofir Nachum, Yinlam Chow, Bo Dai, and Lihong Li. 2019. Dualdice: Behavioragnostic estimation of discounted stationary distribution corrections. arXiv preprint arXiv:1906.04733 (2019).
+[28] Feiyang Pan, Qingpeng Cai, Pingzhong Tang, Fuzhen Zhuang, and Qing He. 2019. Policy gradients for contextual recommendations. In The World Wide Web Conference. 1421­1431.
+
+Mazoure et al.
+[29] Doina Precup. 2000. Eligibility traces for off-policy policy evaluation. Computer Science Department Faculty Publication Series (2000), 80.
+[30] David Rohde, Stephen Bonner, Travis Dunlop, Flavian Vasile, and Alexandros
+Karatzoglou. 2018. Recogym: A reinforcement learning environment for the problem of product recommendation in online advertising. arXiv preprint arXiv:1808.00720 (2018). [31] Joshua Romoff, Peter Henderson, Ahmed Touati, Emma Brunskill, Joelle Pineau, and Yann Ollivier. 2019. Separating value functions across time-scales. In International Conference on Machine Learning. PMLR, 5468­5477. [32] John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz. 2015. Trust region policy optimization. In International conference on machine learning. 1889­1897. [33] John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel.
+2015. High-dimensional continuous control using generalized advantage estimation. arXiv preprint arXiv:1506.02438 (2015). [34] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. 2017. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347 (2017).
+[35] Guy Shani, David Heckerman, Ronen I Brafman, and Craig Boutilier. 2005. An MDP-based recommender system. Journal of Machine Learning Research 6, 9 (2005).
+[36] Sungryull Sohn, Yinlam Chow, Jayden Ooi, Ofir Nachum, Honglak Lee, Ed Chi, and Craig Boutilier. 2020. BRPO: Batch Residual Policy Optimization. arXiv preprint arXiv:2002.05522 (2020).
+[37] MA Styblinski and T-S Tang. 1990. Experiments in nonconvex optimization:
+stochastic approximation with function smoothing and simulated annealing. Neural Networks 3, 4 (1990), 467­483. [38] Yi Su, Pavithra Srinath, and Akshay Krishnamurthy. 2020. Adaptive Estimator Selection for Off-Policy Evaluation. arXiv preprint arXiv:2002.07729 (2020). [39] Wen Sun, J Andrew Bagnell, and Byron Boots. 2018. Truncated horizon policy search: Combining reinforcement learning & imitation learning. arXiv preprint arXiv:1805.11240 (2018). [40] Adith Swaminathan, Akshay Krishnamurthy, Alekh Agarwal, Miroslav Dudík,
+John Langford, Damien Jose, and Imed Zitouni. 2016. Off-policy evaluation for slate recommendation. arXiv preprint arXiv:1605.04812 (2016). [41] Yunhao Tang, Michal Valko, and Rémi Munos. 2020. Taylor expansion policy optimization. In International Conference on Machine Learning. PMLR, 9397­9406. [42] Philip Thomas and Emma Brunskill. 2016. Data-efficient off-policy policy evaluation for reinforcement learning. In International Conference on Machine Learning. 2139­2148.
+[43] Claire Vernade, Andras Gyorgy, and Timothy Mann. 2020. Non-Stationary Delayed Bandits with Intermediate Observations. In International Conference on Machine Learning. PMLR, 9722­9732.
+[44] Qingyun Wu, Hongning Wang, Liangjie Hong, and Yue Shi. 2017. Returning
+is believing: Optimizing long-term user engagement in recommender systems. In Proceedings of the 2017 ACM on Conference on Information and Knowledge Management. 1927­1936. [45] Ming Yin, Yu Bai, and Yu-Xiang Wang. 2021. Near-Optimal Offline Reinforcement Learning via Double Variance Reduction. arXiv preprint arXiv:2102.01748 (2021). [46] Tianhe Yu, Garrett Thomas, Lantao Yu, Stefano Ermon, James Zou, Sergey Levine,
+Chelsea Finn, and Tengyu Ma. 2020. Mopo: Model-based offline policy optimization. arXiv preprint arXiv:2005.13239 (2020). [47] Yuanxing Zhang, Pengyu Zhao, Yushuo Guan, Lin Chen, Kaigui Bian, Lingyang
+Song, Bin Cui, and Xiaoming Li. 2020. Preference-aware mask for sessionbased recommendation with bidirectional transformer. In ICASSP 2020-2020 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP). IEEE, 3412­3416.
+[48] Guanjie Zheng, Fuzheng Zhang, Zihan Zheng, Yang Xiang, Nicholas Jing Yuan,
+Xing Xie, and Zhenhui Li. 2018. DRN: A deep reinforcement learning framework for news recommendation. In Proceedings of the 2018 World Wide Web Conference. 167­176.
+
+

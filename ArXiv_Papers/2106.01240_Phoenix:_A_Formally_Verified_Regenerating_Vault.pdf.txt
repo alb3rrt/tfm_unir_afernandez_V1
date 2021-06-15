@@ -1,0 +1,504 @@
+arXiv:2106.01240v1 [cs.CR] 2 Jun 2021
+
+Phoenix: A Formally Verified Regenerating Vault
+Uri Kirstein, Shelly Grossman, Michael Mirkin, James Wilcox, Ittay Eyal, Mooly Sagiv
+Technion, Israel Institute of Technology and Certora
+Abstract. An attacker that gains access to a cryptocurrency user's private keys can perform any operation in her stead. Due to the decentralized nature of most cryptocurrencies, no entity can revert those operations. This is a central challenge for decentralized systems, illustrated by numerous high-profile heists. Vault contracts reduce this risk by introducing artificial delay on operations, allowing abortion by the contract owner during the delay. However, the theft of a key still renders the vault unusable and puts funds at risk. We introduce Phoenix, a novel contract architecture that allows the user to restore its security properties after key loss. Phoenix takes advantage of users' ability to store keys in easily-available but less secure storage (tier-two) as well as more secure storage that is harder to access (tierone). Unlike previous solutions, the user can restore Phoenix security after the theft of tier-two keys and does not lose funds despite losing keys in either tier. Phoenix also introduces a mechanism to reduce the damage an attacker can cause in case of a tier-one compromise. We formally specify Phoenix's required behavior and provide a prototype implementation of Phoenix as an Ethereum contract. Since such an implementation is highly sensitive and vulnerable to subtle bugs, we apply a formal verification tool to prove specific code properties and identify faults. We highlight a bug identified by the tool that could be exploited by an attacker to compromise Phoenix. After fixing the bug, the tool proved the low-level executable code's correctness.
+1 Introduction
+Cryptocurrency protocols allow users to exchange virtual currency tokens. User funds are secured with cryptographic tools, and each user controls her funds by issuing cryptographically-signed orders called transactions. The raison d'être of most cryptocurrencies is their decentralization: no central party controls the state of their system and its progress [37,48]. Cryptocurrencies are usually implemented on top of a blockchain [36], an immutable, tamper-free ledger of transactions. That is, once a transaction has taken place, it cannot be reverted [6], even for those currencies that are centrally controlled [16,39]. This is in stark difference to traditional banking [4] and similar systems [1]. There, if a mistaken transaction is detected due to fraud, theft, or a mistake, the system operator can revert it and undo the harm.
+The implication is that private key security is a prominent concern that accompanies the usage of cryptocurrencies. In numerous events, funds were lost
+
+due to mistakes such as accidental transfers to wrong destinations [15,18,40,7]. Moreover, private keys are highly coveted by hackers, as they allow for immediate theft of funds; indeed, theft cases on all major cryptocurrencies have been reported, worth millions of USD [45,46]. In all such cases, users have no recourse.
+Various approaches have been suggested to improve user-side security. One is to require multiple keys per operation [26]; thus, only if several keys are compromised can the funds be stolen. However, if some of the keys are lost, the funds are also lost. cold storage [17] is the practice of storing a key on a device not connected to the internet, possibly a piece of paper. However, cold storage is more cumbersome to access, making it inappropriate for routine operations.
+Möser, Eyal, Sirer et al. [34] (MES) introduced the idea of a cryptocurrency vault. A vault is a smart contract ­ an automaton implemented by the underlying cryptocurrency that controls funds and can execute arbitrary logic. For funds in the vault, money withdrawal is delayed by an amount of time set by the user, e.g., 24 hours. During this period, the owner can cancel the transaction. The transaction is not complete until the delay time has elapsed, but during this time, it allows the rightful owner to abort the transaction if it was issued by mistake or by an attacker after a theft. In contemporary work, Bartoletti, Lande, Zunino et al. [20] (BLZ) propose using a different key for transaction abortion, one that is harder to steal. However, in both works, once any key is lost or stolen, the vault contract is unusable. We review previous and related work in Section 2.
+In this paper, we present Phoenix Vault, a novel smart-contract whose security can be restored despite the theft of private keys, resurrected like the mythical Phoenix. Phoenix employs two tiers of privileged keys, which can be added and removed under certain limitations. It takes advantage of the fact that each user can use two different types of storage: accessible storage, which is vulnerable, and secure storage, which is hard to access. Tier-two addresses are stored in accessible storage; each is used to initiate withdrawals and abort a withdrawal it mistakenly initiated. Tier-one addresses are stored in secure storage; they are used to abort any transaction (issued by an attacker), add tier-one and tiertwo addresses dynamically, and remove tier-two addresses. In case of a theft of a tier-two address, the Phoenix can then be recovered by replacing the stolen key with a new one. An attacker compromising a tier-one address can initiate withdrawals with several tier-two addresses they generate. Phoenix introduces a novel mechanism to avoid attrition warfare in this scenario: the user can put the contract in a timed lock-down state, such that no withdrawals are possible. We overview Phoenix's specification and underlying model in Section 3.
+We implemented Phoenix on the Ethereum blockchain [21,49]. Ethereum's blockchain supports arbitrarily complex contracts [38] written in a compiled JavaScript-like language called Solidity [8]. We implemented Phoenix in Solidity and executed it in a local testnet to prove its viability. Phoenix is implemented in two parts. A library implements the ledger holding all withdrawal requests, and the main contract implements the maintenance of the two tiers of addresses,
+2
+
+the operations, and their authorization. We discuss our implementation and code architecture in Section 4.
+Phoenix's development was accompanied by reasoning about high-level properties describing its precise specification. This reasoning requires mathematically formulating the exact high-level properties of the code and developing techniques for proving that the actual code adheres to the specification. We use the Certora Prover [5] to verify that the low-level EVM bytecode [49], as compiled from Solidity, obeys the high-level specification. We used the tool to automatically find subtle bugs and prove their absence. For example, the tool uncovered a bug that could be exploited to perform a denial of service attack. For details, see Section 5.
+Our contributions can be summarized as follows:
+­ A model that formally distinguishes accessible and secure storage. ­ A formal safety specification of a novel Phoenix vault. ­ A mechanism for retrieving funds even if all withdrawal keys were stolen or
+lost. ­ A prototype implementation of a Phoenix vault on the Ethereum network. ­ Formal reasoning about the bytecode implementation.
+Our Solidity code, test file, and specification files are published as open-source code at the link found in Section 4.
+We conclude in Section 6, where we also show potential applications of Phoenix for corporate access management and a will contract.
+2 Background and Related Work
+2.1 Lost Keys Problem
+By and large, in cryptocurrencies, spending of funds is done via private keys [28]. Whoever knows the key has complete control over the funds and can instantly move the funds by spending them however they want. The tamper-free nature of the blockchain makes this transaction final [15,18]. In the traditional financial system, an erroneous transfer to the wrong recipient by a stolen credit card or wire fraud can be reverted by the credit company or the legal system to recover the funds [4,1]. However, no authority, regulatory body, or institutional apparatus can change the history of the blockchain [13]. Therefore, such money transactions are irrecoverable without an agreement to change the currency's protocol by a large portion of the currency's participants [34].
+In the history of Ethereum, only one precedent exists where a significant portion of the community agreed to revert a transaction. This incident was a reaction to The DAO [17] smart contract that held 3.6 million ether, which almost everyone believed had been stolen. This move was controversial and spawned a fork of Ethereum into two different networks - Ethereum and Ethereum Classic [17]. Retrieving stolen money is, therefore, impractical for an individual.
+Due to the irreversibility of transactions, cryptocurrency private keys are attractive theft targets. Once an adversary successfully transfers funds to their
+3
+
+possession, nothing can be done to revert the action, even if the breach was noticed moments after the attack. There have been several such attacks on most major cryptocurrencies worth millions of USD. It is noteworthy that not just individuals suffer from this problem, but large companies and major players fall prey to these attacks too [45,46].
+Key theft is a part of the more general problem of the key being inaccessible. A password's storage device might be damaged, making key retrieval impossible. If no storage device is used, there is a total reliance on the owner's memory, who might forget the password. There is also the risk of the owner passing away. If a wallet owner is deceased without sharing the key beforehand, the wallet's contents will remain forever inaccessible [42].
+A study from 2019 estimated 20% of all mined Bitcoin has been lost for various reasons [30]. Consequentially, safely storing keys is among the most concerning security vulnerabilities from the user's perspective. It limits a consumer's trust in cryptocurrency [23]. The lack of adequate private-key security solutions is likely a factor that has prevented widespread adoption of the technology [24].
+2.2 Related Work
+The simplest solution to the problem is to use a cryptocurrency network with reversible transactions. Gurcan et al. have proposed a cryptocurrency model that allows the cancellation of transactions [27]. They base their model on a bitcoinlike blockchain. However, to our knowledge, no cryptocurrency network in use today allows the reversal of transactions. Until such technology is developed, secure key management is a necessity.
+Different approaches to key management offer different trade-offs between availability, security, and convenience [37]. The most convenient and available solution is storing the keys on a local device, be it a phone or a computer. However, the device is highly vulnerable to attacks; it can be stolen or infected by malware such as viruses, worms, Trojan horses and ransomware [35].
+A common practice for securely storing cryptocurrency funds is by using cold storage [17]. In cold storage, the key is stored on a device not connected to the internet. However, regular interaction with the key is still required [34]. While money can be deposited to the cold storage using public knowledge, spending must be done using the private key. These interactions are points of vulnerability, during which an attacker can get hold of the key. Additionally, cold storage is only as secure as the storage device's physical security. Protecting a physical device is not necessarily easier than protecting a digital asset.
+An alternative to cold storage is never to use a physical device at all and remember the password. One method to do so is to use a Brain Wallet, a way to create keys from an easy-to-remember passphrase. Several companies provide this service, such as Keybase's WarpWallet [32,31]. Brain Wallets introduce the risk of the passphrase being forgotten, as it is not stored anywhere. Brain Wallets are also susceptible to dictionary attacks. Attackers can perform offline guesses of word combinations from a word list to test them against a candidate password [47]. Many secret keys can be targeted at once, mitigating the costs to
+4
+
+launch such attacks. Perhaps due to their inherent risk, few brain wallets were used in practice. Vasek et al. estimated the number of Brain Wallet in active use in 2016 to be less than 1,000 [47].
+Many companies have tried to solve the problem of secure key storage via various methods. Curv [9] replaces keys with multi-party computational protocols (MPCs). Another project named Ethereum Vault [13] implements a plugin for existing HashiCorp Vault software for generic data secure storage as a vault for Ether. The closest form of a commercial solution to the one we present in this paper is CoinBase Vault [2], which also features time delayed withdrawals. The underlying problem with all of them is the need to trust a third party not to save private keys for malicious purposes or sell them. Even if the user does trust the company providing key security services, the user cannot verify their products' quality and security against adversaries' attempts. Our Vault is an open-source code that was formally verified.
+Vault contracts. The basic vault contract structure was first proposed by MES [34]. It set the foundation for having withdrawals delayed in time instead of happening immediately. In their idea, the vault's key can be used not just to withdraw money, but also to abort withdrawal requests that have not yet been waiting for the entire delay period. This scheme ensures that as long as the key's owner monitors the vault once every period equal to the length of the delay, no unauthorized withdrawals can materialize. The user can prevent transfers to wrong addresses if the error is spotted before the delay has passed. One of the solution's problems is that it relies on a single, frequently used key.
+BLZ vaults [20] are an improved design of the contract, introducing two different keys. The first key is used for withdrawals, and the second key is used for the cancellation of withdrawals. Cancellations are rare events that only happen when the user erroneously sent a withdrawal request, or if the first key was stolen. The second key is far less used and exposed than the first, increasing its security. However, this solution offers no means of recovery once a key has been compromised. A stolen key renders the vault useless - either the owner has to cancel withdrawals in perpetuity as an attrition war that costs both sides gas, or the owner cannot withdraw the money. Phoenix has a solution to completely recover from the loss or theft of the low privilege key. It features a mechanism to reach a stationary position that does not incur any further loss of money under any key theft. Unlike BLZ vaults, our Phoenix design was implemented on an existing blockchain network.
+Swambo et al. have proposed a custody protocol based on a vault contract for Bitcoin to control funds from loss and theft [44]. They implemented their vault contract using pre-signed transactions and secure key-deletions. They are the only ones to our knowledge that have published a vault contract's code online and tested it. However, their solution requires numerous hardware devices. Phoenix requires no external devices and is economical for the storage of even modest amounts. Additionally, their solution assumes there is no infiltration; the operators of the protocol are honest. Our proposition does not assume the
+5
+
+same and mitigates the risk even when an adversary has the same capabilities as Phoenix's owner.
+3 Model and Specification Overview
+In this section, we overview the model and specification of Phoenix. A formal specification is presented in Section 5.1.
+3.1 Model
+Users and the blockchain. The system comprises users with access to a cryptocurrency blockchain. Each user can generate a private-public key pair, and the public key serves as an address. The blockchain assigns an amount to each address. At any time a user can query the blockchain for the amount assigned to an address; this is the cryptocurrency controlled by that address. A user can issue an order to transact cryptocurrency from one address to another. Such an order is called a transaction. It is valid only if signed with the sending address's private key, assuring only the cryptocurrency owner can send it.
+The blockchain aggregates valid transactions from the users and processes them in groups called blocks (hence, blockchain) at set intervals.
+Users can also issue transactions that initiate and interact with so-called smart contracts. These are logical stateful automatons that also control cryptocurrency ­ they can receive it and send it.
+Storage and adversary. Each user can use two types of storage for her private keys. The first is secure storage, which is highly secure, but also cumbersome to access. This could be a physical bank safe. The second is accessible storage, which can be conveniently accessed, but is more prone to theft. This could be a mobile phone application, for example.
+An adversary might gain access to either storage type, though the former is much less likely. Moreover, she might do that covertly, without the victim realizing her information was accessed.
+We consider two attack types. In an attack of Type I, the adversary obtains one or more addresses from the secure storage and tries to transact funds from the control of a user to herself. In an attack of Type II, the adversary obtains one or more addresses from the accessible storage and tries the same. In practice, this attack is more common as accessible storage is (by definition) more vulnerable.
+Goal. Our goal is to design a contract that enables a user to fully use it with accessible-storage access only and secure the user's funds in the face of an attack. In case of a Type I attack, the attacker should not be able to steal any funds, but she may prevent the user from moving her funds. However, in case of a Type II attack, the victim should be able to revoke the stolen keys. Moreover, in case of benign loss of accessible keys, the user should be able to revoke the lost keys and replenish the contract with new ones. Only if all privileged keys of all types are lost should the contract's funds be unreachable.
+6
+
+3.2 Specification Overview
+Based on the goal stated above, we can now present the specification of a Phoenix vault contract. The formal details are in Section 5.1.
+Any user on the network can send cryptocurrency to the Phoenix contract, thus increasing its funds. Phoenix contains two sets of addresses: privileged tierone addresses and less-privileged tier-two addresses. Users interact with Phoenix by performing actions, namely transactions that interact with the contract. Most actions are restricted only to addresses belonging to a particular tier, privileged to perform that action. Users are to store tier-one addresses in secure storage and tier-two addresses in accessible storage. Roughly, tier-two addresses are used for withdrawal, and tier-one addresses are used to abort malicious withdrawals and update the address sets.
+Withdrawal. Tier-two addresses are used to withdraw money from Phoenix to an arbitrary address. As money withdrawal is an everyday action, users can keep their tier-two private keys in accessible storage. Given a withdrawal transaction, Phoenix withholds the funds for a predetermined delay duration before it can be transferred. During the delay duration, only a tier-one address or the same tiertwo address that initiated the transfer can cancel the withdrawal and prevent the transfer. Since cancellation is only performed due to attacks or benign errors, they are infrequent, and the overhead of accessing tier-one addresses does not affect regular operation.
+Addresses. We use the same primary key functions as BLZ vaults [20]. We add two innovations. The first is allowing the existence of several keys of each tier. The second is having dynamic keys: the user can add addresses to both tiers and remove tier-two addresses at will. This allows using Phoenix for various usecases, such as serving a company with multiple workers or function as a smart will. We expand on these use cases in Section 6. Besides expanded usability, these two innovations play a vital role in the wallet's ability to recover from attacks, as will be demonstrated next.
+We want to minimize the usage of tier-one keys. Therefore, we forbid an address to have both tier-one and tier-two privileges. A tier-two address can cancel its own withdrawals, in cases of an erroneous withdrawal.
+A single tier-one address must be assigned at Phoenix's creation time. A tierone address can add other tier-one and tier-two addresses. A tier-one address cannot be removed from Phoenix's tier-one addresses set; else, an attacker could cause the creator of Phoenix to lose control over it. Appendix A summarizes the differences between the two privileges.
+Key Loss Recovery. Assuming no malicious parties, the user can also recover the funds in Phoenix if a key became inaccessible or was forgotten. If a tiertwo key was lost, but the user still possesses a tier-one key, they can generate a new network address and add tier-two privileges to it. If a tier-one address is forgotten or lost, but access to a tier-two key is maintained, the owner can
+7
+
+still withdraw funds from Phoenix, perhaps to a new Phoenix they have created. Only if all tier-one and tier-two addresses are lost or forgotten will Phoenix's funds be inaccessible.
+Type-I Attack Recovery Mechanism. In an attack of type I, the adversary obtains a tier-one address. Using it, the adversary can add tier-two privileges to network addresses they generated and use those tier-two addresses to request withdrawals from Phoenix. Even under this attack, the adversary does not gain control of the funds secured by Phoenix. As long as the user also has access to their tier-one address, they can cancel all the adversary's withdrawals. However, the adversary can do the same to all legitimate withdrawals, rendering Phoenix useless from the user's point of view. Nevertheless, the adversary does not directly profit from this attack, which by itself should deter thieves from trying to steal the Phoenix's user addresses.
+A possible incentive for a type I attack could be to initiate an attrition warfare. The adversary can make frequent withdrawals, forcing the rightful user to cancel them before the delay is over, incurring time and money. The user must be eternally vigilant as each request that evades abortion may empty the funds stored in Phoenix.
+To alleviate this problem and reach a stable state, Phoenix features a time lock mechanism: a tier-one address can lock Phoenix and set a time in the future in which it will be unlocked. While Phoenix is locked, all transfers will fail. A lock's opening time can only be postponed. The resulting equilibrium is a lock with a timestamp far in the future, denying both parties the ability to withdraw money but requiring no interaction from either party to maintain the status quo.
+Type-II Attack Recovery Mechanism. If an adversary possesses a tiertwo address, she can do two things: transfer funds to her own address and abort withdrawals issued by the user with that tier-two address. A tier-one address can remove that tier-two address from Phoenix's tier-two addresses set, then remove all the malicious withdrawals it initiated one by one. Rather than making this a two-step process, we specify that removing a tier-two address also cancels all of its previous withdrawals waiting for the delay to pass. This significantly reduces the number of accesses necessary to the tier-one key. The user can then use the tier-one address to register a new tier-two address. This mechanism provides full recovery in case of a type-II attack, restoring the security to its state before the theft took place.
+A tier-one address can cancel all pending withdrawals with one action. This ability is useful if multiple tier-two addresses were stolen, or if a tier-one was compromised and created several malicious tier-two addresses. It reduces the number of actions required by the secure tier-one key to one.
+Delay. Phoenix's delay value is set at creation time and cannot be changed. As noted by Swambo et al. [44], the choice of the delay's length allows the user to choose their desired balance between accessibility and security. A short delay means less time for the user to respond to a breach and increases the risk of an
+8
+
+unauthorized transaction. On the other hand, a long delay means that the sender and the recipient have to wait longer for every payment, reducing accessibility.
+4 Architecture and Implementation
+We implemented Phoenix in the Solidity language [8], which compiles to a smart contract [21] that runs on the Ethereum Virtual Machine (EVM) [49].
+Initialization. The contract initiates two sets, for tier-one and tier-two addresses. The user that creates the contract initially assigns a single tier-one and a single tier-two address. By default, the tier-two address is the address that sent Phoenix's constructor transaction, for convenience. The tier-one address at contract creation must be different from the address that has sent Phoenix's constructor transaction, to minimize its exposure. The user also chooses a delay interval D for withdrawals.
+Withdrawal. The EVM does not directly support the delayed execution of operations. Each transaction runs atomically at a single point in time. Therefore, withdrawal is performed in two steps. First, a transaction made by a tier-two address initiates a transfer request providing a destination address. Later, another transaction, a withdrawal claim, completes the operation and retrieves the funds. Any key, even unprivileged, can issue withdrawal claims; in fact, it is better not to use a privileged key for this purpose to reduce exposure. The contract makes sure that D blocks have passed since the matching request of the claim. Block count is a good proxy for time, as blocks are generated at exponential intervals with a mean of 15 seconds [49].
+Code architecture. The byte code of the contract was too large to be deployed in one Ethereum transaction, exceeding the maximal gas limit [41] (a measure of contract overhead) of a block on the Ethereum network. It, therefore, comprises a Ledger library and the main contract. As a library, the Ledger must be deployed before the main contract, and the main contract links to its address. Libraries [12] cannot have state variables, cannot receive Ether, and cannot be destroyed. The Ledger must be deployed once, and then every Phoenix contract can link to its address. The Ledger is responsible for recording withdrawal requests. The main contract holds the balance and is mainly responsible for managing access restrictions according to the user tiers.
+Phoenix maintains a map (hash table) from user addresses to their privileges. Privilege examination is a frequent action because most Phoenix interactions are limited to a particular privilege only. Therefore, ensuring it would be done in an average runtime of O(1) is a high priority. Using a map allows adding and deleting addresses in O(1) average time, and guarantees that an address isn't assigned to both tiers.
+We use a doubly-linked list for withdrawal requests. When we remove a tiertwo address, we iterate the list and delete its requests. Each node in the list
+9
+
+represents a request and includes: (1) the amount (a positive integer) we wish to draw from Phoenix's balance, (2) the recipient's network address, (3) the block number at which the request was made (to know when it can be withdrawn) and (4) who initiated it (to allow only the second-tier address that initiated the request to cancel it and not other tier-two addresses).
+Each node in the linked list has an ID. That ID is a cyclic counter, used to identify the request when we want to withdraw it or cancel it. As looking up a node in a linked list has an O(n) time complexity, we use a mapping that gets an ID and returns a pointer to a node in the linked list. Each node includes the ID of the previous and next nodes in the linked list. These IDs can then be looked up using the map. This data structure allows out-of-order insertion and deletion at O(1) complexity. An illustration of the ledger's structure can be found in Appendix C.
+Removing all withdrawal requests of a deleted tier-two address still requires O(n) operations as it is done by traversal over the entire linked list. If the number of nodes grows too big, traversing the list might be more expensive than the Ethereum gas limit [41], rendering Phoenix unusable. The solution is to monitor the request list's size and forbid it to grow over a maximal size limit. That limit is set at the contract's creation time.
+The final problem is implementing the cancellation of all requests in the list at O(1). Setting the head to point to null (ID 0) will make the old transactions inaccessible at list traversal. However, they could still be accessed from the map. The solution is to save an integer field, L, which holds the largest ID of a request deleted by the latest cancel all requests operation. Transactions receive ID numbers in ascending order. Whenever we cancel all requests, we update L to be the last given ID. Whenever we try to access a transaction, we return failure if its ID is lesser or equal to L. There will be an eventual collision in id values when L reaches an overflow. Nevertheless, that requires Phoenix to have 2256 withdrawal requests over its lifetime, an unrealistic scenario.
+We tested the contract using Ganache [11] and Truffle [10] with both black and white box JavaScript scripts. The code is released as open source.1
+5 Formally Verifying the Correctness of the Code
+This section describes the process of formally verifying the code using the Certora Prover [5]. The tool takes as input (1) the EVM bytecode of the contract and (2) a specification describing the correctness properties of the contract. It produces a report describing which correctness properties are valid and which are violated. When a violated property is detected, the tool also produces a counterexample of an input scenario in which the property is violated. The Certora Prover is based on well-established verification techniques in the line of Floyd-Hoare logic [29]. Other examples of similar tools include Dafny [33] and Why3 [25]. In this technique, the correctness properties and the code are converted into a set of logical constraints. They are satisfied if there is an input
+1 https://anonymous.4open.science/r/3b962760-6c42-4ecb-9325-d082d8b1b50b/
+10
+
+leading to a property violation. These logical constraints can be solved using off-the-shelf SMT solvers such as Z3 [22] and CVC4 [19].
+5.1 Formal Specification of Phoenix
+We begin by formalizing the specification presented in Section 3.
+Network and participants. We assume the cryptocurrency's network is based on a blockchain, modeled as a series of blocks B1, B2, . . . . The blocks are ordered chronologically. A network address represents a private-public key pair. A user who knows the private key is owning the address. A participant can interact with Phoenix by using one of their addresses. The interaction is done by taking one of the actions defined below. Actions might have limitations on which addresses can invoke them. We assume a single block B contains a single action.
+Network addresses can be tier-one, tier-two, or neither. The tier-one and tiertwo address groups are disjoint. Addresses not in any tier are called unprivileged addresses. We assume all participants can generate unprivileged addresses at will. A participant could be honest or adversary. An adversary might have network addresses with tier-one or tier-two privileges. In particular, an adversary might own addresses also owned by other honest participants.
+Phoenix. A Phoenix contract, denoted P, is a six-tuple P = (F , D, T1, T2, U , R). F is a non-negative integer representing the amount of cryptocurrency stored in P. D denotes delay, a positive quantity measured in network time. T1 = {T11, T12, . . . , T1m} is a non-empty finite set of tier-one addresses. T2 = {T21, T22, . . . , T2n} is a finite set of tier-two addresses, which can be empty. T1 and T2 are disjoint. U denotes a block, after which the contract is unlocked for cryptocurrency transfers.
+R is a finite set of withdrawal requests r1, r2, . . . , rl. A withdrawal request ri is a five-tuple ri = (idi, amounti, recipienti, creationi, initiatori). idi is a unique identifier for the request. amounti is a positive amount of coins that is to be withdrawn, where 1i|R| amounti  F . recipienti is a network address to which the money should be transferred. creationi is the block number at which ri was added to R. initiatori is a T2 address.
+Actions. We list all actions in Table 1. Each action can be invoked by a participant only if they use a network address with the required privilege. Note that any participant who possesses a T1 address can invoke T2 privileged actions by generating an unprivileged address and adding it as a new T2 address.
+5.2 Verification
+Correctness Properties. The formal verification tool takes as an input a mathematically precise specification. Our specification constitutes of a list of safety properties [14]. A verified safety property indicates that a "bad" state is unreachable. We will describe the properties below in English and provide a
+11
+
+Action
+
+Address Description
+
+Deposit
+
+Any
+
+Increases the value of F.
+
+Request Withdraw
+
+T2
+
+Adds a new request rk to R. Only T2 users can
+
+take this action. If invoked by address T2j, then initiatork = T2j. creationk is equal to the current
+
+block number as tracked by the network. This
+
+action fails unless
+
+1i|R| amounti + amountk  F .
+
+Any
+
+Removes a request rk from R. Decreases F by
+
+amountk. This action can be invoked only if the
+
+current block's number is greater than
+
+creationk + D and greater than U .
+
+Cancel request
+
+T1
+
+Removes a request rk from R.
+
+Cancel all requests T1
+
+After this action is invoked, R = .
+
+Cancel self request T2
+
+Removes a request rk from R, if initiatork is the same address as the T2 that invoked this action.
+
+Lock
+
+T1
+
+Add a T1 address T1
+
+Add a T2 address T1
+
+Remove a T2 address T1
+
+Increases U.
+Adds a user address T1k to T1 if T1k / T1  T2. Adds a user address T2k to T2 if T2k / T1  T2. Removes a T2k address from T2 and all ri  R where initiatori = T2k.
+
+Table 1: Participant actions on Phoenix
+
+formalization in Appendix D. The specification files we used can be found at the code's repository in the link in Section 4.
+The properties were divided into different layers, depending on the implications of their violation. The base layer properties are: (1.1) requests cannot be withdrawn unless they have been kept in Phoenix's records for an amount of time equal or greater than Phoenix's delay; (1.2) a tier-one address can cancel any request at any time; (1.3) Phoenix's delay can never change; (1.4) There is no way to remove a tier-one address and (1.5) Phoenix cannot be destroyed unless it is empty. Property 1.5 is necessary because in Ethereum [12] when a contract is destroyed, the sender of the destroy transaction can send all the funds in the contract to any address they choose.
+The key separation layer properties are: (2.1) an address cannot have both tier-one and tier-two privileges; (2.2) tier-one addresses can only be added by a tier-one address; (2.3) only a tier-two address can spend money; and (2.4) a tier-two address can only remove self-initiated requests. These properties ensure the separation between the two user tiers.
+The recovery layer properties are: (3.1) money cannot leave Phoenix while it is locked; (3.2) the unlock time can only be postponed; (3.3) only tier-one addresses can lock Phoenix; (3.4) only tier-one addresses can remove tier-two addresses; and (3.5) only tier-one addresses can add tier-two addresses. Recov-
+
+12
+
+ery layer properties ensure the correctness of Phoenix's recovery mechanisms as detailed in Section 3.
+The tier-one minimization layer properties are: (4.1) there are always enough funds in Phoenix to pay for all requests; (4.2) Phoenix cannot send money to itself; (4.3) Phoenix cannot send money to the zero address; and (4.4) removing a tier-two address from Phoenix also removes all requests initiated by that address. The tier-one minimization layer properties reduce the number of transactions that require a T1 address, reducing its exposure.
+Property 4.1 prevents a delay-evasion attack as described in Section 5.3. A Phoenix sending money to itself is a pure waste of resources. In Solidity, the zero address does not belong to any entity. Sending money to that address is akin to burning it [12]. Properties 4.2 and 4.3 prevent erroneous transactions to those addresses, which would require T1 intervention to cancel. Regarding property 4.4, if removing a T2 address would not remove all requests initiated by it, the T1 address could remove them manually, one at a time. However, manual deletion increases the probability of an error.
+The vault contract presented by MES [34] only satisfies the properties in the Base Layer. BLZ vaults [20] also satisfy the properties in the key separation layer. Phoenix satisfies all properties listed above.
+5.3 Attacks, Their Mitigation and Formal Verification
+The automatic prover uncovered several bugs in our initial implementation. The most severe issue was a violation of property 4.1 (Section 5.2), which we now describe.
+The bug is related to what we call a delay-evasion attack. In this attack, the attacker adds one or more delay-evading requests that cannot be completed due to insufficient funds at attacking time. Later, once sufficient funds are deposited, an immediate claim for the delay-evading requests could be made without waiting for the delay period.
+Formally, let Fj be the value of F at time j. At time 0, a request rk is made for an amount k > F0. If at time 1 > 0 + D, F1  k, the attacker claims rk without waiting for a D amount of time after the money was deposited. The attack can be executed with a set of requests rk1 , rk2 . . . rkm such that
+1im amountki > F0. To prevent delay-evasion, we check for every new request if the sum of the amounts of existing requests and the new request is smaller than F. If the condition does not hold, the request is aborted. However, our code did not check if the sum of all requests overflows. EVM uses 256-bit wide integers [49] and we denote their maximal value as MAX_INT. This weakness can be exploited in two ways: a delay-evasion attack and a denial of service (DoS) attack. We start by describing the DoS. We assume a nonempty R and denote K = 1i|R| amounti > 0, where K  F . An attacker requests to withdraw MAX_INT - K + 1. An overflow occurs and the request is accepted, as now 1i|R| amounti + MAX_INT - K + 1 = 0. Then, the attacker waits until a request for an amount of L  K is claimed. The new sum
+13
+
+head
+
+Request amount = 2
+
+Stage 1 F =3
+amount = 2
+
+head
+
+Request for amount = MAX_INT-1
+
+Request amount = 2
+
+Request amount=
+MAX_INT-1
+
+Stage 2 F =3
+amount = 0
+
+Withdraw request for amount 2
+
+head
+
+Request amount=
+MAX_INT-1
+
+Stage 3 F =1
+amount = MAX_INT-1
+
+Fig. 1: Denial of Service attack. During stages 1 and 2, property 4.1 of Section 5.2 holds. At stage 3, the property is violated. If, after stage 3, a user tries to request the transfer of 1 coin, the action will fail despite Phoenix having sufficient funds.
+over R is MAX_INT - L + 1. Hence, any request with an amount smaller than L will not overflow. If the sum is greater than F (which is the realistic case), such requests must fail. An example scenario where K = 2, L = 2 is illustrated in Figure 1.
+The bug's second manifestation is in a delay-evasion attack. We again assume a non-empty ledger, denote K = 1i|R| amounti > 0 where K  F . The attack begins with a request to withdraw MAX_INT - K + 1. Overflow occurs, and the request is accepted as 1i|R| amounti + MAX_INT - K + 1 = 0. Then, the attacker issues two consecutive requests: first for an amount equal to L  F, and second to an amount equal to MAX_INT - L + 1. After these two requests, the sum over R is still equal to 0. The attacker can continue to issue such pairs of requests, with different values for L, preserving the sum at value 0. The first requests in those pairs are the delay-evading requests. Suppose at any point in the future, after D blocks since the attacker's actions elapsed, a value of L or greater is deposited. In that case, the delay-evading request for L can be withdrawn immediately after the deposit. An example scenario where K = 2, F = 2, L = 2 is illustrated in Figure 2.
+The bug fix is to check explicitly if an overflow occurs in computing the sum of amounts when adding a new request. If an overflow is detected, we reject the request. The formal verification tool proved the correctness of the code after the fix.
+
+5.4 Limitations of the Verification
+We have only proved that the properties are correct for cases where the number of loop iterations is one or less. The increase from one iteration to two introduces many more counterexamples, rising from the need to verify invariants of a linked
+
+14
+
+head Request
+amount = 2
+
+Stage 1 F =2
+amount = 2
+
+Request for amount = MAX_INT-1
+
+head Request
+amount = 2
+
+Request amount= MAX_INT-1
+
+Stage 2 F =2
+amount = 0
+
+Request for amount = 2
+
+head Request
+amount = 2
+
+Request amount= MAX_INT-1
+
+Request amount = 2
+
+Stage 3 F =2
+amount = 2
+
+Fig. 2: Delay-evasion attack. The actions in stages 2 and 3 preserve the sum of the amounts but can be used to withdraw freshly deposited funds. For example, by repeating stages 2 and 3 n times, a deposit of up to 2n can be withdrawn by the attacker immediately.
+list (see Section 4). For example, we need to verify that the list does not contain cycles or branches, and that forward and backward arrows are consistent.
+
+6 Conclusion
+We presented Phoenix, a wallet contract that allows for full recovery after the most common forms of attack and partial recovery against the rest. We defined a formal model for Phoenix, implemented it in Solidity, and formally verified it.
+The mechanisms presented in Phoenix can be extended and applied to additional use-cases. One is to allow for rate-limited withdrawals without delays ­ permit small amounts to be withdrawn immediately up to a limit, with that limit reset in regular intervals.
+Phoenix's hierarchical structure can be utilized in organizations, enabling them to assign multiple employees with withdrawal privileges that are revoked if they leave the organization. Phoenix can be further extended to more hierarchy levels ­ a dynamic version of HD-wallets [3].
+An additional use-case is a digital will [43,42]. The owner initiates a Phoenix contract keeping a T1 address for herself and adding her heirs as T2 addresses. As long as the owner is alive, the heirs cannot withdraw money from Phoenix; she can cancel such requests. Once the owner is deceased, the heirs can withdraw the money freely. This can be further extended to support dynamic allocation to multiple heirs.
+
+15
+
+References
+
+1. 12 CFR Part 1026 - Truth in Lending (Regulation Z). publisher: United States
+
+government. URL: https://www.consumerfinance.gov/policy-compliance/
+
+rulemaking/regulations/1026/.
+
+2. Bitcoin, Litecoin, & Ethereum Vault. Digital currency wallets are great for day-
+
+to-day spending, but storing large amounts of digital currency for the long term
+
+requires extra security. URL: https://www.coinbase.com/vault.
+
+3. bitcoin/bips. URL: https://github.com/bitcoin/bips.
+
+4. Can I cancel a money transfer? publisher: United States govern-
+
+ment. URL: https://www.consumerfinance.gov/ask-cfpb/can-i-cancel-a-
+
+money-transfer-en-1737/.
+
+5. Certora Prover. URL: https://www.certora.com.
+
+6. Irreversible Transactions - Bitcoin Wiki. URL: https://en.bitcoin.it/wiki/
+
+Irreversible_Transactions.
+
+7. One User Accidentally Sends $520,000 in BTC to
+
+Wrong Wallet.
+
+URL: https://cointelegraph.com/news/
+
+one_user_accidentally_sends_520_000_in_btc_to_wrong_wallet.
+
+8. Solidity -- Solidity 0.6.6 documentation.
+
+URL: https://
+
+solidity.readthedocs.io/en/v0.6.6/index.html.
+
+9. Unlocking the Value of Digital Assets. publisher: Curv Inc. URL: https:
+
+//info.curv.co/unlocking-the-value-of-digital-assets.
+
+10. trufflesuite/truffle, June 2015. URL: https://github.com/trufflesuite/truffle.
+
+11. trufflesuite/ganache-cli, January 2016. URL: https://github.com/trufflesuite/
+
+ganache-cli.
+
+12. Contracts -- Solidity 0.6.11 documentation, December 2019. publisher:
+
+Ethereum foundation. URL: https://solidity.readthedocs.io/en/v0.6.11/
+
+contracts.html.
+
+13. immutability-io/vault-ethereum, July 2020. original-date: 2017-12-01T16:16:56Z.
+
+URL: https://github.com/immutability-io/vault-ethereum.
+
+14. Bowen Alpern and Fred B Schneider. Defining liveness. Information processing
+
+letters, 21(4):181­185, 1985.
+
+15. Anwar Alruwaili and Dov Kruger. Intelligent transaction techniques for blockchain
+
+platforms. In 2019 International Conference on Computing, Electronics & Com-
+
+munications Engineering (iCCECE), pages 177­182. IEEE, 2019.
+
+16. Elli Androulaki, Artem Barger, Vita Bortnikov, Christian Cachin, Konstantinos
+
+Christidis, Angelo De Caro, David Enyeart, Christopher Ferris, Gennady Lavent-
+
+man, Yacov Manevich, et al. Hyperledger fabric: a distributed operating system
+
+for permissioned blockchains. In Proceedings of the thirteenth EuroSys conference,
+
+pages 1­15, 2018.
+
+17. Andreas M Antonopoulos and Gavin Wood. Mastering ethereum: building smart
+
+contracts and dapps. O'reilly Media, 2018.
+
+18. Susan Athey, Ivo Parashkevov, Vishnu Sarukkai, and Jing Xia. Bitcoin pricing,
+
+adoption, and usage: Theory and evidence. 2016.
+
+19. Clark Barrett, Christopher L. Conway, Morgan Deters, Liana Hadarean, Dejan
+
+Jovanovi, Tim King, Andrew Reynolds, and Cesare Tinelli. Cvc4. In Computer
+
+Aided Verification, 2011.
+
+20. Massimo Bartoletti, Stefano Lande, and Roberto Zunino. Bitcoin covenants un-
+
+chained. arXiv preprint arXiv:2006.03918, 2020.
+
+16
+
+21. Vitalik Buterin et al. Ethereum white paper: a next generation smart contract & decentralized application platform. First version, 53, 2014.
+22. Leonardo de Moura and Nikolaj Bjørner. Z3: An efficient smt solver. In Tools and Algorithms for the Construction and Analysis of Systems, 2008.
+23. Peter D DeVries. An analysis of cryptocurrency, bitcoin, and the future. International Journal of Business Management and Commerce, 1(2):1­9, 2016.
+24. Pouyan Esmaeilzadeh, Subramanian Hemang, and Karlene Cousins. Individuals' cryptocurrency adoption: A proposed moderated-mediation model. 2019.
+25. Jean-Christophe Filliâtre and Andrei Paskevich. Why3: Where programs meet provers. In Proceedings of the 22nd European Conference on Programming Languages and Systems, ESOP'13, page 125­128, 2013.
+26. Karan Singh Garewal. Cryptocurrency transaction processing. In Practical Blockchains and Cryptocurrencies, pages 113­136. Springer, 2020.
+27. Önder Gürcan, Alejandro Ranchal Pedrosa, and Sara Tucci-Piergiovanni. On cancellation of transactions in bitcoin-like blockchains. In OTM Confederated International Conferences" On the Move to Meaningful Internet Systems", pages 516­533. Springer, 2018.
+28. Andrew M Hinkes. Throw away the key, or the key holder? coercive contempt for lost or forgotten cryptocurrency private keys, or obstinate holders. Northwestern Journal of Technology and Intellectual Property, 16(4):225, 2019.
+29. Charles Antony Richard Hoare. An axiomatic basis for computer programming. Communications of the ACM, 12(10):576­580, 1969.
+30. Elliott Krause. A Fifth of All Bitcoin Is Missing. These Crypto Hunters Can Help. Wall Street Journal, July 2018. URL: https://www.wsj.com/articles/a-fifthof-all-bitcoin-is-missing-these-crypto-hunters-can-help-1530798731.
+31. Max Krohn and Chris Coyne. WarpWallet - deterministic bitcoin wallet generator. publisher: Keybase. URL: https://keybase.io/warp/warp_1 .0.9_SHA256_a2067491ab582bde779f4505055807c2479354633a2216b22cf1e92d1 a6e4a87.html.
+32. Max Krohn and Chris Coyne. keybase/warpwallet, May 2020. original-date: 201311-15T19:57:34Z. URL: https://github.com/keybase/warpwallet.
+33. K Rustan M Leino. Dafny: An automatic program verifier for functional correctness. In International Conference on Logic for Programming Artificial Intelligence and Reasoning, pages 348­370. Springer, 2010.
+34. Malte Möser, Ittay Eyal, and Emin Gün Sirer. Bitcoin covenants. In International Conference on Financial Cryptography and Data Security, pages 126­141. Springer, 2016.
+35. Aoi Nakamoto and W-Shield Technology. W-shield: Protection against cryptocurrency wallet credential stealing. ResearchGate, 2018. URL: https: //www.researchgate.net/profile/Aoi_Nakamoto/publication/324029106_WShield_Protection_against_Cryptocurrency_Wallet_Credential_Stealing/ links/5ab9d5e845851515f5a0d8ea/W-Shield-Protection-againstCryptocurrency-Wallet-Credential-Stealing.pdf.
+36. Satoshi Nakamoto. Bitcoin: A peer-to-peer electronic cash system. Technical report, 2008.
+37. Arvind Narayanan, Joseph Bonneau, Edward Felten, Andrew Miller, and Steven Goldfeder. Bitcoin and cryptocurrency technologies: a comprehensive introduction. Princeton University Press, 2016.
+38. Tai D Nguyen, Long H Pham, Jun Sun, Yun Lin, and Quang Tran Minh. sfuzz: An efficient adaptive fuzzer for solidity smart contracts. arXiv preprint arXiv:2004.08563, 2020.
+17
+
+39. Kari Paul. What is Libra? All you need to know about Facebook's new cryptocurrency, June 2019. URL: http://www.theguardian.com/technology/2019/jun/18/ what-is-libra-facebook-new-cryptocurrency.
+40. Nathan Reiff. 20% of All BTC is Lost, Unrecoverable, Study Shows. URL: https://www.investopedia.com/news/20-all-btc-lost-unrecoverablestudy-shows/.
+41. REYNALDO. Ethereum miners increase gas limit to 12.5 million, network health at risk?, June 2020. URL: https://www.crypto-news-flash.com/ethereumminers-increase-gas-limit-to-12-5-million-per-block-network-healthat-risk/.
+42. Mitchell Rice. Cryptocurrency: History, advantages, disadvantages, and the future. 2019.
+43. István András Seres, Omer Shlomovits, and Pratyush Ranjan Tiwari. Cryptowills: How to bequeath cryptoassets. IACR Cryptol. ePrint Arch., 2020:283, 2020.
+44. Jacob Swambo, Spencer Hommel, Bob McElrath, and Bryan Bishop. Custody protocols using bitcoin vaults. arXiv preprint arXiv:2005.11776, 2020.
+45. Andrea Tan. Timeline: Growing List of Major Cryptocurrency Heists, February 2018. URL: https://www.insurancejournal.com/news/international/2018/02/ 01/479206.htm.
+46. Theo Tsihitas. The Biggest Cryptocurrency Heists of All Time, June 2019. URL: https://www.comparitech.com/crypto/biggest-cryptocurrency-heists/.
+47. Marie Vasek, Joseph Bonneau, Ryan Castellucci, Cameron Keith, and Tyler Moore. The bitcoin brain drain: a short paper on the use and abuse of bitcoin brain wallets. Financial Cryptography and Data Security, Lecture Notes in Computer Science. Springer, 2016.
+48. Paul Vigna and Michael J Casey. The age of cryptocurrency: how bitcoin and the blockchain are challenging the global economic order. Macmillan, 2016.
+49. Gavin Wood et al. Ethereum: A secure decentralised generalised transaction ledger. Ethereum project yellow paper, 151(2014):1­32, 2014.
+18
+
+A Comparison Between User Tiers
+We summarize the roles of the two tier addresses in Table 2.
+
+Tier-One Address
+
+Tier-Two Address
+
+Main function
+
+cancel unauthorized transfers money transfer
+
+Usage frequency rarely
+
+daily
+
+Appointed by
+
+a tier-one address
+
+a tier-one address
+
+Degradation
+
+impossible
+
+by a tier-one address
+
+Request cancellation can cancel any request
+
+can only cancel requests they initiated
+
+Lock
+
+can lock Phoenix
+
+cannot lock Phoenix
+
+Wallet termination can only terminate an empty Phoenix
+
+cannot terminate
+
+Table 2: Comparison of user tiers
+
+19
+
+B Comparison of Monetary Losses Between Phoenix and a Vault Contract
+We compare the monetary losses to the owner due to attacks and benign key losses between Phoenix and a BLZ vault contract [20] in Figure 3. When comparing attacks, we assume an asymmetric situation where the attacker is malicious and does care for her self-incurred monetary losses.
+
+FF
+
+F F F*
+
+Tier 1 Tier 2
+Key Loss BLZ Vault
+
+Tier 1 Tier 2
+Key Theft
+
+F
+
+FF
+
+Tier 1 Tier 2
+Key Loss
+
+Tier 1 Tier 2
+Key Theft
+
+Phoenix Vault
+
+Fig. 3: Monetary loss by the owner in various cases where all keys of a given tier are lost in Phoenix and a BLZ vault [20]. In a BLZ vault contract, when a tier-two key is stolen, a wealthy attacker that does not care about her losses could cause the depletion of the entire contents of the vault via attrition. Scenarios in which the Phoenix yields better results than BLZ vaults are in bold.
+
+20
+
+C Ledger Structure
+We present the architecture of Phoenix's Ledger library in Figure 4. Fig. 4: Ledger structure
+21
+
+D Properties of Phoenix
+A summary of the properties in English appears in Table 3. Their formal definitions appear in Table 4.
+Base layer 1.1 Requests cannot be withdrawn unless they have been kept in Phoenix's records
+for an amount of time equal or greater than Phoenix's delay. 1.2 A tier-one address can cancel any request at any time. 1.3 Phoenix's delay can never change. 1.4 There is no way to remove a tier-one address. 1.5 Phoenix cannot be destroyed unless it is empty.
+Key separation layer 2.1 An address cannot have both tier-one and tier-two privileges. 2.2 Tier-one addresses can only be added by a tier-one address. 2.3 Only a tier-two address can spend money. 2.4 A tier-two address can only remove self-initiated requests.
+Recovery layer 3.1 Money cannot leave Phoenix while it is locked. 3.2 The unlock time can only be postponed. 3.3 Only tier-one addresses can lock Phoenix. 3.4 Only tier-one addresses can remove tier-two addresses. 3.5 Only tier-one addresses can add tier-two addresses.
+Tier-one minimization layer 4.1 There are always enough funds in Phoenix to pay for all requests. 4.2 Phoenix cannot send money to itself. 4.3 Phoenix cannot send money to the zero address. 4.4 Removing a tier-two address from Phoenix also removes all requests initiated by
+that address. Table 3: Phoenix correctness properties
+22
+
+Base layer 1.1 When the current block number is smaller than creationk + D, withdrawal of rk
+will fail. 1.2 Any withdrawal request r  R can at any time be cancelled by any T1 address. 1.3 If at block number 0, D0 = D, then at block number 1, D1 = D. 1.4 If at block number 0, T1k  T1, then 1 > 0, T1k  T1. 1.5 P can only be destroyed if F = 0.
+Key separation layer 2.1 T1  T2 = . 2.2 Only T1 addresses can add T1 addresses. 2.3 Only T2 addresses can take the request action. 2.4 A T2j  T2 address cannot remove a request rk  R unless inititatork = T2j.
+Recovery layer 3.1 If at block number 0 < U Phoenix contains F = F0, then 0  1 < U ,
+F1  F0. 3.2 If at block number 0 the unlock block number is U = U0, then 1  0, U1  0. 3.3 Only a T1 address can take the lock action. 3.4 Only T1 addresses can delete T2 addresses. 3.5 Only T1 addresses can add T2 addresses.
+Tier-one minimization layer 4.1 1i|R| amounti  F . 4.2 ri  R, recipienti = P. 4.3 ri  R, recipienti = address(0). 4.4 ri  R, initiatori  T2.
+Table 4: Phoenix formal correctness properties
+23
+
+

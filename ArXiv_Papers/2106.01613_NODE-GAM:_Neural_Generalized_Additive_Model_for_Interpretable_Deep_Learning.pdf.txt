@@ -1,0 +1,3762 @@
+arXiv:2106.01613v1 [cs.LG] 3 Jun 2021
+
+NODE-GAM: Neural Generalized Additive Model
+for Interpretable Deep Learning
+1,2,3Chun-Hao Chang, 4Rich Caruana, 1,2,3Anna Goldenberg 1University of Toronto, 2Vector Institute, 3Hospital of Sickkids, 4Microsoft Research kingsley@cs.toronto.edu, rcaruana@microsoft.com, anna.goldenberg@utoronto.ca
+Abstract
+Deployment of machine learning models in real high-risk settings (e.g. healthcare) often depends not only on model's accuracy but also on its fairness, robustness and interpretability. Generalized Additive Models (GAMs) have a long history of use in these high-risk domains, but lack desirable features of deep learning such as differentiability and scalability. In this work, we propose a neural GAM (NODE-GAM) and neural GA2M (NODE-GA2M) that scale well to large datasets, while remaining interpretable and accurate. We show that our proposed models have comparable accuracy to other non-interpretable models, and outperform other GAMs on large datasets. We also show that our models are more accurate in self-supervised learning setting when access to labeled data is limited.
+1 Introduction
+As machine learning models become increasingly adopted in everyday life, we begin to require models to not just be accurate, but also satisfy other constraints such as fairness, bias discovery, and robustness under distribution shifts for high-stakes decisions (e.g., in healthcare, finance and criminal justice). These needs call for an easier ability to inspect and understand a model's predictions.
+Generalized Additive Models (GAMs) [7] have a long history of being used to detect and understand tabular data patterns by statisticians in a variety of fields including medicine[8, 9], business [21] and ecology [18]. Recently proposed tree-based GAMs and GA2Ms [15] models further improve on original GAMs (Spline) having higher accuracy while remaining interpretable. These models are increasingly used to detect dataset bias [3, 4] and audit black-box models [23, 24]. As a powerful class of commonly used models they still lack some of the desirable features of deep learning that made these models popular and effective, such as differentiability and scalability. In this work, we propose a deep learning version of GAM and GA2M that enjoy the benefits of both worlds. Our models are comparable to other deep learning approaches in performance on tabular data while remaining interpretable. Compared to other GAMs, our models can be optimized using GPUs and mini-batch training allowing for higher accuracy and more effective scaling on larger datasets. We also show that our models improve performance when labeled data is limited on self-supervised learning tasks, where other GAMs cannot be applied.
+Several works have focused on building interpretable deep learning models that are effective for tabular data. TabNet [2] achieves state-of-the-art performance on tabular data while also providing feature importance per example by its attention mechanism. Although attention seems to be correlated with input importance [26], in the worst case they might not correlate well [25]. Yoon et al. [27] proposes to use self-supervised learning on tabular data and achieves state-of-the-art performance, but does not address interpretability. The most relevant approaches to our work are NODE [20]
+Preprint. Under review.
+
+and NAM [1]. Popov et al. [20] developed NODE that mimics an ensemble of decision trees but permits differentiability and achieves state-of-the-art performance on tabular data. Unfortunately, NODE suffers from lack of interpretability similarly to other ensemble and deep learning models. On the other hand, Agarwal et al. [1] developed a Neural Additive Model (NAM) whose deep learning architecture is a GAM, similar to our proposal, thus assuring interpretability. Unfortunately, NAM requires training of tens to hundreds of neural networks and has an extensive hyperparameter search. Thus, NAM does not scale well. In addition, NAM's shape graphs are too smooth after bagging the models, while modeling real-world data requires an ability to capture abrupt changes [4].
+To make our deep GAM scalable and effective, we modify NODE architecture [20] to be a GAM and GA2M, since NODE achieves state-of-the-art performance on tabular data, and its tree-like nature allows GAM to learn quick, non-linear jumps that better match patterns seen in real data [3, 4]. We thus call our models NODE-GAM and NODE-GA2M respectively.
+One of our key contributions is that we design several novel gating mechanisms that gradually reduce higher-order feature interactions learned in the NODE representation. This enables our NODE-GAM and NODE-GA2M models to automatically perform feature selection via back-propagation for both marginal and pairwise features. This is a substantial improvement on tree-based GA2M that requires an additional algorithm to select which set of pairwise feature interactions to learn [15].
+Overall, our contributions can be summarized as follows:
+· Novel architectures for neural GAM and GA2M thus creating interpretable deep learning models.
+· Compared to state-of-the-art GAM methods, our NODE-GAM and NODE-GA2M achieve similar performance on medium-sized datasets while outperforming other GAMs on larger datasets.
+· We demonstrate that NODE-GAM and NODE-GA2M discover interesting data patterns.
+· Lastly, we show that NODE-GAM benefits from self-supervised learning that improves performance when labeled data is limited, and often outperforms other GAMs.
+We foresee our novel deep learning formulation of the GAMs to be very useful in high risk domains, such as healthcare, where GAMs have already proved to be useful but stopped short from being applied to new very large data collections due to scalability issues, as well as settings where access to labeled data is limited. Our novel approach also benefits the deep learning community by adding high accuracy interpretable models to the deep learning repertoire.
+
+2 Background
+
+GAM and GA2M: GAMs and GA2Ms are interpretable by design because of their functional
+
+forms.
+
+Given
+
+an
+
+input
+
+x
+
+
+
+RD ,
+
+a
+
+label
+
+y,
+
+a
+
+link
+
+function
+
+g
+
+(e.g.
+
+g
+
+is
+
+log
+
+p 1-p
+
+in
+
+binary
+
+classification),
+
+main effects fj for each feature j, and feature interactions fjj , GAM and GA2M are expressed as:
+
+GAM:
+
+D
+g(y) = f0 + fj(xj),
+j=1
+
+GA2M:
+
+D
+
+D
+
+g(y) = f0 + fj(xj) +
+
+fjj (xj , xj ).
+
+j=1
+
+j=1 j >j
+
+Unlike full complexity models (e.g. DNNs) that have g(y) = f (x1, ..., xj), GAMs and GA2M are interpretable because the impact of each feature fj and each feature interaction fjj can be visualized as a graph (i.e. for fj, x-axis shows xj and y-axis shows fj(xj)). Humans can easily simulate how they work by reading fjs and fjj off different features from the graph and adding them together.
+
+GAM baselines: We compare with Explainable Boosting Machine (EBM) [17] that implements tree-based GAM and GA2M. We also compare with splines proposed in the 80s [7] using Cubic
+splines in pygam package [22]. Hyperparameters are mentioned in Appendix B.
+
+Neural Oblivious Decision Trees (NODEs): We describe NODEs for completeness and refer the readers to Popov et al. [20] for more details. NODE consists of L layers where each layer has m differentiable oblivious decision trees (ODT) of equal depth C. Below we describe a single ODT.
+
+2
+
+Differentiable Oblivious Decision Trees: An ODT works like a traditional decision tree except
+all nodes in the same depth share the same input features and thresholds, which allows parallel
+computation and makes it suitable for deep learning. Specifically, an ODT of depth C compares C chosen input feature to C thresholds, and returns one of the 2C possible responses. Mathamatically, for feature functions F c which choose what features to split, splitting thresholds bc, and a response vector R  R2C , the tree output h(x) is defined as:
+
+h(x) = R ·
+
+I(F 1(x)  b1) I(F 1(x) > b1)
+
+
+
+I(F 2(x)  b2) I(F 2(x) > b2)
+
+···
+
+I(F C (x)  bC ) I(F C (x) > bC )
+
+(1)
+
+Here I is the indicator function,  is the outer product and · is the inner product.
+Both feature functions F c and I prevent differentaibility. To make them differentiable, Popov et al. [20] replace F c(x) as a weighted sum of features:
+
+D
+
+F c(x) = xjentmax(F c)j = x · entmax(F c).
+
+(2)
+
+j=1
+
+Here F c  RD are the logits for which features to choose, and entmax [19] is the entmax transformation which works like a sparse version of softmax such that the sum equals to 1. They also replace the I with entmoid which works like a sparse sigmoid that has output values between 0 and 1. Since all operations are differentiable (entmax, entmoid, outer and inner products), the ODT is
+differentiable.
+
+Stacking trees into deep layers: Popov et al. [20] follow the design similar to DenseNet where all tree outputs h(x) from previous layers become the inputs to the next layer. For input features x, the inputs xl to each layer l becomes:
+
+x1 = x, xl = [x, h1(x1), ..., h(l-1)(x(l-1))] for l > 1.
+
+(3)
+
+And the final output of the model y^(x) is the average of all outputs h1, ..., hL of all L layers:
+
+1L y^(x) =
+Lm
+
+m
+hli(xl)
+
+(4)
+
+l=1 i=1
+
+3 Our model design
+
+GAM design: To make NODE a GAM, we make three key changes to avoid any feature interactions in the architecture. First, instead of letting F c(x) be a weighted sum of features (Eq. 2), we make it
+only pick 1 feature. We introduce a temperature annealing parameter T that linearly decreases from 1 to 0 for the first KT learning steps to make entmax(F c/T ) gradually become one-hot:
+
+F c(x) = x · entmax(F c/T ), T -K-T--st-eps 0.
+
+(5)
+
+Second, within each tree, we make the logits F c the same across depth C i.e. F 1 = · · · = F C = F
+to avoid any feature interaction. Third, we avoid the connection between two trees that focus on different features j, j , since they create feature interactions between features j and j if two trees
+connect. Thus we introduce a gate that only allows connections between trees that take the same features. Let Gi = entmax(Fi/T ) of the tree i. For tree i in layer l and another tree ^i in layer ^l for ^l < l, the gating weight g^ii and the feature function Fli for tree i become:
+
+l-1 ml^
+
+g^ii = G^i · Gi, Fli(x) = x · Gi +
+
+h^l^i(x)g^ii.
+
+(6)
+
+^l=1 ^i=1
+
+Since G becomes gradually one-hot by Eq. 5, after KT steps g^ii would only become 1 when G^i = Gi and 0 otherwise. This enforces no feature interaction between tree connections (Fig. 1).
+
+3
+
+Figure 1: The NODE-GAM architecture. Here we show 4 features with 4 different colors. Each layer consists of m differentiable oblivious decision trees that outputs h1...hm, where each hi only depends on 1 feature. We only connect trees between layers if two trees depend on the same features. And we concatenate all outputs from all layers as inputs to the last linear layer WL to produce outputs.
+
+Attention-based GAMs (AB-GAMs): To make the above GAM more expressive, we add an attention weight a^ii in the feature function Fli(x) to decide which previous tree to focus on:
+
+D
+
+l-1 ml^
+
+l-1 ml^
+
+Fli(x) = xj Gij +
+
+h^l^i(x)g^iia^ii where
+
+g^iia^ii = 1.
+
+(7)
+
+j=1
+
+^l=1 ^i=1
+
+^l=1 ^i=1
+
+To achieve this, we introduce attention logits Ai for each tree i that after entmax it produces a^ii:
+
+a^ii = g^iientmax(log(gi) + Ai)^i.
+
+(8)
+
+This forces the attention of a tree i that ^i a^ii = 1 for all ^i that g^ii = 1 and a^ii = 0 when g^ii = 0.
+
+The attention logits A requires a large matrix size [ml,
+
+l-1 ^l=1
+
+m^l]
+
+for
+
+each
+
+layer
+
+l
+
+>
+
+1.
+
+To
+
+avoid
+
+memory explosion, we instead make A as the inner product of two smaller matrices such that
+
+A = BC where B is of size [ml, E] and C is of size [E,
+
+l-1 ^l=1
+
+m^l],
+
+where
+
+E
+
+is
+
+a
+
+hyperparameter
+
+for
+
+the embedding dimension of the attention.
+
+Last Linear layer: Lastly, instead of averaging the outputs of all trees as the output of the model (Eq. 4), we add the last linear layer to be a weighted sum of all outputs:
+
+Lm
+
+y^(x) =
+
+hli(xl)wli.
+
+(9)
+
+l=1 i=1
+
+Note that in self-supervised learning, wli has multiple output heads to predict multiple tasks.
+
+Regularization: We also include other changes to regularize our model. First, we add Dropout
+
+(dropout rate p1) on the outputs of trees hli(xl), and Dropout (dropout rate p2) on the final weights
+
+wli. We also add an 2 penalization (with hyperparameter ) on hli(xl). In binary classification task
+
+where
+
+labels
+
+y
+
+are
+
+imbalanced
+
+between
+
+class
+
+0
+
+and
+
+1,
+
+we
+
+set
+
+a
+
+constant
+
+as
+
+log
+
+p(y) 1-p(y)
+
+that
+
+is
+
+added
+
+to
+
+the final output of the model such that after sigmoid it becomes the p(y) if the output of the model is
+
+0. We find it's crucial for 2 penalization to work since 2 induces model to output 0.
+
+4
+
+NODE-GA2Ms -- extending NODE-GAMs to two-way interactions: To allow two-way interactions, for each tree we introduce two logits F 1 and F 2 instead of just one, and let F c = F c/2
+for c > 2; this allows at most 2 features to interact within each tree. Besides temperature annealing (Eq. 5), we make the gating weights g^ii = 1 only if the combination of F 1, F 2 is the same between tree ^i and i (i.e. both trees ^i and i focus on the same 2 features). We achieve it by setting g^ii:
+
+g^ii = min((G1i · G^1i ) × (G2i · G^2i ) + (G1i · G^2i ) × (G2i · G^1i ), 1).
+
+(10)
+
+We cap the value at 1 to avoid uneven amplifications as g^ii = 2 when G1i = G2i = G^1i = G^2i .
+
+Data Preprocessing and Hyperparameters: We follow Popov et al. [20] to do target encoding
+for categorical features, and do quantile transform for all features to Gaussian distirbution. We use random search to search the architecture space for NODE, NODE-GAM and NODE-GA2M. We use QHAdam [16] and average the most recent 5 checkpoints [10]. In addition, we adopt learning rate
+warmup [6], and do early stopping and learning rate decay on plateau. More details in Appendix B.
+
+Extracting shape graphs from GAMs: We follow Chang et al. [4] to implement a function that
+extracts main effects fj from any GAM model including NODE-GAM, Spline and EBM. The main idea is to take the difference between the model's outputs of two examples (x1, x2) that have the
+same values except feature j. Since the intercept and other main effects are canceled out when taking the difference, the difference f (x2) - f (x1) is equal to fj(x2j ) - fj(x1j ). If we query all the unique values of xj, we get all values of fj relative to fj(x1j ). Then we center the graph of fj by setting the
+average of fj(xj) across all dataset as 0 and add the average to the intercept term f0.
+
+Extracting shape graphs from GA2Ms: Designing a black box function to extract from any GA2M is non-trivial, as each changed feature xj would change not just main effect term fj but also every interactions j fjj that involve feature j. Instead, since we know which features each tree takes, we can aggregate the output of trees into corresponding main fj and interaction terms fjj .
+Note that GA2M can have many representations that result in the same function. For example, for a prediction value v associated with x2, we can move v to the main effect f2(x2) = v, or the interaction effect f23(x2, ·) = v that involves x2. To solve this ambiguity, we adopt "purification" [14] that pushes interaction effects into main effects if possible. Specifically, to purify an interaction term fjj , we first bin continuous feature xj into at most K quantile bins with K unique values x1j , ...xKj and for xj as well. Then for every xkj , we move the average akj of interactions fjj to main effects fj:
+
+Kk=1xkj ,
+
+akj
+
+=
+
+1 NK
+
+K
+fjj (xkj , xkj ),
+k =1
+
+fjj (xkj , xkj ) = fjj (xkj , xkj )-akj ,
+
+fj (xkj ) = fj (xkj )+akj
+
+This is one step to purify fjj to fj. Then we purify fjj to fj , and so on until all akj and akj are 0.
+
+4 Results
+
+We first show the accuracy of models on 7 binary classification and 2 regression datasets in Sec. 4.1 and interpret 2 datasets, Bikeshare and MIMIC2, in Sec. 4.2. In Sec. 4.3, we show that NODE-GAM benefits from self-supervised learning and often outperforms other GAMs when labels are limited.
+
+4.1 Are NODE-GAM and NODE-GA2M accurate?
+We compare our performance on 7 popular binary classification datasets (Compas, Churn, Support2, MIMIC2, MIMIC3, Income, and Credit) and 2 regression datasets (Wine and Bikeshare). These datasets are medium-sized with 6k-300k samples and 6-57 features (Table 3). We use 5-fold cross validation to derive mean and standard deviation for each model. We use 80-20 splits for training and val set. To compare models across datasets, we calculate 2 summary metrics: (1) Rank: we rank the performance on each dataset, and then compute the average rank across all 9 datasets (the lower the rank the better). (2) Normalized Score (NS): for each dataset, we set the worst performance for that dataset as 0 and the best as 1, and scale all other scores linearly between 0 and 1.
+
+5
+
+Table 1: The performance for 9 medium-sized datasets. The first 7 datasets are binary classification (ordered by samples) and shown the AUC (%). The last 2 are regression datasets and shown the Root Mean Squared Error (RMSE). We show standard deviation of 5-fold cross validation results. We caculate average rank (Rank, lower the better) and average Normalized Score (NS, higher the better).
+
+GAM
+
+GA2M
+
+Full Complexity
+
+NODE GAM
+
+NODE GA2M
+Main
+
+EBM
+
+Spline
+
+NODE GA2M
+
+EBM GA2M
+
+NODE
+
+XGB
+
+RF
+
+Compas 74.2 (0.9) 74.2 (0.8) 74.3 (0.9) 74.1 (0.9) 74.2 (0.7) 74.4 (0.9) 73.8 (1.0) 74.1 (0.9) 68.0 (1.5) Churn 84.9 (0.8) 84.9 (0.9) 85.0 (0.7) 85.1 (0.9) 85.0 (0.8) 85.0 (0.7) 84.3 (0.6) 84.7 (0.9) 82.9 (0.8) Support2 81.5 (1.3) 81.5 (1.1) 81.5 (1.0) 81.5 (1.1) 82.7 (0.7) 82.6 (1.1) 82.7 (1.0) 82.3 (1.0) 82.1 (1.0) Mimic2 83.2 (1.1) 83.4 (1.3) 83.5 (1.1) 82.5 (1.1) 84.6 (1.1) 84.8 (1.2) 84.3 (1.1) 84.4 (1.2) 85.4 (1.3) Mimic3 81.4 (0.5) 81.0 (0.6) 80.9 (0.4) 81.2 (0.4) 82.2 (0.7) 82.1 (0.4) 82.8 (0.7) 81.9 (0.4) 79.5 (0.7) Income 92.7 (0.3) 91.8 (0.5) 92.7 (0.3) 91.8 (0.3) 92.3 (0.3) 92.8 (0.3) 91.9 (0.3) 92.8 (0.3) 90.8 (0.2) Credit 98.1 (1.1) 98.4 (1.0) 97.4 (0.9) 98.2 (1.1) 98.6 (1.0) 98.2 (0.6) 98.1 (0.9) 97.8 (0.9) 94.6 (1.8)
+
+Wine 0.71 (0.03) 0.70 (0.02) 0.70 (0.02) 0.72 (0.02) 0.67 (0.02) 0.66 (0.01) 0.64 (0.01) 0.75 (0.03) 0.61 (0.01) Bikeshare 100.7 (1.6) 100.7 (1.4) 100.0 (1.4) 99.8 (1.4) 49.8 (0.8) 50.1 (0.8) 36.2 (1.9) 49.2 (0.9) 42.2 (0.7)
+
+Rank NS
+
+5.61 0.582
+
+5.94 0.526
+
+5.50 0.557
+
+5.44 0.519
+
+3.28 0.826
+
+3.22 0.833
+
+4.89 0.756
+
+4.22 0.824
+
+6.89 0.267
+
+Table 2: The performance for 6 large datasets used in NODE paper. The first 3 datasets (Click, Epsilon and Higgs) are classification datasets and shown the error rate. The last 3 (Microsot, Yahoo and Year) are shown in Mean Squared Error (MSE).
+
+GAM
+
+GA2M
+
+Full Complexity
+
+Click Epsilon Higgs
+
+NODE GAM
+0.3314 0.1038 0.2754
+
+EBM
+0.3328 -
+0.3006
+
+Spline
+0.3369 -
+
+NODE GA2M
+0.3305 0.1054 0.2562
+
+EBM GA2M
+0.3297 -
+0.2767
+
+NODE
+0.3312 0.1034 0.2101
+
+XGB
+0.3334 0.1112 0.2328
+
+RF
+0.3474 0.2388 0.2406
+
+Microsoft 0.5643 0.5896 - 0.5617 0.5780 0.5570 0.5544 0.5702
+
+Yahoo 0.5754 0.6089 - 0.5804 - 0.5692 0.5420 0.5597
+
+Year
+
+78.19 85.77
+
+-
+
+79.74 83.15 76.21 78.53 86.53
+
+In Table 1, we show the performance of all GAMs, GA2Ms and full complexity models. Note that the NODE-GA2M-main is the purified main effect from NODE-GA2M model. First, we find all 4 GAMs perform similarly and the best version of GAM in different datasets vary. Spline gets the best in Rank and NODE-GAM gets the best in NS, but the accuracy numbers are close to each other. For GA2M, both NODE-GA2M and EBM-GA2M perform similarly with EBM GA2M slightly ahead. Lastly, out of all full complexity methods, XGB perform the best with not much difference from NODE. RF performs the worst. Overall we find all GAMs perform similarly to each other, and EBM-GA2M is similar to NODE-GA2Ms. GA2M perform slightly better than full-complexity models.
+In Table 2, we test our methods on 6 large datasets (all have samples > 500K) used in the NODE paper, and we use the same train-test split to be comparable. Note these datasets only provide 1 split so we do not report standard deviation. First, on a cluster with 20 cpu and 120GB memory, Spline goes out of memory on 5 out of 6 datasets and EBM also can not be run on dataset Epsilon with 2k features, showing their lack of ability to scale to large datasets. For datasets where EBM or Spline can successfully run (all but Epsilon), our NODE-GAMs outperform them consistently on all datasets. For GA2M, on 3 out of 4 datasets where EBM-GA2M was able to run, NODE-GA2M outperforms EBM-GA2M. And they perform similarly on the Click dataset. NODE outperforms all GAMs and GA2Ms substantially on Higgs and Year, suggesting both datasets might have important higher-order feature interactions.
+6
+
+Rental Counts
+
+(a) Hour
+
+200
+
+NODE-GA2M NODE-GAM
+
+100
+
+EBM Spline
+
+0
+
+100
+
+0
+
+5
+
+10
+
+15
+
+20
+
+(b) Temperature
+
+(c) Month
+
+(d) Week day
+
+150 100
+
+20
+
+50
+
+10
+
+15 10
+
+0
+
+5
+
+50
+
+0
+
+100 150
+
+10
+
+0 5
+
+200
+
+20
+
+10
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+2 4 6 8 10 12
+
+0123456
+
+Figure 2: The shape plots of 4 (out of 11) features of 4 models (NODE-GA2M, NODE-GAM, EBM, and Spline) trained on Bikeshare dataset.
+
+Rental Counts
+
+(a) Hr x Working day
+
+100 50 0 50 100 150 200
+0
+
+workingday=0 workingday=1
+
+5
+
+10
+
+15
+
+20
+
+Hour
+
+Week day
+
+(b) Hr x Week day
+
+6
+
+40
+
+5
+
+4
+
+20
+
+3
+
+0
+
+2
+
+20
+
+1
+
+0
+
+40
+
+0 5 10 15 20
+
+Hour
+
+Temperature
+
+(c) Hr x Temperature
+
+1.0
+
+40
+
+0.8
+
+20
+
+0.6 0
+0.4
+
+0.2
+
+20
+
+0.0
+
+40
+
+0 5 10 15 20
+
+Hour
+
+Humidity
+
+(d) Hr x Humidity
+
+1.0
+
+75
+
+0.8
+
+50
+
+0.6
+
+25
+
+0
+
+0.4
+
+25
+
+0.2
+
+50
+
+0.0
+
+75
+
+0 5 10 15 20
+
+Hour
+
+Figure 3: The shape plots of 4 interactions of NODE-GA2M trained on the Bikeshare dataset.
+
+4.2 Shape graphs of NODE-GAM and NODE-GA2M: Bikeshare and MIMIC2
+In this section, we highlight our key findings with plots specifically picked to be representative of our main results. We provide the complete set of plots in Appendix D.
+Bikeshare dataset: Here we interpret the Bikeshare dataset. It contains the hourly count of rental bikes between years 2011 and 2012 in Capital bikeshare system located in Washington, D.C. Note that all 4 GAMs trained on Bikeshare are equally accurate with < 0.1% error difference (Table 1).
+In Fig. 2, we show the shape plots of 4 features: Hour, Temperature, Month, and Week day. First, Hour (Fig. 2a) is the strongest feature with two peaks around 9AM and 5PM, representing the time that people commute, and all 4 models agree. Then we show Temperature in Fig. 2b. Here temperature is normalized between 0 and 1, where 0 means -8°C and 1 means 39°C. When the weather is hot (Temp > 0.8, around 30°C), all models agree rental counts decrease which makes sense. Interestingly, when it's getting colder (Temp < 0.4, around 11°C) there is a steady rise shown by NODE-GAM, Spline and EBM but not NODE-GA2M (blue). Since it's quite unlikely people rent more bikes when it's getting colder especially below 0°C, the pattern shown by GA2M seems more plausible. Similarly, in feature Month (Fig. 2c), NODE-GA2M shows a rise in summer (month 6 - 8) while others indicate a strong decline of rental counts. Since we might expect more people renting bikes during summer since it's warmer, NODE-GA2M might be more plausible, although we might explain it due to summer vacation fewer students ride bikes to school. Lastly, for Weekday (Fig. 2d) all 4 models agree with each other that the lowest number of rentals happen in the start of the week (Sunday and Monday) and slowly increase with Saturday as the highest number.
+In Fig. 3, we show the 4 feature interactions (out of 67) from our NODE-GA2M. The strongest effect happens in Hr x Working day (Fig. 3(a)): this makes sense since in working day (orange), people usually rent bikes around 9AM and 5PM to commute. Otherwise if working day is 0 (blue), the number peaks from 10AM to 3PM which shows people going out more often in daytime. In Hr x Weekday (Fig. 3(b)), we can see more granularly that this commute effect happens strongly on Monday to Thursday, but on Friday people commute a bit later, around 10AM, and return earlier, around 3 or 4PM. In Hr x Temperature (Fig. 3(c)), it shows that in the morning rental count is high when it's cold, while in the afternoon the rental count is high when it's hot. We also find in Hr x Humidity (Fig. 3(d)) that when humidity is high from 3-6PM, people ride bike less. Overall these interpretable graphs enable us to know how model predicts and find interesting patterns in the data.
+MIMIC2: MIMIC2 is the hospital ICU mortality prediction task [11]. We extract 17 features within the first 24 hour measurements, and we use mean imputation for missingness.
+
+7
+
+Log odds
+
+(a) Age
+
+(b) PFratio
+
+(c) Bilirubin
+
+2.5 2.0 1.5
+
+NODE-GA2M NODE-GAM
+
+1.0
+
+2 1
+
+1.0
+
+EBM
+
+0.5
+
+0
+
+0.5
+
+Spline
+
+0.0
+
+0.0
+
+1
+
+0.5
+
+0.5
+
+2
+
+1.0
+
+1.0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+0 500 1000 1500 2000 2500
+
+0
+
+20
+
+40
+
+60
+
+(d) GCS
+
+0.6 0.4 0.2 0.0 0.2 0.4
+
+80
+
+1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0
+
+Figure 4: The shape plots of 4 GAMs trained on MIMIC-II dataset (4 of the 17 features are shown).
+
+Bilirubin
+
+(a) Age x Bilirubin
+
+80
+
+0.6
+
+60
+
+0.4 0.2
+
+40
+
+0.0
+
+0.2
+
+20
+
+0.4
+
+0
+
+0.6
+
+20 40 60 80 100
+
+Age
+
+Bilirubin
+
+(b) GCS x Bilirubin
+
+80
+
+0.15
+
+60
+
+0.10 0.05
+
+40
+
+0.00
+
+0.05
+
+20
+
+0.10
+
+0
+
+0.15
+
+1
+
+2
+
+3
+
+4
+
+5
+
+GCS
+
+GCS
+
+(c) Age x GCS
+5
+4
+3
+2
+1 20 40 60 80 100
+Age
+
+(d) GCS x PFratio
+
+0.15
+
+0.10
+
+2500
+
+0.2
+
+PFratio
+
+0.05
+
+2000
+
+0.1
+
+0.00
+
+1500
+
+0.0
+
+0.05 1000
+
+0.1
+
+0.10 500
+
+0.15
+
+0
+
+0.2
+
+1
+
+2
+
+3
+
+4
+
+5
+
+GCS
+
+Figure 5: The shape plots of 4 interactions of NODE-GA2M trained on the MIMIC2 dataset.
+
+We show the shape plots (Fig. 4) of 4 features: Age, PFratio, Bilirubin and GCS. In feature Age (Fig.. 4(a)), we see the all 4 models agree the risk increases from age 20 to 90. Overall NODEGAM/GA2M are pretty similar to EBM in that they all have small jumps in similar place at age 55, 80 and 85; spline (red) is as expected very smooth. Interestingly, we see NODE-GAM/GA2M shows risk increases a bit when age < 20. We think the risk is higher in younger people because this is generally a healthier age in the population, so their presence in ICU indicates higher risk conditions.
+In Fig. 4(b), we show PFratio: a measure of how well patients oxygenate blood. Interestingly, NODEGAM/GA2M and EBM capture a sharp drop at 332. It turns out that PFratio is usually not measured for healthier patients, and the missing values have been imputed by the population mean 332, thus placing a group of low-risk patients right at the mean value of the feature. However, Spline is unable to capture this bias in the dataset. We also see another drop captured by NODE-GAM/GA2M from 400 - 500, which matches clinical guidelines indicating that > 400 is healthy.
+Bilirubin shape plot is shown in Fig. 4(c). Bilirubin is a yellowish pigment made during the normal breakdown of red blood cells. High bilirubin indicates liver or bile duct problems. Indeed, we can see risk quickly goes up as Bilirubin is > 2, and all 4 models roughly agree with each other except for Spline which has much lower risk when Billirubin is 80, which is likely caused by Spline's smooth inductive bias and unlikely to be true. Lastly, in Fig. 4(d) we show Glasgow Coma Scale (GCS): a bedside measurement for how conscious the patient is with 1 in coma and 5 as conscious. Indeed, we find risk is higher for patients with GCS=1 than 5, and all 4 models agree.
+In Fig. 5, we show the 4 of 154 feature interactions learned in the NODE-GA2M. First, in Age x Bilirubin (Fig. 5(a)), when Billirubin is high (>2), we see an increase of risk (blue) in people with age 18 - 70. Risk decreases (red) when age > 80. Combined with the shape plots of Age (Fig. 4(a)) and Bilirubin (Fig. 4(c)), we find this interaction works as a correction effect: if patients have Bilirubin > 2 (high risk) but are young (low risk), they should have higher risk than what their main (univariate) effects suggest. On the other hand, if patients have age > 80 (high risk) and Bilirubin > 2 (high risk), they already get very high risk from main effects, and in fact the interaction effect is negative to correct for the already high main effects. It suggests that Billirubin=2 is an important threshold that should affect risk adjustments.
+Also in GCS x Bilirubin plot (Fig. 5(b)), we find similar effects: if Bilirubin >2, the risk of GCS is correctly lower for GCS=1,2 and higher for 3-5. In Fig. 5(c) we find patients with GCS=1-3 (high risk) and age>80 (high risk), surprisingly, have even higher risk (blue) for these patients; it shows models think these patients are more in danger than their main effects suggest. Finally, in Fig. 5(d) we show interaction effect GCS x PFratio. We find PFratio also has a similar threshold effect: if PFratio > 400 (low risk), and GCS=1,2 (high risk), model assigns higher risk for these patients while decreasing risks for patients with GCS=3,4,5.
+8
+
+Relative Imp (%)
+
+COMPAS
+
+20
+
+SS EBM
+
+10
+
+Spline
+
+0
+
+10
+
+20
+
+0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+Labeled data ratio(%)
+
+Churn
+
+5 0 5 10 15 20
+
+0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+Labeled data ratio(%)
+
+Support2
+
+MIMIC2
+
+5
+
+15
+
+0
+
+10
+
+5
+
+5
+
+10
+
+0
+
+15
+
+5
+
+0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+Labeled data ratio(%) Labeled data ratio(%)
+
+MIMIC3
+
+5
+
+0
+
+5
+
+10
+
+15
+
+20
+
+25
+
+30 0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+Labeled data ratio(%)
+
+Income
+
+1
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+Labeled data ratio(%)
+
+Credit
+
+0
+
+5
+
+10 15
+
+20
+
+0
+
+2
+
+4
+
+6
+
+8
+
+10
+
+Labeled data ratio(%)
+
+Relative Imp (%)
+
+Figure 6: The relative improvement (%) over NODE-GAM without self-supervision (No-SS) on 7 datasets with various labeled data ratio. The higher the better.
+
+4.3 Self-supervised Pre-training
+By training GAMs with neural networks, it enables self-supervised learning that learns representations from unlabeled data which improves accuracy in limited labeled data scenario. We first learn a NODEGAM that reconstructs input features under randomly masked inputs (we use 15% masks). Then we remove and re-initialize the last linear weight and fine-tune it on the original targets under limited labeled data. For fine-tuning, we freeze the embedding and only train the last linear weight for the first 500 steps; this helps stabilize the training. We also search smaller learning rates [5e-5, 1e-4, 3e-4, 5e-4] and choose the best model by validation set. We compare our self-supervised model (SS) with 3 other GAM baselines: (1) NODE-GAM without self-supervision (No-SS), (2) EBM and (3) Spline. We randomly search 15 attention based AB-GAM architectures for both SS and No-SS.
+In Figure 6, we show the relative improvement over the AUC of No-SS under various labeled data ratio 0.5%, 1%, 2%, 5%, and 10% (except Credit which 0.5% has too few positive samples and thus crashes). And we run 3 different train-test split folds to derive mean and standard deviation. Here the positive number means improvement over No-SS baselines. First, we find NODE-GAM with self-supervision (SS, blue) outperforms No-SS in 6 of 7 datasets (except Income) with COMPAS having the most improvement. And usually the smaller the data ratio exhibits the larger improvement. Lastly, our SS outperforms EBM and Spline in COMPAS, Churn, MIMIC2 and Credit, and perform similarly on the rest. This shows that our NODE-GAM benefits from self-supervised learning.
+
+5 Limitations and Discussions
+Although we try to interpret and explain the shape graphs in this paper, we want to emphasize any patterns shown is just association and not causation. Overreliance on these interpretations might produce misleading conclusions of how the real-world operates. For example, a possible misuse of these GAMs is to train a GAM on datasets like COMPAS where racial bias exists, and wrongfully claim these GAMs exhibit higher risk for Black ethnicity so they are more likely to re-offend. Any pattern found should only be considered causal under a randomized control experiment.
+Some of the future directions maybe applying GAM-based models to higher dimensional data, such as images or text. GAMs are not likely to yield interesting results if applied to these data directly since individual pixel or word can not predict the target. So we propose to first learn a latent space where each dimension corresponds to a human understandable concept (e.g. Koh et al. [13]), and then learn a GAM or GA2M on top of these concepts. Another interesting extension is applying NODE-GAM/GA2M to inverse reinforcement learning to explain the reward of experts in real-world decision making.
+9
+
+Acknowledgments and Disclosure of Funding
+We thank Sarah Tan to provide preprocessed MIMIC2 dataset. Resources used in preparing this research were provided, in part, by the Province of Ontario, the Government of Canada through CIFAR, and companies sponsoring the Vector Institute www.vectorinstitute.ai/#partners.
+References
+[1] Rishabh Agarwal, Nicholas Frosst, Xuezhou Zhang, Rich Caruana, and Geoffrey E Hinton. 2020. Neural additive models: Interpretable machine learning with neural nets. arXiv preprint arXiv:2004.13912 (2020).
+[2] Sercan O. Arik and Tomas Pfister. 2020. TabNet: Attentive Interpretable Tabular Learning. https://openreview.net/forum?id=BylRkAEKDH
+[3] Rich Caruana, Yin Lou, Johannes Gehrke, Paul Koch, Marc Sturm, and Noemie Elhadad. 2015. Intelligible models for healthcare: Predicting pneumonia risk and hospital 30-day readmission. In Proceedings of the 21th ACM SIGKDD international conference on knowledge discovery and data mining. 1721­1730.
+[4] Chun-Hao Chang, Sarah Tan, Ben Lengerich, Anna Goldenberg, and Rich Caruana. 2021. How Interpretable and Trustworthy are GAMs?. In Proceedings of the 27th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD '21). Association for Computing Machinery.
+[5] Dheeru Dua and Casey Graff. 2017. UCI Machine Learning Repository. http://archive. ics.uci.edu/ml
+[6] Priya Goyal, Piotr Dollár, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. 2017. Accurate, large minibatch sgd: Training imagenet in 1 hour. arXiv preprint arXiv:1706.02677 (2017).
+[7] Trevor Hastie and Rob Tibshirani. 1990. Generalized Additive Models. Chapman and Hall/CRC.
+[8] Trevor Hastie and Robert Tibshirani. 1995. Generalized additive models for medical research. Statistical methods in medical research 4, 3 (1995), 187­196.
+[9] Farzali Izadi. 2020. Generalized additive models to capture the death rates in Canada COVID-19. arXiv preprint arXiv:1702.08608 (07 2020).
+[10] Pavel Izmailov, Dmitrii Podoprikhin, Timur Garipov, Dmitry Vetrov, and Andrew Gordon Wilson. 2018. Averaging weights leads to wider optima and better generalization. In 34th Conference on Uncertainty in Artificial Intelligence 2018, UAI 2018. Association For Uncertainty in Artificial Intelligence (AUAI), 876­885.
+[11] Alistair E Johnson, Tom J Pollard, Lu Shen, H Lehman Li-wei, Mengling Feng, Mohammad Ghassemi, Benjamin Moody, Peter Szolovits, Leo Anthony Celi, and Roger G Mark. 2016. MIMIC-III, a freely accessible critical care database. Scientific data 3 (2016), 160035.
+[12] Alistair EW Johnson, Tom J Pollard, Lu Shen, H Lehman Li-wei, Mengling Feng, Mohammad Ghassemi, Benjamin Moody, Peter Szolovits, Leo Anthony Celi, and Roger G Mark. 2016. MIMIC-III, a freely accessible critical care database. Scientific data 3 (2016), 160035.
+[13] Pang Wei Koh, Thao Nguyen, Yew Siang Tang, Stephen Mussmann, Emma Pierson, Been Kim, and Percy Liang. 2020. Concept bottleneck models. In International Conference on Machine Learning. PMLR, 5338­5348.
+[14] Benjamin Lengerich, Sarah Tan, Chun-Hao Chang, Giles Hooker, and Rich Caruana. 2020. Purifying interaction effects with the functional anova: An efficient algorithm for recovering identifiable additive models. In International Conference on Artificial Intelligence and Statistics. PMLR, 2402­2412.
+10
+
+[15] Yin Lou, Rich Caruana, Johannes Gehrke, and Giles Hooker. 2013. Accurate intelligible models with pairwise interactions. In Proceedings of the 19th ACM SIGKDD international conference on Knowledge discovery and data mining. 623­631.
+[16] Jerry Ma and Denis Yarats. 2018. Quasi-hyperbolic momentum and Adam for deep learning. In International Conference on Learning Representations.
+[17] Harsha Nori, Samuel Jenkins, Paul Koch, and Rich Caruana. 2019. InterpretML: A Unified Framework for Machine Learning Interpretability. arXiv preprint arXiv:1909.09223 (2019).
+[18] Eric J Pedersen, David L Miller, Gavin L Simpson, and Noam Ross. 2019. Hierarchical generalized additive models in ecology: an introduction with mgcv. PeerJ 7 (2019), e6876.
+[19] Ben Peters, Vlad Niculae, and André F. T. Martins. 2019. Sparse Sequence-to-Sequence Models. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics. Association for Computational Linguistics, Florence, Italy, 1504­1519. https: //doi.org/10.18653/v1/P19-1146
+[20] Sergei Popov, Stanislav Morozov, and Artem Babenko. 2019. Neural oblivious decision ensembles for deep learning on tabular data. arXiv preprint arXiv:1909.06312 (2019).
+[21] K Sapra. 2013. Generalized additive models in business and economics. International Journal of Advanced Statistics and Probability 1, 3 (2013), 64­81.
+[22] Daniel Servén and Charlie Brummitt. 2018. pyGAM: Generalized Additive Models in Python. https://doi.org/10.5281/zenodo.1208723
+[23] Sarah Tan, Rich Caruana, Giles Hooker, Paul Koch, and Albert Gordo. 2018. Learning global additive explanations for neural nets using model distillation. arXiv preprint arXiv:1801.08640 (2018).
+[24] Sarah Tan, Rich Caruana, Giles Hooker, and Yin Lou. 2018. Distill-and-compare: Auditing black-box models using transparent model distillation. In Proceedings of the 2018 AAAI/ACM Conference on AI, Ethics, and Society. 303­310.
+[25] Sarah Wiegreffe and Yuval Pinter. 2019. Attention is not not explanation. arXiv preprint arXiv:1908.04626 (2019).
+[26] Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho, Aaron Courville, Ruslan Salakhudinov, Rich Zemel, and Yoshua Bengio. 2015. Show, attend and tell: Neural image caption generation with visual attention. In International conference on machine learning. PMLR, 2048­2057.
+[27] Jinsung Yoon, Yao Zhang, James Jordon, and Mihaela van der Schaar. 2020. VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain. In Advances in Neural Information Processing Systems, H. Larochelle, M. Ranzato, R. Hadsell, M. F. Balcan, and H. Lin (Eds.), Vol. 33. Curran Associates, Inc., 11033­11043. https://proceedings. neurips.cc/paper/2020/file/7d97667a3e056acab9aaf653807b4a03-Paper.pdf
+Checklist
+1. For all authors... (a) Do the main claims made in the abstract and introduction accurately reflect the paper's contributions and scope? [Yes] (b) Did you describe the limitations of your work? [Yes] See Section 5 (c) Did you discuss any potential negative societal impacts of your work? [Yes] See Section 5 for discussions of the danger to over-interpret the patterns shown by GAM as causal. (d) Have you read the ethics review guidelines and ensured that your paper conforms to them? [Yes]
+2. If you are including theoretical results...
+11
+
+(a) Did you state the full set of assumptions of all theoretical results? [N/A] (b) Did you include complete proofs of all theoretical results? [N/A] 3. If you ran experiments... (a) Did you include the code, data, and instructions needed to reproduce the main experi-
+mental results (either in the supplemental material or as a URL)? [Yes] We include our code which downloads data automatically in our supplemental material. (b) Did you specify all the training details (e.g., data splits, hyperparameters, how they were chosen)? [Yes] In Appendix B and C. (c) Did you report error bars (e.g., with respect to the random seed after running experiments multiple times)? [Yes] We provide error bar in 9 datasets we curate using proper 5-fold cross validation. However, for 6 large datasets only 1 test set is available and thus no error bar is provided. (d) Did you include the total amount of compute and the type of resources used (e.g., type of GPUs, internal cluster, or cloud provider)? [Yes] In Appendix B. Our models only need 1 GPU. No cluster is needed. 4. If you are using existing assets (e.g., code, data, models) or curating/releasing new assets... (a) If your work uses existing assets, did you cite the creators? [Yes] In Appendix A (b) Did you mention the license of the assets? [No] Not aware of any. (c) Did you include any new assets either in the supplemental material or as a URL? [Yes] We include our code in our supplemental material. (d) Did you discuss whether and how consent was obtained from people whose data you're using/curating? [No] We only use existing datasets. (e) Did you discuss whether the data you are using/curating contains personally identifiable information or offensive content? [No] There is no personally identifiable information. 5. If you used crowdsourcing or conducted research with human subjects... (a) Did you include the full text of instructions given to participants and screenshots, if applicable? [N/A] (b) Did you describe any potential participant risks, with links to Institutional Review Board (IRB) approvals, if applicable? [N/A] (c) Did you include the estimated hourly wage paid to participants and the total amount spent on participant compensation? [N/A]
+12
+
+A Dataset Descriptions
+Here we describe all 9 datasets we use and we summarize them in Table 3.
+· COMPAS: this is a dataset of re-offsense rate in recidivaical criminal justice case. The dataset is from https://www.kaggle.com/danofer/compass
+· Churn: this is to predict which user is a potential subscription churner for telecom company. https://www.kaggle.com/blastchar/telco-customer-churn
+· Support2: this is to predict mortality in the hospital by several lab values. http://biostat. mc.vanderbilt.edu/DataSets
+· MIMIC-II and MIMIC-III dataset [12]: this is an ICU patient datasets to predict mortality of patients in a tertiary academic medical center in Boston, MA, USA.
+· Income: UCI [5]. This is a dataset from census collected in 1994, and the goal is to predict who has income >50K/year. https://archive.ics.uci.edu/ml/datasets/adult
+· Credit: this is to predict which transaction is a fraud. The features provided are the coefficient of PCA components to protect privacy. https://www.kaggle.com/mlg-ulb/ creditcardfraud
+· Bikeshare [5]: this is the hourly bikeshare rental counts in Washington D.C., USA. https: //archive.ics.uci.edu/ml/datasets/bike+sharing+dataset
+· Wine [5]: this is to predict the wine quality based on a variety of lab values. https: //archive.ics.uci.edu/ml/datasets/wine+quality
+For 6 datasets used in NODE, we use the scripts from NODE paper (https://github.com/ Qwicen/node) which directly downloads the dataset. Here we still cite and list their sources:
+· Click: https://www.kaggle.com/c/kddcup2012-track2 · Higgs: UCI [5] https://archive.ics.uci.edu/ml/datasets/HIGGS · Epsilon: https://www.k4all.org/project/large-scale-learning-challenge/ · Microsoft: https://www.microsoft.com/en-us/research/project/mslr/ · Yahoo: https://webscope.sandbox.yahoo.com/catalog.php?datatype=c. · Year [5]: https://archive.ics.uci.edu/ml/datasets/yearpredictionmsd
+A.1 Preprocessing
+For NODE and NODE-GAM/GA2M, we follow Popov et al. [20] to do target encoding for categorical features, and do quantile transform1 with 2000 bins for all features to Gaussian distirbution (we find Gaussian performs better than Uniform). We find adding small gaussian noise (e.g. 1e-5) when fitting quantile transformation (but no noise in transformation stage) is crucial to have mean 0 and standard deviation close to 1 after transformation.
+B Hyperparameters Selection
+In order to tune the hyperparameters, we performed a random stratified split of full training data into train set (80%) and validation set (20%) for all datasets. For datasets we compile of medium-sized (Income, Churn, Compas, Credit, Mimic2, Mimic3, Support2, Bikeshare), we do a 5-fold cross validation for 5 different test splits. For datasets in NODE paper (Click, Epsilon, Higgs, Microsoft, Yahoo, Year), we use train/val/test split provided by the NODE paper author. Since they only provide 1 test split, we do not report standard deviation on these datasets. For medium-sized datasets, we only tune hyperparameters on the first train-val-test fold split, and fix the hyperparameters to run the rest of 4 folds i.e. we do not search hyperparameters per fold to avoid computational overheads. All NODE, NODE-GAM/GA2M are run with 1 TITAN Xp GPU, 4 CPU and 8GB memory. For EBM and Spline, they are run with 20 CPUs and 120GB memory for large datasets.
+Below we describe the hyperparameters we use for each method:
+1sklearn.preprocessing.quantile_transform
+13
+
+Table 3: All dataset statistics and descriptions.
+
+Domain # Samples # Features Positive rate
+
+Description
+
+COMPAS Law 6,172
+
+6
+
+Churn Retail 7,043
+
+19
+
+Support2 Healthcare 9,105
+
+29
+
+MIMIC-II Healthcare 24,508 17
+
+MIMIC-III Healthcare 27,348 57
+
+Income Finance 32,561 14
+
+Credit Retail 284,807 30
+
+Bikeshare Retail 17,389 16
+
+Wine Nature 4,898
+
+12
+
+45.51% 26.54% 25.92% 12.25% 9.84% 24.08% 0.17%
+-
+
+Reoffense risk scores Subscription churner
+Hospital mortality ICU mortality ICU mortality
+Income prediction Fraud detection
+Bikeshare rental counts Wine quality
+
+Click
+
+Ads
+
+1M
+
+11
+
+Higgs Nature 11M
+
+28
+
+Epsilon
+
+-
+
+500K
+
+2k
+
+Microsoft Ads 964K 136
+
+Yahoo Ads 709K 699
+
+Year Music 515K
+
+90
+
+50%
+
+2012 KDD Cup
+
+53% Higgs bosons prediction
+
+50% PASCAL Challenge 2008
+
+-
+
+MSLR-WEB10K
+
+-
+
+Yahoo LETOR dataset
+
+-
+
+Million Song Dataset
+
+B.1 EBM
+For EBM, we set inner_bags=100 and outer_bags=100 and set the maximum rounds as 20k to make sure it converges; we find EBM performs very stable out of this choice probably because we set total bagging as 10k that makes it stable; other parameters have little effect on final performance. For EBM GA2M, we search the number of interactions for 16, 32, 64, 128 and choose the best one on validation set. On large datasets we set the number of iterations as 64 as we find it performs quite well on medium-sized datasets.
+B.2 Spline
+We use the cubic spline in PyGAM package [22] that we follow Chang et al. [4] to set the number of knots per feature to a large number 50 (we find setting it larger would crash the model), and search the best lambda penalty between 1e-3 to 1e3 for 15 times and return the best model.
+B.3 NODE, NODE-GA2M and NODE
+We follow NODE to use QHAdam [16] and average the most recent 5 checkpoints. In addition, we adopt learning rate warmup at first 500 steps. And we early stop our training for no improvement for 11k steps and decay learning rate to 1/5 if no improvement happens in 5k steps. Here we list the hyperparameters we find works quite well and we do not do random search on these hyperparameters:
+· optimizer: QHAdam [16] (same as NODE paper) · lr_warmup_steps: 500 · num_checkpoints_avged: 5 · temperature_annealing_steps (KT ): 4k · min_temperature: 0.01 (0.01 is small enough for making one-hot vector. And after KT steps
+we set the function to produce one-hot vector exactly.) · batch_size: 2048, or the max batch size that fits in GPU memory with minimum 128
+Maximum training time: 20 hours. This is just to avoid model training for too long.
+We use random search to find the best hyperparameters which we list the range in below. We list the random search range for NODE:
+· num_layers: {2, 3, 4, 5}
+14
+
+· total tree counts (= num_trees × num_layers): {500, 1000, 2000, 4000} · depth: {2, 4, 6} · tree_dim: {1, 2, 3} · output_dropout (p1): {0, 0.1, 0.2} · colsample_bytree: {1, 0.5, 0.1, 1e-5} · lr: {0.01, 0.005} · l2_lambda: {0., 1e-7, 1e-6, 1e-5} · add_last_linear (to add last linear weight or not): {0, 1} · last_dropout (p2, only if add_last_linear=1): {0, 0.1, 0.2, 0.3} · seed: uniform distribution [1, 100] For NODE-GAM and NODE-GA2M, we have additional parameters: · arch: {GAM, AB-GAM} · dim_att (dimension of attention embedding E): {8, 16, 32} We show the best hyperparameters for each dataset in Section C. B.4 XGBoost For large datasets in NODE, we directly report the performance from the original NODE paper. For medium-sized data, we set the depth of xgboost as 3, and learning rate as 0.1 with n_estimators=50k and set early stopping for 50 rounds to make sure it converges. B.5 Random Forest (RF) We use the default hyperparameters from sklearn and set the number of trees to a large number 1000.
+C Best hyperparameters found in each dataset
+Here we report the best hyperparameters we find for 9 medium-sized datasets in Table 4 (NODEGAM), Table 5 (NODE-GA2M), and Table 6 (NODE). We report the best hyperparameters for large datasets in Table 7 (NODE-GAM) and Table 8 (NODE-GA2M).
+D Complete shape graphs in Bikeshare and MIMIC2
+We list all main effects of Bikeshare in Fig. 7 and top 16 interactions effects in Fig. 8. We list all main effects of MIMIC2 in Fig. 9 and top 16 interactions effects in Fig. 10.
+15
+
+Table 4: The best hyperparameters for NODE-GAM architecture.
+
+Dataset
+batch size
+num layers
+num trees
+depth
+addi tree dim
+output dropout
+
+Compas 2048 5 800 4 2
+0.3
+
+Churn Support2 Mimic2 Mimic3 Adult Credit Bikeshare Wine 2048 2048 2048 512 2048 2048 2048 2048
+
+3
+
+4
+
+4
+
+33
+
+5
+
+2
+
+5
+
+166
+
+125
+
+500 1333 666 400
+
+250 800
+
+4
+
+2
+
+4
+
+64
+
+2
+
+2
+
+2
+
+2
+
+1
+
+1
+
+01
+
+2
+
+1
+
+1
+
+0.1
+
+0.1
+
+0
+
+0.2 0.1 0.2
+
+0.2 0
+
+colsample bytree
+
+0.5
+
+0.5 1e-5 0.5 1e-5 0.5 0.1
+
+0.5 0.5
+
+lr
+
+0.01 0.005 0.01 0.01 0.005 0.01 0.01 0.005 0.005
+
+l2 lambda
+
+1e-5
+
+1e-5
+
+1e-6
+
+1e-7 1e-7 0
+
+0
+
+1e-7 1e-5
+
+add
+
+last
+
+1
+
+1
+
+1
+
+0
+
+11
+
+1
+
+1
+
+1
+
+linear
+
+last dropout
+
+0
+
+0
+
+0
+
+0
+
+00
+
+0
+
+0.3 0.1
+
+seed
+
+67
+
+48
+
+43
+
+99
+
+97 46 87
+
+55 31
+
+arch AB-GAM AB-GAM GAM AB-GAM GAM GAM AB-GAM GAM GAM
+
+dim att
+
+16
+
+8
+
+-
+
+32
+
+-
+
+-
+
+8
+
+-
+
+-
+
+16
+
+Table 5: The best hyperparameters for NODE-GA2M architecture.
+
+Dataset Compas Churn Support2 Mimic2 Mimic3 Adult Credit Bikeshare Wine
+
+batch size
+
+2048
+
+2048
+
+256
+
+256
+
+512 256 512 2048 512
+
+num layers
+
+4
+
+3
+
+2
+
+2
+
+4
+
+2
+
+2
+
+4
+
+4
+
+num trees
+
+1000
+
+333
+
+2000 2000 1000 2000 1000
+
+125
+
+1000
+
+depth
+
+2
+
+2
+
+6
+
+6
+
+6
+
+6
+
+6
+
+6
+
+6
+
+addi
+
+tree
+
+2
+
+2
+
+2
+
+0
+
+1
+
+2
+
+0
+
+1
+
+1
+
+dim
+
+output dropout
+
+0.2
+
+0
+
+0.1
+
+0
+
+0.2 0.1 0.2
+
+0
+
+0.2
+
+colsample bytree
+
+0.2
+
+0.5
+
+1
+
+0.2
+
+0.5 1 0.2
+
+0.5
+
+0.5
+
+lr 0.005 0.005 0.01 0.005 0.01 0.01 0.01 0.01 0.01
+
+l2 lambda
+
+0
+
+0
+
+0
+
+1e-5
+
+0
+
+0
+
+0
+
+0
+
+0
+
+add
+
+last
+
+1
+
+0
+
+0
+
+0
+
+0
+
+1
+
+1
+
+1
+
+0
+
+linear
+
+last dropout
+
+0.2
+
+0.2
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0.3
+
+0
+
+seed 32
+
+31
+
+33
+
+10
+
+87 33 38
+
+83
+
+87
+
+arch GAM AB-GAM AB-GAM AB-GAM AB-GAM GAM AB-GAM GAM AB-GAM
+
+dim att
+
+-
+
+32
+
+32
+
+8
+
+16
+
+-
+
+32
+
+-
+
+16
+
+17
+
+Table 6: The best hyperparameters for NODE architecture.
+
+Dataset Compas Churn Support2 Mimic2 Mimic3 Adult Credit Bikeshare Wine
+
+batch size
+
+2048 2048 2048
+
+2048 2048 2048 512
+
+2048 2048
+
+num layers
+
+5
+
+4
+
+2
+
+3
+
+2 23
+
+3
+
+2
+
+num trees
+
+100 125 1000 166 1000 1000 1333 333 500
+
+depth 2
+
+2
+
+4
+
+6
+
+4 46
+
+4
+
+4
+
+addi
+
+tree
+
+1
+
+0
+
+0
+
+dim
+
+0
+
+0 01
+
+1
+
+1
+
+output dropout
+
+0
+
+0 0.2 0.2 0.2 0.2 0.2 0.1 0
+
+colsample bytree
+
+0.2
+
+0.5
+
+0.2
+
+0.2 0.2 0.2 0.2
+
+0.5
+
+1
+
+lr 0.005 0.005 0.005 0.005 0.005 0.005 0.005 0.005 0.01
+
+l2 lambda
+
+0 1e-5 1e-7 1e-6 1e-7 1e-7 1e-6 1e-5
+
+0
+
+add
+
+last
+
+0
+
+0
+
+0
+
+linear
+
+0
+
+0 01
+
+1
+
+0
+
+last dropout
+
+0
+
+0
+
+0
+
+0
+
+0 0 0 0.3 0
+
+seed
+
+3 26 93
+
+17 93 93 82 49 73
+
+18
+
+Table 7: The best hyperparameters for NODE-GAM architecture for 6 large datasets.
+
+Dataset
+batch size
+num layers
+num trees
+depth
+addi tree dim
+output dropout
+
+Click 2048
+5 800
+4 2
+0
+
+Epsilon 2048 5 400 4 2
+0.1
+
+Higgs Microsoft Yahoo 2048 2048 2048
+
+5
+
+4
+
+4
+
+200
+
+125
+
+500
+
+4
+
+6
+
+4
+
+2
+
+2
+
+0
+
+0
+
+0.1
+
+0.2
+
+Year 2048
+2 500
+2 1
+0.1
+
+colsample bytree
+
+1e-5
+
+0.1
+
+0.5
+
+0.1
+
+0.1
+
+0.5
+
+lr
+
+5e-3 1e-2 5e-3 5e-3 5e-3 1e-2
+
+l2 lambda
+
+1e-7
+
+0
+
+1e-5
+
+0
+
+1e-6 1e-6
+
+add
+
+last
+
+0
+
+1
+
+1
+
+0
+
+0
+
+1
+
+linear
+
+last dropout
+
+0
+
+0.1
+
+0
+
+0.1
+
+0.2
+
+0.1
+
+seed
+
+97
+
+31
+
+67
+
+67
+
+14
+
+58
+
+arch AB-GAM AB-GAM AB-GAM AB-GAM AB-GAM AB-GAM
+
+dim att
+
+32
+
+16
+
+32
+
+8
+
+8
+
+16
+
+19
+
+Table 8: The best hyperparameters for NODE-GA2M architecture for 6 large datasets.
+
+Dataset Click Epsilon Higgs Microsoft Yahoo Year
+
+batch size
+
+2048
+
+2048
+
+2048
+
+1024
+
+2048
+
+512
+
+num layers
+
+3
+
+2
+
+2
+
+4
+
+5
+
+5
+
+num trees
+
+1333 2000 1000
+
+500
+
+800
+
+800
+
+depth
+
+4
+
+2
+
+4
+
+6
+
+4
+
+6
+
+addi
+
+tree
+
+2
+
+2
+
+0
+
+0
+
+0
+
+0
+
+dim
+
+output dropout
+
+0.2
+
+0.2
+
+0
+
+0.1
+
+0.2
+
+0.2
+
+colsample bytree
+
+0.5
+
+0.5
+
+1
+
+1
+
+0.5
+
+1
+
+lr
+
+0.005 0.01
+
+l2 lambda
+
+1e-6
+
+1e-6
+
+0.01 0.005 0.005 0.005
+
+1e-6
+
+0
+
+0
+
+1e-6
+
+add
+
+last
+
+1
+
+1
+
+1
+
+1
+
+1
+
+1
+
+linear
+
+last dropout
+
+0.15
+
+0.3
+
+0
+
+0.15
+
+0
+
+0
+
+seed
+
+36
+
+5
+
+95
+
+69
+
+25
+
+78
+
+arch AB-GAM AB-GAM AB-GAM AB-GAM AB-GAM AB-GAM
+
+dim att
+
+32
+
+32
+
+8
+
+8
+
+32
+
+16
+
+20
+
+season (Imp=1.75e+01)
+
+NODE-GA2M
+
+30
+
+NODE-GAM
+
+20
+
+EBM Spline
+
+10
+
+0
+
+10
+
+20
+
+30
+
+1.0 0 5
+
+1.5 2.0 2.5 3.0 3.5 4.0 holiday (Imp=6.21e-01) NODE-GA2M NODE-GAM EBM Spline
+
+10
+
+15
+
+20
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+temp (Imp=3.05e+01)
+
+150
+
+100
+
+50
+
+0
+
+50
+
+100
+
+NODE-GA2M
+
+150
+
+NODE-GAM
+
+200
+
+EBM Spline
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+yr (Imp=4.12e+01)
+
+40
+
+NODE-GA2M NODE-GAM
+
+EBM
+
+20
+
+Spline
+
+0
+
+20
+
+40
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+weekday (Imp=4.52e+00)
+
+15
+
+NODE-GA2M NODE-GAM
+
+10
+
+EBM Spline
+
+5
+
+0
+
+5
+
+10
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+atemp (Imp=5.79e+00)
+
+50
+
+0
+
+50
+
+100
+
+NODE-GA2M
+
+NODE-GAM
+
+150
+
+EBM
+
+Spline
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+mnth (Imp=7.60e+00)
+
+20
+
+NODE-GA2M NODE-GAM
+
+EBM
+
+10
+
+Spline
+
+0
+
+10
+
+20
+
+2
+
+4
+
+6
+
+8
+
+10 12
+
+workingday (Imp=3.53e+00)
+
+4
+
+NODE-GA2M NODE-GAM
+
+2 0
+
+EBM Spline
+
+2
+
+4
+
+6
+
+8
+
+10 0.0
+60 40 20
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+hum (Imp=1.27e+01)
+
+NODE-GA2M NODE-GAM EBM Spline
+
+0
+
+20
+
+40
+
+60
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+hr (Imp=9.79e+01)
+
+NODE-GA2M
+
+200
+
+NODE-GAM EBM
+
+Spline
+
+100
+
+0
+
+100
+
+0
+0 20 40 60 80 100 120
+1.0
+
+5
+
+10
+
+15
+
+20
+
+weathersit (Imp=8.60e+00)
+
+NODE-GA2M NODE-GAM EBM Spline
+
+1.5 2.0 2.5 3.0 3.5 4.0
+
+0
+
+50
+
+100
+
+150
+
+NODE-GA2M NODE-GAM
+
+EBM
+
+200
+
+Spline
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+Figure 7: The shape plots of all features (main effects) in Bikeshare. We also show the feature importance (Imp).
+
+atemp
+
+100 50 0 50 100 150 200
+0
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0 0
+60 40 20 0 20 40 60 80
+0
+10
+
+hr_workingday (Imp=3.51e+01)
+
+workingday=0 workingday=1
+
+5
+
+10
+
+15
+
+hr_atemp (Imp=8.h2r0e+00)
+
+20 40
+
+30
+
+20
+
+10
+
+0
+
+10
+
+20
+
+30
+
+40
+
+5hr_wea1t0hehrrsit
+
+15 20 (Imp=5.33e+00)
+
+weathersit=1 weathersit=2 weathersit=3 weathersit=4
+
+work5ingday_te10mphr(Imp=135.80e+002)0 workingday=0 workingday=1
+
+0
+
+10
+
+20
+
+0.0
+
+0.2
+
+0.4 temp 0.6
+
+0.8
+
+1.0
+
+hr
+
+40 20 0 20 40
+0 40
+
+yr_hr (Imp=2.18e+01) yr=0 yr=1
+
+5
+
+10
+
+15
+
+20
+
+season_hr (Imhrp=7.51e+00)
+
+20
+
+0
+
+20
+40 0
+10 5
+
+season=1 season=2 season=3 season=4
+
+5 yr_temp
+
+1(I0mhpr=5.271e5+00)
+
+20 yr=0 yr=1
+
+0
+
+5
+
+10
+
+15
+
+20
+
+0.0
+
+0.2 mnth_hr
+
+(Im0p.4=3t.e6m3pe+0.060)
+
+0.8
+
+1.0
+
+15
+
+20
+
+10
+
+15
+
+5
+
+0 10
+5
+
+5
+
+10
+
+0
+
+15
+
+2
+
+4
+
+6mnth 8 10 12
+
+hum
+
+hum
+
+weekday
+
+hr_weekday (Imp=1.60e+01)
+
+6
+
+40
+
+5 20
+4
+
+3
+
+0
+
+2 20
+1
+
+0
+
+40
+
+0
+
+5
+
+10 15 20
+
+hr_hum (Imphr=6.90e+00)
+
+1.0
+
+75
+
+0.8
+
+50
+
+0.6
+
+25
+
+0
+
+0.4
+
+25
+
+0.2
+
+50
+
+0.0
+
+75
+
+0 mn5th_hum1(0Imhrp=4.1753e+002)0
+
+1.0
+
+30
+
+0.8
+
+20
+
+0.6
+
+10
+
+0
+
+0.4
+
+10
+
+0.2
+
+20
+
+0.0
+
+30
+
+2
+
+4yr_ate6mmnpth(Im8p=3.5160e+00)12
+
+20
+
+yr=0 yr=1
+
+10
+
+0
+
+10
+
+20
+
+0.0
+
+0.2
+
+0.4 atemp 0.6
+
+0.8
+
+1.0
+
+temp
+
+hr_temp (Imp=1.14e+01)
+
+1.0
+
+60
+
+0.8
+
+40
+
+20 0.6
+0
+
+0.4
+
+20
+
+0.2
+
+40
+
+0.0
+
+60
+
+0
+
+5
+
+10 15 20
+
+yr_mnthhr (Imp=5.87e+00)
+
+15
+
+yr=0
+
+yr=1
+
+10
+
+5
+
+0
+
+5
+
+10
+
+15 2 working4day_ate6mmnpth(Imp=8 4.13e+1000) 12
+
+15
+
+workingday=0 workingday=1
+
+10
+
+5
+
+0
+
+5
+
+10
+
+0.0
+20 15
+
+mn0.t2h_worki0n.g4daatyem(Ipm0p.6=3.56e+0.080) 1.0 workingday=0 workingday=1
+
+10
+
+5
+
+0
+
+5
+
+10
+
+15
+
+2
+
+4
+
+6mnth 8
+
+10 12
+
+Figure 8: The shape plots of top 16 interactions in Bikeshare. We also show the feature importance (Imp).
+
+21
+
+2.5
+
+Age (Imp=4.57e-01) NODE-GA2M
+
+2.0
+
+NODE-GAM EBM
+
+1.5
+
+Spline
+
+1.0
+
+0.5
+
+0.0
+
+0.5
+
+1.0
+
+20
+1.2 1.0 0.8 0.6 0.4 0.2 0.0 0.2 0.4
+1
+5
+4
+
+40
+
+60
+
+80
+
+100
+
+Temperature (Imp=5.37e-02)
+
+NODE-GA2M NODE-GAM EBM Spline
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+WBC (Imp=1.63e-01)
+
+NODE-GA2M NODE-GAM EBM Spline
+
+3
+
+2
+
+1
+
+0
+
+0
+
+200
+
+400
+
+600
+
+800
+
+Bilirubin (Imp=2.80e-01)
+
+2
+
+1
+
+0
+
+1
+
+NODE-GA2M
+
+2
+
+NODE-GAM EBM
+
+Spline
+
+0
+
+20
+
+40
+
+60
+
+80
+
+Lymphoma (Imp=3.41e-02)
+
+1.2
+
+NODE-GA2M
+
+1.0
+
+NODE-GAM EBM
+
+Spline
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+GCS (Imp=3.37e-01)
+
+0.6
+
+NODE-GA2M
+
+NODE-GAM
+
+0.4
+
+EBM Spline
+
+0.2
+
+0.0 0.2 0.4
+
+1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0
+
+PFratio (Imp=2.21e-01)
+
+NODE-GA2M
+
+1.0
+
+NODE-GAM EBM
+
+Spline
+
+0.5
+
+0.0
+
+0.5
+
+1.0 0
+1.5 1.0 0.5 0.0 0.5 1.0 1.5 2.0
+0.08 0.06 0.04
+
+500 1000 1500 2000 2500 CO2 (Imp=5.39e-02)
+NODE-GA2M NODE-GAM EBM Spline
+
+10
+
+20
+
+30
+
+40
+
+50
+
+AdmissionType (Imp=1.19e-02)
+
+NODE-GA2M NODE-GAM EBM Spline
+
+0.02
+
+0.00
+
+0.02
+
+0.04 0.00 0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.00.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+SBP (Imp=1.05e-01)
+
+2.5
+
+NODE-GA2M
+
+2.0
+
+NODE-GAM EBM
+
+Spline
+
+1.5
+
+1.0
+
+0.5
+
+0.0
+
+0.5 0
+
+50 100 150 200 250 300
+
+Renal (Imp=2.10e-01)
+
+1.0
+
+NODE-GA2M
+
+0.8
+
+NODE-GAM EBM
+
+Spline
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+0.2 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+Na (Imp=1.43e-01) 1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+NODE-GA2M
+
+0.2
+
+NODE-GAM EBM
+
+0.4
+
+Spline
+
+100 110 120 130 140 150 160 170
+
+AIDS (Imp=2.81e-03)
+
+0.0
+
+0.1
+
+0.2
+
+0.3
+
+NODE-GA2M
+
+NODE-GAM
+
+EBM
+
+0.4
+
+Spline
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+1.0
+
+HR (Imp=2.05e-01)
+
+2.5
+
+NODE-GA2M
+
+2.0
+
+NODE-GAM EBM
+
+Spline
+
+1.5
+
+1.0
+
+0.5
+
+0.0
+
+0.5 0
+0.75 0.50 0.25
+
+50
+
+100
+
+150
+
+Urea (Imp=1.70e-01)
+
+200 NODE-GA2M NODE-GAM EBM Spline
+
+0.00
+
+0.25
+
+0.50
+
+0.75
+
+0 0.8
+
+50 100 150 200 250 K (Imp=7.35e-02)
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+0.2
+
+NODE-GA2M
+
+0.4
+
+NODE-GAM EBM
+
+0.6
+
+Spline 24
+
+6
+
+8 10 12 14 16
+
+MetastaticCancer (Imp=7.04e-02)
+
+1.0
+
+NODE-GA2M NODE-GAM
+
+0.8
+
+EBM Spline
+
+0.6
+
+0.4
+
+0.2
+
+0.0
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+1.0
+
+0.8
+
+0.8
+
+0.6
+
+0.6
+
+0.4
+
+0.4
+
+0.2
+
+0.2
+
+0.00.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0 0.00.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+Figure 9: The shape plots of all features (main effects) in MIMIC2. We also show the feature importance (Imp).
+
+22
+
+SBP
+
+Bilirubin
+
+300
+
+GCS_SBP (Imp=8.80e-02)
+
+250
+
+200
+
+GCS_Bilirubin (Imp=8.41e-02)
+
+0.3
+
+80
+
+0.2 60
+0.1
+
+Age_Bilirubin (Imp=5.66e-02)
+
+0.15
+
+80
+
+0.10 60
+0.05
+
+0.6
+
+200
+
+0.4
+
+0.2
+
+150
+
+Age_HR (Imp=4.79e-02)
+
+0.20 0.15 0.10 0.05
+
+Bilirubin
+
+Bilirubin
+
+150
+
+0.0
+
+40
+
+0.00
+
+40
+
+0.0
+
+HR
+
+100
+
+0.00
+
+100
+
+0.1
+
+0.05
+
+0.2
+
+0.05
+
+50
+
+0.2
+
+20
+
+0.10
+
+20
+
+0.4
+
+50
+
+0.10
+
+0
+
+0.3
+
+0
+
+0.15
+
+0
+
+0.6
+
+0
+
+0.15 0.20
+
+1
+
+2
+
+3
+
+4
+
+5
+
+1
+
+2
+
+3
+
+4
+
+5
+
+20 40 60 80 100
+
+20 40 60 80 100
+
+Urea_BilirubinG(CImS p=4.77e-02)
+
+GCS_PFratio G(ICmSp=4.29e-02)
+
+HR_PFratio (AImgep=4.24e-02)
+
+HR_Urea (ImAgpe=4.13e-02)
+
+80
+
+0.10
+
+2500
+
+0.2
+
+2500
+
+0.15
+
+250
+
+0.2
+
+60
+
+0.05
+
+2000
+
+0.1
+
+2000
+
+0.10
+
+200
+
+0.05
+
+0.1
+
+40
+
+1500 0.00
+
+1500 0.0
+
+0.00
+
+150
+
+0.0
+
+Urea
+
+PFratio
+
+PFratio
+
+20
+
+1000 0.05
+500 0.10
+
+1000 0.1
+500
+0.2
+
+0.05 100
+
+0.10
+
+50
+
+0.15
+
+0.1 0.2
+
+0
+
+0
+
+0
+
+0
+
+0 50 100 150 200 250 Age_GCS (IUmrepa=4.09e-02)
+
+1
+
+2
+
+3
+
+4
+
+5
+
+PFratio_WBC G(ICmS p=3.98e-02)
+
+0
+
+50 100 150 200
+
+Age_WBC (ImHRp=3.76e-02)
+
+0
+
+50 100 150 200
+
+GCS_Renal (IHmRp=3.62e-02)
+
+5.0 4.5 4.0 3.5
+
+0.15 800
+0.10
+
+0.05
+
+600
+
+0.15
+
+800
+
+0.10
+
+0.05
+
+600
+
+4.0
+
+0.2
+
+3.5
+
+0.1
+
+3.0
+
+2.5
+
+0.15 0.10 0.05
+
+Renal
+
+WBC
+
+WBC
+
+3.0
+
+0.00
+
+400
+
+0.00
+
+400
+
+0.0
+
+2.0
+
+0.00
+
+2.5 2.0 1.5 1.0
+
+0.05 200
+0.10
+
+0.15
+
+0
+
+0.05
+
+0.10
+
+200
+
+0.15
+
+0
+
+1.5
+
+0.1
+
+1.0
+
+0.2
+
+0.5
+
+0.0
+
+0.05 0.10 0.15
+
+20 40 60 80 100
+
+0 500 1000 1500 2000 2500
+
+20 40 60 80 100
+
+1
+
+2
+
+3
+
+4
+
+5
+
+GCS_HR (ImAgpe=3.58e-02) 200
+150
+
+0.15
+
+Na_BilirubinPF(rImatipo=3.45e-02)
+
+80
+
+0.10
+
+0.05
+
+60
+
+0.2
+
+170
+
+0.1
+
+160
+
+150
+
+GCS_Na (ImAgpe=3.36e-02)
+
+PFratio_RenalG(CImS p=3.29e-02)
+
+0.15
+
+4.0
+
+0.15
+
+0.10
+
+3.5
+
+3.0
+
+0.10
+
+0.05
+
+2.5
+
+0.05
+
+Bilirubin
+
+100
+50
+0 1
+
+2
+
+3
+
+4
+
+GCS
+
+0.00
+
+40
+
+0.05 20
+0.10
+
+5
+
+0.15
+
+0 100 120 140 160
+
+Na
+
+0.0
+
+Na
+
+140
+
+130
+
+0.1
+
+120
+
+110
+
+0.2
+
+100
+
+1
+
+2
+
+3
+
+4
+
+GCS
+
+Renal
+
+0.00
+
+2.0
+
+0.00
+
+0.05
+
+1.5
+
+0.05
+
+1.0
+
+0.10
+
+0.5
+
+0.10
+
+0.15
+
+0.0
+
+0.15
+
+5
+
+0 500 1000 1500 2000 2500
+
+PFratio
+
+GCS
+
+HR
+
+Figure 10: The shape plots of top 16 interactions in MIMIC2. We also show the feature importance (Imp).
+
+23
+
+

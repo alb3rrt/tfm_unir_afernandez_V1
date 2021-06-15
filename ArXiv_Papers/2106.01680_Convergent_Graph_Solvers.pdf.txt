@@ -1,0 +1,1560 @@
+Convergent Graph Solvers
+
+arXiv:2106.01680v2 [cs.LG] 5 Jun 2021
+
+Junyoung Park KAIST
+junyoungpark@kaist.ac.kr
+
+Jinhyun Choo HKU
+jchoo@hku.hk
+
+Jinkyoo Park KAIST
+jinkyoo.park@kaist.ac.kr
+
+Abstract
+We propose the convergent graph solver (CGS)1, a deep learning method that learns iterative mappings to predict the properties of a graph system at its stationary state (fixed point) with guaranteed convergence. CGS systematically computes the fixed points of a target graph system and decodes them to estimate the stationary properties of the system without the prior knowledge of existing solvers or intermediate solutions. The forward propagation of CGS proceeds in three steps: (1) constructing the input dependent linear contracting iterative maps, (2) computing the fixed-points of the linear maps, and (3) decoding the fixed-points to estimate the properties. The contractivity of the constructed linear maps guarantees the existence and uniqueness of the fixed points following the Banach fixed point theorem. To train CGS efficiently, we also derive a tractable analytical expression for its gradient by leveraging the implicit function theorem. We evaluate the performance of CGS by applying it to various network-analytic and graph benchmark problems. The results indicate that CGS has competitive capabilities for predicting the stationary properties of graph systems, irrespective of whether the target systems are linear or non-linear. CGS also shows high performance for graph classification problems where the existence or the meaning of a fixed point is hard to be clearly defined, which highlights the potential of CGS as a general graph neural network architecture.
+1 Introduction
+Our world is replete with networked systems, where their overall properties emerge from complex interactions among the system entities. Such networked systems attain their unique properties from their stationary states and hence, finding these stationary properties is a common goal of many problems that arise in the science and engineering field. Example problems include the minimization of the molecule potential energy that finds the stationary positions of atoms to compute the potential energies of the molecules [29], the PageRank algorithm that finds the stationary importance of online web pages to compute recommendation scores [8], and network analysis of fluid flow in porous media that finds the stationary pressures inside pore networks to compute the macroscopic properties of the media [15].
+In these network-analytic problems, the network is often represented as a graph, and the stationary states are often computed through problem-specific iterative methods. These iterative methods typically derive an analytic iterative map based on a priori knowledge of the target problem. By
+1The code is available from https://github.com/Junyoungpark/CGS.
+Preprint. Under review.
+
+applying the iterative map repeatedly, these methods compute the stationary states (fixed points) and the associated properties of the target system.
+Instead of designing problem-specific iterative methods, researchers have suggested to employ deep learning approaches to learn iterative methods. Such approaches can be classified into two classes: hybrid and native approaches. Hybrid approaches combine an existing iterative method with a feed-forward network to compute the properties of the target system accurately while enhancing the convergence property and the solution quality of the existing method [18, 19, 32]. Native approaches employ learnable iterative methods that do not require any existing iterative methods. Such approaches set the initial states as either constant or learned values, learn iterative maps using graph neural networks (GNN), and apply the learned iterative maps to find the fixed points [1, 11].
+However, the aforementioned approaches entail challenges in learning the iterative methods. The hybrid approaches require the knowledge of the analytic iterative map to compute the fixed points or intermediate states to promote the convergence property of the learned solvers. Satisfying such requirements is often difficult for complex target systems. On the other hand, the native approaches seldom ensure the existence of fixed points of the learned iterative maps. Due to this lack of guaranteed existence of the fixed points, the number of iterative steps needs to be prescribed as a hyperparameter to ensure the termination of the iterations. This practice may cause premature termination if the prescribed iteration number is inadequately small, or inefficient backward propagation if the iteration number is large.
+In this study, we propose the convergent graph solver (CGS), a deep learning method that learns iterative mappings to predict the properties of a graph system at its stationary states (fixed points) with guaranteed convergence. CGS systematically computes the fixed points of a target graph system and decodes them to estimate the system's stationary properties without requiring the prior knowledge of existing solvers and intermediate solutions. The forward propagation of CGS is designed to proceed in the following three steps: (1) constructing the input dependent linear contracting iterative maps, (2) computing fixed-point via iterative methods, and (3) decoding fixed-points to estimate the properties. The unique novelties of CGS are as follows:
+· Input dependent linear contracting iterative maps: CGS uses the input graph, which dictates the specification of the target network-analytic problem, to construct a set of linear contracting maps, each of which is guaranteed to have the unique fixed point that embeds the important features for conducting various end tasks.
+· Fixed point based forward and backward computation: CGS computes the solution of constructed linear maps via iterative methods (or direct inversion) and use them to (2) compute efficiently the gradient via the implicit function theorem during training phase (O(1) memory consumption over the iterative steps), or (2) predict the output with the imposed behavioral inductive biases during execution phase.
+We evaluate the performance of CGS using two types of paradigmatic network-analytic problems: predicting the stationary properties of physical diffusion in networks and the state values of Markov decision processes, where the true labels can be computed analytically using linear and non-linear analytical iterative methods, respectively. We also employ CGS to solve various graph classification benchmark tasks. The results show that the prediction accuracy of CGS is on-par or superior to that of deep graph models, and suggest that CGS can be an effective general computational layer for processing graph-structured data.
+2 Related Work
+Convergent neural models. Previous studies that have conducted to achieve the convergence property of neural network embedding, such as hidden vectors of MLP and hidden states of recurrent neural networks, can be grouped into two categories: soft and hard approaches. Soft approaches typically attain the desired convergence properties by augmenting the loss functions [13, 28]. Although the soft approaches are network-architecture agnostic, these methods cannot guarantee the convergence of the learned mappings. On the other hand, hard approaches seek to guarantee the convergence of the iterative maps by restricting their parameters in certain ranges [17, 36, 27, 22]. This is achieved by projecting the model's parameters into stable regions. However, such projection
+2
+
+may lead to non-optimal performance of the model since it is performed after the gradient update, i.e. the projection is disentangled from training objective.
+Implicit deep models. The forward propagation of CGS, which solves fixed point iterations, is closely related to implicit deep (or infinite-depth) models. Instead of defining the computational procedures (e.g., the depth of layer in neural network) explicitly, these models use implicit layers, which accept input-dependent equations and compute the solutions of the input equations, to perform forward propagation of the models. For instance, neural ordinary differential equations (NODE) [10, 26] numerically solve ODE until the solver tolerance is satisfied or the integration domain is covered, the optimization layers [16, 2] solve an optimization problem until the duality gap converges, and the fixed point models [4, 39] solve network-generated fixed point iterations until some numerical solver satisfy the convergence condition. Implicit models use these (intermediate) solutions to conduct various end tasks (e.g. regressions, or classifications). In this way, implicit models can impose desired behavioral characteristics into layers as inductive bias and hence, often show superior parameter/memory efficiency and predictability.
+Fixed points of graph convolution. Methods for finding the fixed points of graph convolutions have been suggested in various contexts of graph-related tasks. Several works have utilized GNN along with RNN-like connections to promote the GNN to find the fixed points of graph convolutions [1, 11, 23, 34]. Some have suggested to constrain the parameter space of GNN so that the trained GNN becomes a non-expansive map, thus producing the fixed point [17, 36]. Others have proposed to apply an additional GNN layer on the embedded graph and penalize the difference between the output of the additional GNN layer and the embedded graph to guide the GNN to find the fixed points [41]. It has been shown that regularizing GNN to find its fixed points improves the predictive performance of GNN [36, 41].
+Comparison between CGS and the existing approaches. Convergent graph solver (CGS) is closely related with aforementioned works; CGS is a convergent (hard approach), implicit, and graph convolution model. However, unlike these models, CGS is deigned to optimally balance between expressivity and mathematical tractability using a specially designed scheme to construct the fixed point equations. To be specific, CGS constructs the graph input dependent linear contracting iterative maps such each constructed linear map produces the unique fixed point that embeds the essential characteristics of the input graph for conducting end tasks. Furthermore, CGS utilizes the implicit function theorem to derive the gradient of its parameter with minimum memory usage (O(1) memory consumption). Comparing to the existing graph network models that aim to compute the fixed points of node embedding such as IGNN [17], LP-GNN [36], FDGNN [14], and SSE [11], CGS has higher expressivity because it can generate the input dependent transition matrix and input dependent bias term together, while others only construct the input dependent bias terms.
+
+3 Problem Description
+
+The objective of many network-analytic problems can be described as:
+
+Find a solution vector Y  from a graph G that represent target network system.
+
+In this section, we briefly explain a general iterative scheme to compute Y  from G. The problem
+specification G = (V, E) is a directed graph composed of a set of nodes V and a set of edges E. We define the ith node as vi and the edge from vi to vj as eij. The general scheme of iterative methods is given as follows:
+
+H[0] = f (G), H[n] = T (H[n-1]; G), Y [n] = g(H[n]; G),
+
+(1)
+
+n = 1, 2, ...
+
+(2)
+
+n = 0, 1, ...
+
+(3)
+
+where f (·) is the problem-specific initialization scheme that transforms G into the initial hidden embedding H[0], T is the problem-specific iterative map that updates the hidden embedding H[n] from the previous embedding H[n-1], and g(·) is the problem-specific decoding function that predicts the intermediate solution Y [n].
+
+3
+
+Figure 1: Overview of forward propagation of CGS. Given an input graph G, the parametergenerating network f constructs contracting linear transition maps T. The fixed points Hm of T are then computed via matrix inversion. The fixed points are aggregated into H, and then the decoder g decodes H to produce Y .
+
+T is designed such that the fixed point iteration (Equation 2) converges to the unique fixed point H:
+
+lim H[n] = H s.t. H = T (H, G)
+
+(4)
+
+n
+
+The solution Y  is then obtained by decoding H, i.e. g(H; G) Y .
+In many real-world network-analytic problems, we can obtain G and its corresponding solution Y , but not T , H[n] and Y [n]. Therefore, we aim to learn a mapping T from G to Y  without using T , H[n] and Y [n].
+
+3.1 Example: Graph Value Iteration
+
+Let us consider a finite Markov decision process (MDP), whose goal is to find the state values through the iterative applications of the Bellman optimality backup operator [6]. We assume that the state transition is deterministic.
+
+We define G = (V, E), where V and E are the set of states and transitions of MDP respectively. vi corresponds to the i-th state of the MDP, and eij corresponds to the state transition from state i to j. eij exists only if the state transition from state i to j is allowed in the MDP. The features of eij are the corresponding state transition rewards. The objective is to find the state values V . In this setting,
+the Bellman optimal backup operator T is defined as follows:
+
+Vi[n] = T (V [n-1]; G)
+
+max (rij
+jN (i)
+
++
+
+Vj[n-1])
+
+(5)
+
+where Vi[n] is the state value of vi estimated at n-th iteration, N (i) is the set of states that can be reached from the i-th state via one step transition, rij is the immediate reward related to eij, and  is the discount rate of the MDP. 2
+In this graph value iteration (GVI) problem, the initial values V [0] are set as zeros (i.e. f (·) = 0), then T is applied until V [n] converges, and V [n] is decoded with the identity mapping (i.e. g(·) is identity and H[n] V [n]). We will show later how GCS can construct the transition map T from the input graph and predict the converged state values V  without using Eq. (5).
+
+4 Convergent Graph Solvers
+We propose CGS that predicts the solution Y  from the given input graph G in three steps: (1) constructing linear iterative maps T from G, (2) computing the unique fixed points H of T via iterative methods, and (3) decoding H to produce Y  as shown in Figure 1.
+2We denote the discount rate of MDP as  to avoid confusion from the contraction factor of CGS, which is explained in Section 4.1.
+
+4
+
+4.1 Constructing linear iterative maps
+
+CGS first constructs an input-dependent contracting linear map T(· ; G) such that the repeated application of T(· ; G) always produces the unique fixed point H (i.e. limn H[n] = H) that embeds the essential characteristics of the input graph G for conducting end tasks. In other words, CGS learns to construct iterative maps tailored to each input graph G, from which the unique fixed
+points of the target system are guaranteed to be computed and used for conducting end tasks.
+
+To impose the contraction property on the linear map, CGS utilizes the following iterative map:
+
+T(H[n]; G) A(G)H[n] + B(G)
+
+(6)
+
+where  is the contraction factor, A(G)  Rp×p is the input-dependent transition parameter, and B(G)  Rp is the input-dependent bias parameter. p is the number of nodes in graph.
+
+To construct an input-dependent iterative map preserving the structural constraints required to guarantee the existence and uniqueness of a fixed point, we employ GNN-based parameter generating network f(·). The parameter generation procedure for T starts by encoding G = (V, E):
+
+V , E = f(V, E)
+
+(7)
+
+where V and E is the set of updated nodes embedding vi  Rq and edges embedding eij  R,
+
+respectively. CGS then constructs A(G) by computing the (i, j)th element of A(G) as follows:
+
+[A(G)]i,j =
+
+(eij ) d(i)
+
+if eij exists,
+
+(8)
+
+0
+
+otherwise.
+
+where (x) is a differentiable bounded function that projects x into the range [0.0, 1.0] such as sigmoid, and d(i) is the outward degree of vi (i.e. the number of outward edges of vi). B(G) is simply constructed by vectorizing the updated node embeddings as [B(G)]i,: = vi.
+Theorem 1. The existence and uniqueness of the linear transition map T(H[n]; G). The proposed scheme for constructing A(G) along with the bounded contraction factor 0.0 <  < 1.0 are the sufficient conditions for that T(H[n]; G) is  contracting and T has the unique fixed point H.
+Proof sketch for Theorem 1. A(G) is positive and its largest row sum is smaller than or equals to 1.0. Thus, by the Perron-Frobenius theorem [7], the largest eigenvalue of A(G) is lesser than or equals to 1.0, i.e., ||A(G)||  1.0. Then, the two conditions, ||A(G)||  1.0 and 0.0 <  < 1.0, ensures that T(· ; G) to be  contracting. Thus, by the Banach fixed point theorem [5], T has the unique fixed point H. Refer to Appendix A for a more detailed proof.
+
+Multi-head extension. T can be considered as a graph convolution layer defined in Equation 6. Thus, CGS can be easily extended to multiple convolutions in order to model a more complex iterative
+map. To achieve such multi-head extension with M graph convolutions, one can design f to produce a set of transition parameters [A1, ..., Am, ..., AM ] and a set of bias parameters [B1, ..., Bm, ..., BM ] for Tm(Hm[n]; G) AmHm[n] + Bm, m = 1, ..., M . Here, we omit the input-dependency of Am and Bm for notational brevity.
+
+4.2 Computing fixed points
+
+The fixed point Hm of the constructed iterative map Tm(Hm[n]; G) AmHm[n] + Bm satisfies Hm = AmHm + Bm for m = 1, ..., M . Due to the linearity, we can compute the fixed point of Tm via matrix inversion:
+
+Hm = (I - Am)-1Bm
+
+(9)
+
+where I  Rp×p is the identity matrix. The existence of (I - Am)-1 is assured from the fact that Tm is contracting (see Appendix B). One can find matrix inversions by applying various automatic
+differentiation tools while maintaining the differentiability. However, the computational complexity of the matrix inversion scales O(p3), which can limit this approach from being favorably scaled to
+
+large scale problems.
+
+To scale CGS to the larger graph inputs, we can also compute the fixed point of Tm by repeatedly applying the iterative map Tm starting from an arbitrary initial hidden state Hm[0]  Rp until the hidden embedding converges, i.e., limn Hm[n] = Hm .
+
+5
+
+One can choose a way to compute the fixed point between the direct and iterative methods depending on the size of the transition matrix Am and its sparsity because these factors can results in different computational speed and accuracy. In general, for small-sized problems, direction inversion can be favorable; while for large-sized problems, iterative approach is more efficient. (See Appendix G.3)
+
+4.3 Decoding fixed points
+
+The final step of CGS is to aggregate the fixed points of multiple iterative maps and decode the aggregated fixed points to produce Y . The entire decoding step is given as follows:
+
+H = [Hm || ... ||HM ]
+
+(10)
+
+Y  = g(H; G)
+
+(11)
+
+where H is the aggregated fixed points, M is the number of heads, and g(·) is the decoder which is analogous to the decoding function of the network-analytic problems (Equation 3).
+
+5 Training CGS
+
+To train CGS with gradient descent, we need to calculate the partial derivatives of the scalar-valued loss L with respect to the parameters of T. To do so, we express the partial derivatives using chain rule taking H as the intermediate variable
+
+L L H
+
+(·) = H (·)
+
+(12)
+
+where (·) denotes the parameters of A(G) or B(G).
+
+Here,
+
+L H
+
+is readily computable via an
+
+automatic
+
+differentiation
+
+package.
+
+However,
+
+computing
+
+H (·)
+
+is
+
+less
+
+straightforward
+
+since
+
+H
+
+and
+
+(·) are implicitly related via Equation 6. One possible option to compute the partial derivatives is to
+
+backpropagate through the iteration steps.
+
+Although this approach can be easily employed using the most automatic differentiation tools, it entails extensive memory usage. Instead, exploiting the stationarity of H, we can derive an analytical
+expression for the partial derivative using the implicit function theorem as follows:
+
+-1
+
+H
+
+g(H, A, B) g(H, A, B)
+
+=- (·)
+
+H
+
+(·)
+
+(13)
+
+where g(H, A, B) = H - (AH + B). Here, we omit the input-dependency of A and B for notational brevity. This option provides two desirable features: (1) it enables CGS to achieve faster forward/backward propagation by employing sophisticated iterative methods such as Anderson's acceleration [3], and (2) it allows one to train CGS with constant memory consumption over the iterative steps. The derivation of the partial derivatives and the software implementation of Equation 13 are provided in Appendix D and E, respectively.
+
+Note
+
+that
+
+the
+
+level
+
+of
+
+error
+
+in
+
+computing
+
+the
+
+fixed
+
+point
+
+can
+
+induce
+
+error
+
+for
+
+computing
+
+H (·)
+
+.
+
+If
+
+the direct inversion approach for computing the fixed point is prone to smaller error than iterative
+
+methods,
+
+it
+
+can
+
+be
+
+used
+
+for
+
+computing
+
+H (·)
+
+.
+
+We
+
+leave
+
+the
+
+rigorous
+
+sensitivity
+
+analysis
+
+to
+
+verify
+
+this
+
+as the future research.
+
+6 Experiments
+We first evaluate the performance of CGS for two types of network-analytic problems: (1) the stationary state of physical diffusion in networks where true solutions can be computed from linear iterative maps, and (2) the state values via GVI where true solutions can be calculated from non-linear iterative maps. We then assess the capabilities of CGS as a general GNN layer by applying CGS to solve several graph property prediction benchmarks and comparing its performance with baselines.
+
+6
+
+Figure 2: Diffusion experiment results. The x-axis, y-axis is the number of pores and the average MSE of the test graphs respectively. The error bars visualize the standard error of predictions. The prediction performance is measured from 500 instances per each size.
+
+Figure 3: Number of parameters vs. MSE (ns = 800).
+
+6.1 Physical diffusion in networks
+
+Diffusion of fluid, heat, and other physical quantities are omnipresent in science and engineering applications. Mathematically, physical diffusion in networks (e.g. pipe/pore networks) is often described by a graph. The stationary state of the graph can be expressed as
+
+kij(pi - pj) = 0, vi  V \ (V),
+
+(14)
+
+jN (i)
+
+pi = pbi , vi  (V),
+
+(15)
+
+where pi and pj are the potentials at vi and vj respectively, and kij is the conductance of the edge connecting the two nodes, and pbi is the prescribed potentials at the boundary nodes that belong to the set (V). Equation 14 specializes to a particular diffusion problem according to how p is prescribed
+(e.g. pressure for fluid flow, and temperature for heat transfer).
+
+As an exemplary case of physical diffusion, we consider fluid flow in porous media ­ particularly, finding the fluid pressures of a pore network that is in equilibrium state (the solution of Equation 14 and Equation 15). We model the pore network as a 3D graph whose nodes and edges correspond to pore chambers and throats respectively as shown in Figure 4. As standard, we assume linear diffusion such that p can be computed using a linear iterative method [15].
+
+We employ CGS to predict the equilibrium pressures Y 
+
+inside pore networks G. The node features are the Carte-
+
+sian coordinates, volume, diameter, and boundary indica-
+
+tor of its corresponding pore. Additionally, the boundary pressure is also as a node feature if the node corresponds
+
+Figure 4: Pore network graph
+
+to a boundary pore. The edge features are the cylinder
+
+volume, diameter, and length of its corresponding throat. We sample training graphs such that the graphs fit into 0.1 m3 cubes. The training graphs, which have 50­200 nodes, are then randomly
+
+generated as described in Appendix G.1. We train CGS such that it minimizes the mean-squared error (MSE) between the predicted ones and Y .
+
+To investigate the effectiveness of the multi-head extension, we train CGS(4), CGS(8) and CGS(16), where CGS(m) denotes CGS with m heads. As baseline models, we use implicit GNNs IGNN [17], SSE [11], and n-layer GNN models GNN(n). IGNN and SSE find the fixed points in the forward propagation step. We utilize the same GNN architecture as the encoders for all baselines except SSE. Please refer to Appendix G.1 for the details about the data generation, network architectures, and training schemes.
+
+All models except IGNN and GNN(1) show similar training performance, converging to MSE 0.005
+as shown in Appendix G.1.2. Unlike the training cases, all CGS models show better generalization capabilities than the baselines in predicting Y  as shown in Figure 2. CGSs with higher m show
+
+7
+
+Figure 5: Solutions of GVI with CGS. The balls represent the states of MDP and the ball colors show the prediction results and their corresponding targets. More details are described in the main text.
+
+Table 1: Graph Value Iteration results. We report the average MAPE and policy prediction accuracies (in %) of different ns and na combinations with 500 repeats per combination. All metrics are measured per graph.
+
+ns na SSE IGNN
+CGS(16) CGS(32) CGS(64)
+
+20
+
+5
+
+10
+
+7.40 ± 4.54 (0.75 ± 0.11 %)
+13.87 ± 4.69 (0.68 ± 0.12 %)
+
+5.98 ± 3.30 (0.72 ± 0.12 %)
+28.38 ± 1.77 (0.63 ± 0.13 %)
+
+4.60 ± 2.56 (0.81 ± 0.10 %)
+4.39 ± 2.67 (0.85 ± 0.09 %)
+4.55 ± 2.60 (0.85 ± 0.09 %)
+
+1.93 ± 1.22 (0.84 ± 0.10 %)
+2.00 ± 1.18 (0.83 ± 0.09 %)
+1.83 ± 1.18 (0.86 ± 0.09 %)
+
+50
+
+10
+
+15
+
+6.60 ± 2.74 (0.70 ± 0.08 %)
+28.13 ± 1.40 (0.61 ± 0.08 %)
+
+97.52 ± 0.11 (0.71 ± 0.12 %)
+29.44 ± 1.35 (0.62 ± 0.13 %)
+
+1.93 ± 1.12 (0.81 ± 0.07 %)
+1.90 ± 1.07 (0.81 ± 0.06 %)
+1.78 ± 1.02 (0.83 ± 0.07 %)
+
+1.65 ± 1.06 (0.84 ± 0.09 %)
+2.16 ± 1.11 (0.77 ± 0.10 %)
+2.36 ± 1.37 (0.85 ± 0.09 %)
+
+75
+
+10
+
+15
+
+6.52 ± 2.49 (0.69 ± 0.06 %)
+28.21 ± 1.29 (0.60 ± 0.07 %)
+
+97.51 ± 0.06 (0.67 ± 0.06 %)
+29.20 ± 0.88 (0.60 ± 0.07 %)
+
+1.76 ± 0.86 (0.80 ± 0.06 %)
+1.73 ± 0.85 (0.81 ± 0.05 %)
+1.68 ± 0.82 (0.83 ± 0.05 %)
+
+1.57 ± 0.86 (0.80 ± 0.06 %)
+1.24 ± 0.48 (0.76 ± 0.06 %)
+1.23 ± 0.76 (0.83 ± 0.05 %)
+
+100
+
+10
+
+15
+
+6.66 ± 2.21 (0.68 ± 0.06 %)
+28.00 ± 1.15 (0.60 ± 0.06 %)
+
+97.50 ± 0.05 (0.67 ± 0.06 %)
+29.17 ± 0.81 (0.60 ± 0.06 %)
+
+1.73 ± 0.83 (0.80 ± 0.05 %)
+1.72 ± 0.87 (0.80 ± 0.05 %)
+1.59 ± 0.78 (0.82 ± 0.05 %)
+
+1.45 ± 0.77 (0.79 ± 0.05 %)
+1.19 ± 0.41 (0.76 ± 0.05 %)
+1.13 ± 0.67 (0.82 ± 0.05 %)
+
+#. params
+43,5213 268,006 258,469 265,669 280,069
+
+superior prediction results for the test cases. This difference evinces that the use of multi-head extension (i.e., multiple linear iterative maps) is advantageous due to the increased expressivity. Also, when comparing CGS(8) and GNN(1), which utilize the same encoder architecture and thus has the same number of parameters as shown in Figure 3, CGS(8) shows better prediction performance (see the vertical dashed line). This is because the 1-hop aggregation cannot provide enough information to compute the equilibrium pressure. This result indicates that CGS successfully accommodates the long-range patterns in graphs without adopting additional graph convolution layers.
+6.2 Graph value iteration
+We investigate the performance of CGS on graph value iteration (GVI) problems, where the iterative map (Equation 5) is non-linear as explained in Section 3.1. The goal of experiments is to show that CGS can estimate accurately the state values computed from the nonlinear iterative map, even using the set of learned linear iterative maps, as shown in Figure 5.
+We train three CGS models, CGS(16), CGS(32), and CGS(64), and two baseline models, SSE and IGNN on randomly generated MDP graphs. Each MDP graph has ns nodes and each node has na edges (i.e. the MDP has ns distinct states and na possible actions from each state). We sample ns and na from the discrete uniform distributions of which lower and upper bounds are (20, 50) and (5, 10), respectively. We evaluate the predictive performance of the trained CGS on randomly generated GVI problems to verify the generalization capability of CGS for different ns and na. We refer to Appendix G.2 for the details of the model architectures and training schemes.
+Table 1 summarizes the evaluation results of CGS and the baseline models. We report the meanabsolute-percentage error (MAPE) between the predicted state values and their true values and the accuracy between the derived and optimal policies (in %), following [12]. We do not compare our models with [12] that utilizes the intermediate values to train models as this is different from CGS's goal of predicting outputs without computing the intermediate solutions.
+All the CGS models show reliable value and policy predictions for the in-training cases (ns = 20) as well as for the out-of-training cases. In general, CGS with many heads shows better prediction results than the model with smaller number of heads. The two baseline models shows significant performance drops as ns and, especially, na increase. (i.e. the number of incoming edges per node becomes larger). From the results, we can conclude that learning to generate transition matrices A(G) from data is more effective than using the fixed transition matrix as in the cases of SSE and IGNN to achieve a model with better generalizability.
+8
+
+Table 2: Graph classification results (accuracy in %).
+
+# graphs # classes Avg # nodes PATHCHY-SAN [30] DGCNN [43] AWL [20] GIN [40] GraphNorm [9] LP-GNN [36]
+CGS(4) CGS(8) CGS(16) CGS(32)
+
+IMDB-B 1000 2 19.8
+71.0 ± 2.2 70.0
+74.5 ± 5.9 75.1 ± 5.1 76.0 ± 3.7 71.2 ± 4.7 73.0 ± 1.9 73.0 ± 2.1 72.8 ± 2.5 73.1 ± 3.3
+
+IMDB-M 1500 3 13.0
+45.2 ± 2.8 47.8
+51.5 ± 3.6 52.3 ± 2.8
+- 46.6 ± 3.7 51.0 ± 1.7 51.1 ± 2.2 50.4 ± 2.1 50.3 ± 1.7
+
+MUTAG 188 2 17.9
+92.6 ± 4.2 85.8
+87.9 ± 9.8 89.4 ± 5.6 91.6 ± 6.5 90.5 ± 7.0 88.4 ± 8.0 86.5 ± 7.2 88.7 ± 6.1 89.4 ± 5.6
+
+PROT. 1113
+2 39.1 75.9 ± 2.8 75.5 - 76.2 ± 2.8 77.4 ± 4.9 77.1 ± 4.3 76.3 ± 6.3 76.3 ± 4.9 76.3 ± 4.9 76.0 ± 3.2
+
+PTC 344 2 25.5 60.0 ± 4.8 58.6 - 64.6 ± 7.0 64.9 ± 7.5 64.4 ± 5.9 64.7 ± 6.4 62.5 ± 5.2 62.9 ± 5.2 63.1 ± 4.2
+
+NCI1 4110
+2 29.8 78.6 ± 1.9 74.4 - 82.7 ± 1.7 81.4 ± 2.4 68.4 ± 2.1 76.3 ± 2.0 77.6 ± 2.2 77.6 ± 2.0 77.2 ± 2.0
+
+For the out-of-training cases, the state-value prediction errors tend to decrease and converge to a certain value as ns increases. This is because when ns increases, the MDP graph becomes more uniform and, consequently, the state values becomes similar. Conversely, the policy prediction of CGS deteriorates as ns increases even though the state-value prediction is relatively accurate. This is because even small errors in the estimated state values can change the order of action selection, thus lowering the accuracy of policy prediction. Please note that CGS can be easily extended to generate input-dependent non-linear iterative transition maps. The experiment results using nonlinear version CGS and CGS models with different architecture of f(·) are provided in Appendix G.3.
+6.3 Graph classification
+We show that CGS can also effectively perform general graph classification tasks, where the existence or the meaning of a fixed point is hard to be clearly defined, although it is originally designed to predict quantities related to the fixed points.
+We assess the graph classification performance of CGS on six graph classification benchmarks: two social-network datasets (IMDB-Binary, IMDB-Multi), and four bioinformatics datasets (MUTAG, PROTEINS, PTC, NCI1). Since the social-network datasets do not have node features, they are generated based on the node degrees following [40]. Also, the edge features are initialized with one vectors for all datasets. To conduct the graph classification tasks, we perform the sum readout over the outputs of CGS, and then utilize additional MLP to predict graph labels from the readout value. We perform 10-fold cross validation and report the average and standard deviation of its accuracy for each validation fold, following the evaluation scheme of [30]. We refer to Appendix G.4.1 for the details of the network architecture, training, and hyperparamter searchings.
+The results in Table 2 show that the classification performance of CGS is on-par to that of the other methods. Notably, CGS shows better performance than LP-GNN which also finds the fixed points of graph convolutions on the social-network datasets where the node features are not given. From the results, CGS can be interpreted as that CGS finds "virtual" fixed points that contain the most relevant information to classify graph labels. These results indicate that CGS has a potential as an general graph convolution layer. We provide the additional benchmark results in appendix G.4.2 comparing to IGNN as it utilizes different performance metric to the other models.
+7 Conclusion
+We propose the convergent graph solver (CGS) as a new learning-based iterative method to compute stationary properties of network-analytic problems. CGS generates contracting input-dependent linear iterative maps, finds the fixed points of the maps, and finally decodes the fixed points to predict the solution of network-analytic problems. The linearity and contractivity of the adaptive transition maps of CGS enable the direct computation of the fixed points and hence, faster forward propagation. Through various network-analytic problems, we show that CGS has competitive capabilities for predicting the outputs (responses) of complex target networked systems in comparison with the other
+9
+
+GNNs. We also show that CGS effectively solves general graph benchmark problems where the existence or the meaning of a fixed point is hard to be clearly defined, showing the potential that CGS can be used as a general graph implicit layer for processing complex graphs structured data.
+References
+[1] F. Alet, A. K. Jeewajee, M. B. Villalonga, A. Rodriguez, T. Lozano-Perez, and L. Kaelbling. Graph element networks: adaptive, structured computation and memory. In International Conference on Machine Learning, pages 212­222. PMLR, 2019.
+[2] B. Amos and J. Z. Kolter. Optnet: Differentiable optimization as a layer in neural networks. In International Conference on Machine Learning, pages 136­145. PMLR, 2017.
+[3] D. G. Anderson. Iterative procedures for nonlinear integral equations. Journal of the ACM (JACM), 12(4):547­560, 1965.
+[4] S. Bai, J. Z. Kolter, and V. Koltun. Deep equilibrium models. In Advances in Neural Information Processing Systems, pages 690­701, 2019.
+[5] S. Banach. Sur les opérations dans les ensembles abstraits et leur application aux équations intégrales. 1922.
+[6] R. Bellman. The theory of dynamic programming. Technical report, Rand corp santa monica ca, 1954.
+[7] A. Berman and R. J. Plemmons. Nonnegative matrices in the mathematical sciences. SIAM, 1994.
+[8] S. Brin and L. Page. The anatomy of a large-scale hypertextual web search engine. 1998.
+[9] T. Cai, S. Luo, K. Xu, D. He, T.-y. Liu, and L. Wang. Graphnorm: A principled approach to accelerating graph neural network training. arXiv preprint arXiv:2009.03294, 2020.
+[10] R. T. Chen, Y. Rubanova, J. Bettencourt, and D. K. Duvenaud. Neural ordinary differential equations. In Advances in neural information processing systems, pages 6571­6583, 2018.
+[11] H. Dai, Z. Kozareva, B. Dai, A. Smola, and L. Song. Learning steady-states of iterative algorithms over graphs. In International conference on machine learning, pages 1106­1114, 2018.
+[12] A. Deac, P.-L. Bacon, and J. Tang. Graph neural induction of value iteration. arXiv preprint arXiv:2009.12604, 2020.
+[13] N. B. Erichson, M. Muehlebach, and M. W. Mahoney. Physics-informed autoencoders for lyapunov-stable fluid flow prediction. arXiv preprint arXiv:1905.10866, 2019.
+[14] C. Gallicchio and A. Micheli. Fast and deep graph neural networks. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, pages 3898­3905, 2020.
+[15] J. Gostick, M. Aghighi, J. Hinebaugh, T. Tranter, M. A. Hoeh, H. Day, B. Spellacy, M. H. Sharqawy, A. Bazylak, A. Burns, et al. Openpnm: a pore network modeling package. Computing in Science & Engineering, 18(4):60­74, 2016.
+[16] S. Gould, B. Fernando, A. Cherian, P. Anderson, R. S. Cruz, and E. Guo. On differentiating parameterized argmin and argmax problems with application to bi-level optimization. arXiv preprint arXiv:1607.05447, 2016.
+[17] F. Gu, H. Chang, W. Zhu, S. Sojoudi, and L. E. Ghaoui. Implicit graph neural networks. arXiv preprint arXiv:2009.06211, 2020.
+[18] J.-T. Hsieh, S. Zhao, S. Eismann, L. Mirabella, and S. Ermon. Learning neural pde solvers with convergence guarantees. arXiv preprint arXiv:1906.01200, 2019.
+[19] J. Huang, H. Wang, and H. Yang. Int-deep: A deep learning initialized iterative method for nonlinear problems. Journal of Computational Physics, 419:109675, 2020.
+10
+
+[20] S. Ivanov and E. Burnaev. Anonymous walk embeddings. arXiv preprint arXiv:1805.11921, 2018.
+[21] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+[22] J. Z. Kolter and G. Manek. Learning stable deep dynamics models. In Advances in Neural Information Processing Systems, pages 11128­11136, 2019.
+[23] Y. Li, D. Tarlow, M. Brockschmidt, and R. Zemel. Gated graph sequence neural networks. arXiv preprint arXiv:1511.05493, 2015.
+[24] I. Loshchilov and F. Hutter. Sgdr: Stochastic gradient descent with warm restarts. arXiv preprint arXiv:1608.03983, 2016.
+[25] A. Martins and R. Astudillo. From softmax to sparsemax: A sparse model of attention and multi-label classification. In International Conference on Machine Learning, pages 1614­1623. PMLR, 2016.
+[26] S. Massaroli, M. Poli, J. Park, A. Yamashita, and H. Asama. Dissecting neural odes. arXiv preprint arXiv:2002.08071, 2020.
+[27] J. Miller and M. Hardt. Stable recurrent models. arXiv preprint arXiv:1805.10369, 2018.
+[28] T. Miyato, T. Kataoka, M. Koyama, and Y. Yoshida. Spectral normalization for generative adversarial networks. arXiv preprint arXiv:1802.05957, 2018.
+[29] N. Moloi and M. Ali. An iterative global optimization algorithm for potential energy minimization. Computational Optimization and Applications, 30(2):119­132, 2005.
+[30] M. Niepert, M. Ahmed, and K. Kutzkov. Learning convolutional neural networks for graphs. In International conference on machine learning, pages 2014­2023, 2016.
+[31] A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, A. Desmaison, A. Kopf, E. Yang, Z. DeVito, M. Raison, A. Tejani, S. Chilamkurthy, B. Steiner, L. Fang, J. Bai, and S. Chintala. Pytorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems 32, pages 8024­8035. Curran Associates, Inc., 2019.
+[32] M. Poli, S. Massaroli, A. Yamashita, H. Asama, J. Park, et al. Hypersolvers: Toward fast continuous-depth models. Advances in Neural Information Processing Systems, 33, 2020.
+[33] P. Ramachandran, B. Zoph, and Q. V. Le. Searching for activation functions. arXiv preprint arXiv:1710.05941, 2017.
+[34] F. Scarselli, M. Gori, A. C. Tsoi, M. Hagenbuchner, and G. Monfardini. The graph neural network model. IEEE transactions on neural networks, 20(1):61­80, 2008.
+[35] N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdinov. Dropout: a simple way to prevent neural networks from overfitting. The journal of machine learning research, 15 (1):1929­1958, 2014.
+[36] M. Tiezzi, G. Marra, S. Melacci, M. Maggini, and M. Gori. A lagrangian approach to information propagation in graph neural networks. arXiv preprint arXiv:2002.07684, 2020.
+[37] P. Virtanen, R. Gommers, T. E. Oliphant, M. Haberland, T. Reddy, D. Cournapeau, E. Burovski, P. Peterson, W. Weckesser, J. Bright, S. J. van der Walt, M. Brett, J. Wilson, K. J. Millman, N. Mayorov, A. R. J. Nelson, E. Jones, R. Kern, E. Larson, C. J. Carey, I. Polat, Y. Feng, E. W. Moore, J. VanderPlas, D. Laxalde, J. Perktold, R. Cimrman, I. Henriksen, E. A. Quintero, C. R. Harris, A. M. Archibald, A. H. Ribeiro, F. Pedregosa, P. van Mulbregt, and SciPy 1.0 Contributors. SciPy 1.0: Fundamental Algorithms for Scientific Computing in Python. Nature Methods, 17:261­272, 2020. doi: 10.1038/s41592-019-0686-2.
+11
+
+[38] M. Wang, D. Zheng, Z. Ye, Q. Gan, M. Li, X. Song, J. Zhou, C. Ma, L. Yu, Y. Gai, T. Xiao, T. He, G. Karypis, J. Li, and Z. Zhang. Deep graph library: A graph-centric, highly-performant package for graph neural networks. arXiv preprint arXiv:1909.01315, 2019.
+[39] E. Winston and J. Z. Kolter. Monotone operator equilibrium networks. arXiv preprint arXiv:2006.08591, 2020.
+[40] K. Xu, W. Hu, J. Leskovec, and S. Jegelka. How powerful are graph neural networks? arXiv preprint arXiv:1810.00826, 2018.
+[41] H. Yang, K. Ma, and J. Cheng. Rethinking graph regularization for graph neural networks. arXiv preprint arXiv:2009.02027, 2020.
+[42] Z. Yang, J. J. Zhao, B. Dhingra, K. He, W. W. Cohen, R. Salakhutdinov, and Y. LeCun. Glomo: Unsupervised learning of transferable relational graphs. In Proceedings of the 32nd International Conference on Neural Information Processing Systems, pages 8964­8975, 2018.
+[43] M. Zhang, Z. Cui, M. Neumann, and Y. Chen. An end-to-end deep learning architecture for graph classification. In Thirty-Second AAAI Conference on Artificial Intelligence, 2018.
+12
+
+Appendices
+
+A Existence of converged embedding
+
+In this section, we prove the existence of the converged hidden embedding H. The proposed transition map is defined as follows:
+
+T(H[n]; G) = A(G)H[n] + B(G)
+
+(A.1)
+
+where 0.0 <  < 1.0, A(G)  Rp×p with ||A(G)||  1.0, and B(G)  Rp×q.
+We first show that the proposed transition map is contracting. Then, the existence of unique fixed point can be directly obtained by applying the Banach fixed point theorem [5]. Lemma 1. T(H[n]; G) is a -contraction mapping.
+
+Proof. The proof is trivial. Consider the following equations:
+||T(H[n+1]; G) - T(H[n]; G)|| = ||A(G)H[n+1] + B(G) - A(G)H[n] - B(G)|| = ||A(G)(H[n+1] - H[n])||  ||A(G)|| × ||(H[n+1] - H[n])|| = ||(H[n+1] - H[n])||
+
+The inequality holds by the property of the spectral norm. Therefore, T(H[n]; G) is -contracting.
+
+B Existence of inverse matrix
+
+CGS finds the fixed point H by pre-multiplying the inverse matrix of (I - A) to B, which is given as follows:
+
+H = (I - A)-1B
+
+(A.2)
+
+The following lemma shows the existence of the inverse matrix.
+Lemma 2. With matrix A, which is constructed using Equation 6, and 0.0 <  < 1.0, (I - A) is invertible.
+
+Proof. According to the invertible matrix theorem, (I - A) being invertible is equivalent to (I - A)x = 0 only having the trivial solution x = 0. By rewriting the equation as x = Ax and defining the -contraction map F(x) = Ax, we can get the following result:
+
+lim F n(x) = 0, for any x.
+n
+
+(A.3)
+
+From the Banach fixed point theorem, we can conclude that the unique solution x is 0. Therefore, (I - A) is invertible.
+
+C Alternative formulation of A(G)
+
+In this section, we provide an alternative formulation of A(G), which also guarantees the existence and uniqueness of H, inspired by the attention mechanisms.
+
+The alternative formulation of A(G) constructs the (i, j)th element of A(G) as follows:
+
+[A(G)]i,j =
+
+exp(eij ) kN (i) exp(ekj )
+0
+
+if eij exists, otherwise.
+
+(A.4)
+
+13
+
+where [A(G)]i,j is the entity of A(G) in the ith row and jth column, and N (i) is the neighborhood of vi.
+Since the normalization is performed via softmax operations over the outward edges per node, the row sums of A(G) are ones and all the entities in A(G) are positive. This ensures that A(G) becomes a stochastic matrix by definition, and following the property of stochastic matrix, the spectral norm of A(G) is 1.0.
+This attention-inspired A(G) opens the possibility for reformulating A(G) with various attention mechanisms. Among the attention mechanisms, some of them may provide additional performance gains to CGS depending on the property of input graph. For instance, if the input graph is sparse, we can utilize sparsemax [25] or GLoMO-style attention [42]. We leave this research direction as a future research objective.
+
+D The complete derivation of the partial derivatives
+
+The following equality shows the relationship of the gradient of the scalar-valued loss L, the fixed point H, and the parameters of the fixed point equation A(G), B(G):
+
+L L H (·) = H (·)
+
+(A.5)
+
+where
+
+(·)
+
+denotes
+
+A (G )
+
+or
+
+B (G ).
+
+Here,
+
+L H
+
+are
+
+readily
+
+computable
+
+via
+
+automatic
+
+differentiation
+
+packages.
+
+However,
+
+computing
+
+H (·)
+
+is
+
+less
+
+straightforward
+
+since
+
+H
+
+and
+
+(·)
+
+are
+
+implicitly
+
+related
+
+via Equation 6.
+
+We reformulate the transition map (Equation 6) in a root-finding form g(H, A, B) = H - (AH +
+B). Here, we omit the input-dependency of A and B for the brevity of the notations. For the fixed point H, the following equality holds:
+
+g(H(A, B), A, B) =0
+A
+
+(A.6)
+
+We can expand the derivative by using chain rule as follows:
+
+g(H(A, B), A, B) g(H, A, B) g(H, A, B) H(A, B)
+
+A
+
+=
+
+A
+
++
+
+H
+
+=0 A
+
+(A.7)
+
+By
+
+rearranging
+
+the
+
+terms,
+
+we
+
+can
+
+get
+
+a
+
+closed-form
+
+expression
+
+of
+
+H A
+
+as
+
+follows:
+
+-1
+
+H
+
+g(H, A, B) g(H, A, B)
+
+=- A
+
+H
+
+A
+
+(A.8)
+
+Here,
+
+we
+
+can
+
+compute
+
+ g(H  ,A,B ) A
+
+easily
+
+by
+
+using
+
+either
+
+automatic
+
+differentiation
+
+tool
+
+or
+
+manual
+
+gradient
+
+calculation.
+
+However,
+
+in
+
+practice,
+
+directly
+
+computing
+
+(
+
+ g(H  ,A,B ) H
+
+)-1
+
+can
+
+be
+
+problematic
+
+since it involves the inversion of Jacobian matrix. Instead, we can (1) construct a linear system whose
+
+solution
+
+is
+
+(
+
+ g(H  ,A,B ) H
+
+)-1
+
+and
+
+solve
+
+the
+
+system
+
+via
+
+some
+
+matrix
+
+decomposition
+
+or
+
+(2)
+
+solve
+
+another
+
+fixed
+
+point
+
+iteration
+
+which
+
+converges
+
+to
+
+(
+
+g(H  ,A,B ) H
+
+)-1.
+
+We
+
+provide
+
+the
+
+pseudocode
+
+that
+
+shows
+
+how
+
+to compute the inverse Jacobian with the second option in the following section.
+
+The partial derivative with respect to B can be computed through the similar procedure and it is given
+
+as follows:
+
+H
+
+g(H, A, B) -1 g(H, A, B)
+
+=- B
+
+H
+
+B
+
+(A.9)
+
+E Software Implementation
+In this section, we provide a Pytorch style pseudocode of CGS which computes the derivatives via the backward fixed point iteration.
+
+14
+
+1 import torch
+
+2 import torch.nn as nn
+
+3
+
+4
+
+5 class CGP(nn.Module):
+
+6
+
+"""
+
+7
+
+Convergent Graph Propagation
+
+8
+
+"""
+
+9
+
+10
+
+def __init__(self ,
+
+11
+
+gamma: float ,
+
+12
+
+activation: str ,
+
+13
+
+tol: float = 1e-6,
+
+14
+
+max_iter: int = 50):
+
+15
+
+16
+
+super(CGP , self).__init__()
+
+17
+
+self.gamma = gamma
+
+18
+
+self.tol = tol
+
+19
+
+self.max_iter = max_iter
+
+20
+
+self.act = getattr(nn , activation)()
+
+21
+
+22
+
+self.frd_itr = None # forward iteration steps
+
+23
+
+24
+
+def forward(self , A, b):
+
+25
+
+"""
+
+26
+
+:param A: A matrix [#.heads x #. edges x #. edges]
+
+27
+
+:param b: b matrix [#.heads x #. nodes x 1]
+
+28
+
+:return: z: Fixed points [#. heads x #. nodes]
+
+29
+
+"""
+
+30
+
+31
+
+z, self.frd_itr = self.solve_fp_eq(A, b,
+
+32
+
+self.gamma ,
+
+33
+
+self.act ,
+
+34
+
+self.max_iter ,
+
+35
+
+self.tol)
+
+36
+
+37
+
+# re -engage autograd and add the gradient hook
+
+38
+
+z = self.act(self.gamma * torch.bmm(A, z) + b)
+
+39
+
+40
+
+if z.requires_grad:
+
+41
+
+y0 = self.gamma * torch.bmm(A, z) + b
+
+42
+
+y0 = y0.detach().requires_grad_()
+
+43
+
+z_next = self.act(y0).sum()
+
+44
+
+z_next . backward ()
+
+45
+
+dphi = y0.grad
+
+46
+
+J = self.gamma * (dphi * A).transpose(2, 1)
+
+47
+
+48
+
+def modify_grad(grad):
+
+49
+
+y, bwd_itr = self.solve_fp_eq(J,
+
+50
+
+grad ,
+
+51
+
+1.0,
+
+52
+
+nn . Identity () ,
+
+53
+
+self.max_iter ,
+
+54
+
+self.tol)
+
+55
+
+56
+
+return y
+
+57
+
+58
+
+z.register_hook(modify_grad)
+
+59
+
+z = z.squeeze(dim=-1) # drop dummy dimension
+
+60
+
+return z
+
+61
+
+62
+
+@staticmethod
+
+63
+
+@torch . no_grad ()
+
+64
+
+def solve_fp_eq(A, b,
+
+65
+
+gamma: float ,
+
+15
+
+66
+
+act: nn.Module ,
+
+67
+
+max_itr: int ,
+
+68
+
+69
+
+"""
+
+tol: float):
+
+70
+
+Find the fixed point of x = act(gamma * A * x + b)
+
+71
+
+"""
+
+72
+
+73
+
+x = torch.zeros_like(b, device=b.device)
+
+74
+
+itr = 0
+
+75
+
+while itr < max_itr:
+
+76
+
+x_next = act(gamma * torch.bmm(A, x) + b)
+
+77
+
+g = x - x_next
+
+78
+
+if torch.norm(g) < tol:
+
+79
+
+break
+
+80
+
+x = x_next
+
+81
+
+itr += 1
+
+82
+
+return x, itr
+
+Listing 1: CGS pseudocode
+
+F Attention GN block
+In this section, we provide details of the attention GN block (layer), which serves as f of CGS models. The attention GN block takes a set of node embeddings V and edge embeddings E, and produces the updated node embeddings V and edge embeddings E by utilizing three trainable modules (edge function fe(·), attention function fa(·) and node function fn(·)) and one aggregation function (·). The computation procedure of the attention GN block is given as Algorithm 1.
+
+Algorithm 1: Attention GN block
+
+input : set of edges features E
+
+set of nodes features V
+
+edge function fe(·)
+
+attention function fa(·)
+
+node function fn(·)
+
+edge aggregation function (·)
+
+1 E , V  {}, {} ;
+
+// Initialize empty sets
+
+2 for eij in E do
+
+3 eij  fe(eij , vi, vj ) ;
+
+// Update edge features
+
+4 zij  fa(eij , vi, vj ) ;
+
+// Compute attention logits
+
+5 E  E  {eij}
+
+6 end
+
+7 for vi in V do
+
+8 wji  softmax({zji}jN (i)) ;
+
+// Normalize attention logits
+
+9 mi  ({wji × eji}jN (i)) ;
+
+// Aggregate incoming messages
+
+10 vi  fn(vi, mi) ; 11 V  V  {vi}
+
+// Update node features
+
+12 end
+
+return :Updated node features V and edge E features
+
+G Details on experiments
+We run all experiments on a single desktop equipped with a NVIDIA Titan X GPU and AMD Threadripper 2990WX CPU.
+16
+
+G.1 Physical diffusion experiments G.1.1 Data generation In this section, we provide the details of porous network problems.
+
+Diffusion Equation For fluid flow in porous media described by Darcy's law, Equation 14 is specific to
+
+jN (i)
+
+ 8µ
+
+ri4j lij
+
+(pi
+
+-
+
+pj )
+
+=
+
+0,
+
+vi  V \ (V),
+
+(A.10)
+
+where µ is the dynamic viscosity of the fluid, and rij and lij are the radius and length of the cylindrical throat between the i-th and j-th pore chambers respectively.
+
+Graph generation. We generate random pore networks inside a cubic domain of width 0.1 m using Voronoi tessellation. We sample the pore diameters from the uniform distribution of U (9.9 × 10-3 m, 10.1×10-3 m) and assume that the fluid is water with µ = 10-3 N s m-2 under the temperature of 298 K(25 °C). The boundary conditions are the atmospheric pressure (101, 325 Pa) on the front surface of the cube, zero pressure on the back surface, and no-flux conditions on all other surfaces. We simulate the flow using OpenPNM [15]. We normalize the pressure values (targets) by dividing the pressure by the maximum pressures of the pores. Note that this normalization is always viable because the maximum pressure is the prescribed boundary pressure on the front surface due to the physical nature of the diffusion problem.
+
+G.1.2 Details of CGS and baselines
+In this section, we provide the details of CGS and the baseline models. For brevity, we refer an MLP with hidden neurons n1, n2, ... nl for each hidden layer as MLP(n1, n2, ..., nl).
+Network architectures
+· CGS(m): f is a single layer attention GN network as whose edge, attention, and node function are MLP(64). The output dimensions of the edge and node function are determined by the number of heads m. (·) is the summation. g is MLP(64, 32). All hidden activations are LeakyReLU. We set  as 0.5.
+· IGNN: f, g is the same as the one of CGS(8).
+· SSE: We modify the original SSE implementation [11] so that the model can take the edge feature as an additional input. As g, we use the same architecture to the one of CGS(m).
+· GNN(n): It is the plain GNN architecture having the stacks of n different GNN layers as f. For each GNN layer, we utilize the same GN layer architecture to the one of CGS(m). g is the same as the one of CGS(m).
+Training details We train all models with the Adam optimizer [21], whose learning rate is initialized as 0.001 and scheduled by the cosine annealing method [24]. The loss function is the mean-squared error (MSE) between the model predictions and the ground truth pressures. The training graphs were generated on-fly as specified in the Graph generation paragraph. We used 32 training graphs per gradient update. On every 32 gradient update, we sample the new training graph. We train 1000 gradient steps for all models.
+
+Training curves. The training curves of the CGS models and baselines are provided in Figure 6.
+
+G.2 Graph value iteration experiments
+In this section, we provide the details of data generation, the CGS models and baseline architecture and their training schemes, and the extended experiment results for graph value iteration (GVI) problems.
+
+17
+
+Figure 6: Training curves of the CGS models and the baselines. We repeat the training 5 times per each model. The solid lines show the average training MSE over the training steps. The shadow areas visualize the ± 1.0 standard deviation over the runs.
+G.2.1 Details of GVI data generation
+We generate the MDP graph by randomly sampling na out-warding edges for all nodes. The discount factor of MDP  is 0.9. Rewards are sampled from the uniform distribution whose upper and lower bounds are 1.0 and -1.0 respectively. The true state-values (labels) are computed by iteratively employing the exact analytical Bellman operator (Equation 5) until the state-values converge (i.e., value iteration). The convergence tolerance is 0.001.
+G.2.2 Details of CGS and baselines
+In this section, we explain the network architectures and training details of the graph value iteration experiments.
+Network architectures.
+· CGS(m): f is a three layer attention GN network as whose edge, attention, and node function are MLP(128). The output dimensions of the edge and node function are determined by the number of heads m. (·) is the summation. g is MLP(64, 32). All hidden activations are LeakyReLU. We set  as 0.5.
+· IGNN: f, g is the same as the one of CGS(32). · SSE: We modify the original SSE implementation [11] so that the model can take the edge
+feature as an additional input. As g, we use the same architecture to the one of CGS(m).
+Training details. We train all models with the Adam optimizer whose learning rate is initialized as 0.001 and scheduled by the cosine annealing method. The loss function is MSE between the model predictions and the ground truth state-values. The training graphs are generated on-fly as specified in the Data generation paragraph. We use 64 training graphs per gradient update. On every 32 gradient graphs, we sample the new training graph. We train 5000 gradient steps for all models.
+G.3 Extended GVI experiments
+In this section, we provide the results of the extended GVI experiments. Two types of the ablation studies were done to understand (1) the effect of f(·) architecture and (2) the effect of employing the non-linear transition maps, on the performance of CGS.
+Effect of f(·) architecture As the A(G) and B(G) generation schemes of CGS allow the employment of the arbitrary architecture of GNN as f(·), CGS has different predictive performances depending on the architectural selection of f(·). Here, we investigate the effect of the number of GN layers in f(·) to the predictive performance of CGS for the GVI problems. The number of the independent GN layers controls the range of
+18
+
+Table 3: Graph Value Iteration results over the different f(·) architecture. We report the average MAPE and policy prediction accuracies (in %) of different ns and na combinations. All metrics are measured per graph. ± shows the standard deviation of the metrics.
+
+ns na 1-CGS(16) 2-CGS(16) 3-CGS(16) 4-CGS(16)
+
+20
+
+5
+
+10
+
+7.33 ± 4.59 (0.77 ± 0.11 %)
+6.86 ± 4.46 (0.81 ± 0.10 %)
+6.12 ± 3.97 (0.81 ± 0.10 %)
+4.42 ± 3.07 (0.88 ± 0.08 %)
+
+3.38 ± 2.00 (0.75 ± 0.11 %)
+2.78 ± 1.75 (0.81 ± 0.10 %)
+2.65 ± 1.68 (0.83 ± 0.09 %)
+1.92 ± 1.20 (0.86 ± 0.09 %)
+
+50
+
+10
+
+15
+
+3.21 ± 1.70 (0.72 ± 0.08 %)
+2.17 ± 1.14 (0.79 ± 0.07 %)
+2.33 ± 1.36 (0.80 ± 0.07 %)
+1.72 ± 1.02 (0.84 ± 0.06 %)
+
+3.62 ± 2.08 (0.73 ± 0.11 %)
+2.48 ± 1.54 (0.78 ± 0.10 %)
+3.14 ± 1.79 (0.84 ± 0.09 %)
+2.09 ± 1.28 (0.84 ± 0.09 %)
+
+75
+
+10
+
+15
+
+3.23 ± 1.60 (0.72 ± 0.06 %)
+1.99 ± 0.92 (0.78 ± 0.06 %)
+2.23 ± 1.18 (0.80 ± 0.06 %)
+1.60 ± 0.91 (0.84 ± 0.05 %)
+
+2.60 ± 1.21 (0.70 ± 0.06 %)
+1.34 ± 0.61 (0.76 ± 0.06 %)
+2.55 ± 1.16 (0.80 ± 0.06 %)
+1.25 ± 0.77 (0.83 ± 0.05 %)
+
+100
+
+10
+
+15
+
+3.15 ± 1.47 (0.71 ± 0.06 %)
+1.89 ± 0.72 (0.77 ± 0.06 %)
+2.13 ± 1.10 (0.79 ± 0.05 %)
+1.57 ± 0.80 (0.82 ± 0.05 %)
+
+2.66 ± 1.16 (0.71 ± 0.06 %)
+1.28 ± 0.58 (0.77 ± 0.05 %)
+2.63 ± 1.12 (0.80 ± 0.05 %)
+1.19 ± 0.72 (0.83 ± 0.05 %)
+
+#. params
+10,786 93,347 175,908 258,469
+
+Table 4: Graph Value Iteration results over the non-linear and linear transition maps We report the average MAPE and policy prediction accuracies (in %) of different ns and na combinations. All metrics are measured per graph. ± shows the standard deviation of the metrics.
+
+ns na nl-CGS(8) nl-CGS(16) nl-CGS(32) nl-CGS(64)
+
+20
+
+5
+
+10
+
+4.73 ± 2.67 (0.80 ± 0.10 %)
+4.56 ± 2.97 (0.83 ± 0.09 %)
+4.55 ± 2.72 (0.85 ± 0.10 %)
+4.99 ± 3.20 (0.82 ± 0.10 %)
+
+3.47 ± 1.96 (0.84 ± 0.10 %)
+2.03 ± 1.25 (0.85 ± 0.09 %)
+3.75 ± 1.82 (0.83 ± 0.09 %)
+2.00 ± 1.21 (0.84 ± 0.09 %)
+
+50
+
+10
+
+15
+
+3.57 ± 1.87 (0.81 ± 0.07 %)
+1.93 ± 0.97 (0.82 ± 0.06 %)
+3.88 ± 1.77 (0.79 ± 0.07 %)
+1.93 ± 0.97 (0.81 ± 0.06 %)
+
+4.92 ± 1.64 (0.83 ± 0.09 %)
+1.40 ± 0.89 (0.85 ± 0.09 %)
+4.58 ± 1.50 (0.80 ± 0.11 %)
+1.60 ± 1.05 (0.84 ± 0.09 %)
+
+75
+
+10
+
+15
+
+3.38 ± 1.54 (0.81 ± 0.06 %)
+1.72 ± 0.78 (0.82 ± 0.05 %)
+3.82 ± 1.44 (0.78 ± 0.06 %)
+1.68 ± 0.73 (0.81 ± 0.05 %)
+
+4.58 ± 1.12 (0.82 ± 0.05 %)
+1.17 ± 0.52 (0.81 ± 0.05 %)
+4.33 ± 1.02 (0.76 ± 0.06 %)
+1.18 ± 0.66 (0.81 ± 0.05 %)
+
+100
+
+10
+
+15
+
+3.21 ± 1.38 (0.81 ± 0.05 %)
+1.67 ± 0.63 (0.81 ± 0.05 %)
+3.76 ± 1.32 (0.78 ± 0.05 %)
+1.62 ± 0.63 (0.81 ± 0.05 %)
+
+4.61 ± 1.04 (0.82 ± 0.05 %)
+1.19 ± 0.48 (0.80 ± 0.05 %)
+4.34 ± 0.97 (0.76 ± 0.05 %)
+1.13 ± 0.59 (0.81 ± 0.05 %)
+
+#. params
+254,869 258,469 265,669 280,069
+
+CGS(8) CGS(16) CGS(32) CGS(64)
+
+3.81 ± 2.76 (0.88 ± 0.09 %)
+4.24 ± 2.51 (0.84 ± 0.10 %)
+4.34 ± 2.83 (0.85 ± 0.09 %)
+4.59 ± 2.82 (0.84 ± 0.09 %)
+
+2.42 ± 1.51 (0.88 ± 0.08 %)
+3.16 ± 1.81 (0.86 ± 0.09 %)
+2.10 ± 1.26 (0.83 ± 0.09 %)
+1.93 ± 1.25 (0.85 ± 0.09 %)
+
+2.23 ± 1.40 (0.85 ± 0.06 %)
+2.92 ± 1.67 (0.83 ± 0.06 %)
+1.95 ± 1.04 (0.81 ± 0.06 %)
+1.85 ± 0.99 (0.83 ± 0.06 %)
+
+3.03 ± 1.39 (0.84 ± 0.09 %)
+4.26 ± 1.44 (0.83 ± 0.10 %)
+2.15 ± 1.18 (0.78 ± 0.11 %)
+2.38 ± 1.38 (0.85 ± 0.09 %)
+
+2.03 ± 1.20 (0.84 ± 0.05 %)
+2.70 ± 1.38 (0.83 ± 0.05 %)
+1.69 ± 0.80 (0.80 ± 0.05 %)
+1.60 ± 0.76 (0.83 ± 0.06 %)
+
+2.00 ± 0.91 (0.80 ± 0.05 %)
+3.06 ± 1.01 (0.82 ± 0.05 %)
+1.20 ± 0.47 (0.76 ± 0.06 %)
+1.17 ± 0.75 (0.83 ± 0.05 %)
+
+1.93 ± 1.09 (0.84 ± 0.05 %)
+2.60 ± 1.26 (0.83 ± 0.05 %)
+1.61 ± 0.70 (0.80 ± 0.05 %)
+1.53 ± 0.64 (0.82 ± 0.05 %)
+
+1.90 ± 0.85 (0.80 ± 0.05 %)
+2.95 ± 0.95 (0.82 ± 0.05 %)
+1.17 ± 0.40 (0.76 ± 0.05 %)
+1.12 ± 0.66 (0.82 ± 0.05 %)
+
+254,869 258,469 265,669 280,069
+
+information when CGS constructs the transition maps. That is, a larger number of GN layers allows the information to be gathered from far neighborhoods while constructing A(G) and B(G).
+Table 3 shows the predictive performances of CGS models with the different number of GN layers in f(·). The model with n GN layers is referred to as n-CGS(16). In general, the model with a larger number of GN layers performs better. These results highlight that allowing the flexibility in f(·) can be practically beneficial when we derive the model with guaranteed convergence.
+
+Comparisons to the non-linear iterative maps A natural question to the linear iterative map of CGS is "can we achieve a performance gain if we employ non-linear contracting iterative maps?" To answer the question, we provide the extended experiment results.
+
+The analysis of the existence and uniqueness of fixed points still holds when CGS employs componentwise non-expansive (CONE) activation (e.g., ReLU, LeakyReLU, Tanh, Swish, Mish) to the outputs of T(·) given as follows:
+
+T(H[n]; G) = (A(G)H[n] + B(G))
+
+(A.11)
+
+where (·) is a CONE activation. The gradient of loss w.r.t A(G) and B(G) can be computed similarly to the non-linear activation cases as described in Appendix E.
+
+We compare the GVI results of linear CGS to the non-linear CGS utilizing LeakyReLU as (·). Table 4 shows the GVI experiment results. The linear CGS, CGS(m), and non-linear CGS, nl-CGS(m), shows similar predictive performance on GVI experiments in general. From these experiments, we can observe that the non-linear extension of CGS does not give significant performance gain.
+
+Furthermore, the training of non-linear CGSs can be challenging as (1) they exhibit higher variance in loss while training, and (2) the choice of non-linearity can severely change the performance of the entire model. For instance, the rectifying units such as ReLU and LeakyReLU can result in the premature termination of the iterative schemes of CGS when B(G) has large negative values. Bounded activation such as Tanh limits the range of hidden embeddings to a certain range.
+
+Runtime comparisons of direct inversion and iterative methods In this paragraph, we provide the experimental results that shows the runtime of CGS(2) models which solve the fixed point equation via direct inversion and iterative methods. For all size of GVI graphs, we test the models
+
+19
+
+Figure 7: Runtimes of CGS models. For GPU experiments, the memory usage of the direct method with ns  4000 exceeds 24GB VRAM.
+100 times with na = 5. As shown in Figure 7, for small graphs ns  4000, solving the fixed point equation with the direct inversion is faster than solving it with the iterative scheme. However, the direct inversion scales worse than iterative method.
+G.4 Graph classification experiments
+G.4.1 Experiment details and hyperparameters
+In this section, we explain the network architecture and training details of the six graph benchmark problems. Across all the benchmark dataset, we use the dataset implementation of DGL [38] and cross-validation indices generated with Scipy [37]. We set the contraction factor  as 0.5. We train all models with the Adam optimizer whose learning rate is initialized as 0.001 and scheduled by the cosine annealing method for 500 (100 for NCI1 dataset due to the large datset size) epochs with 128 mini-batch size. We set the random seed of Scipy, Pytorch [31], and DGL as 0.
+Hyperparameter tuning Due to our limited computational resources, we search at most 10 different pairs of hyperparameters for each dataset. To find the initial hyperparemters, we first tune CGS(4) on MUTAG, which is the smallest dataset. For each benchmark dataset, we start hyperparmeter tunings from the hyperparameters that are used for MUTAG-CGS(4) and tune the activation functions of f and g, the number of GN layers in f, the number of layers of g, and the dropout rate of g.
+Hyperparameters
+· IMDB-Binary: f is a two layer attention GN network as whose edge, attention, and node function are MLP(128). The output dimensions of the edge and node function are determined by the number of heads m. The hidden dimensions of edge, and node are 64. (·) is the summation. g is MLP(64, 32). All hidden activations are Swish [33].
+· IMBD-Multi: The same as IMDB-Binary.
+· MUTAG: The same as IMDB-Binary. All hidden activations are LeakyReLU.
+· PROTEINS: The same as the MUTAG. Apply dropout [35] with probability 0.2 after the activation functions of g.
+· NCI1: The same as IMDB-Binary.
+G.4.2 Extended benchmark results
+In this section, we provide the extended experiment results for the graph classification benchmarks. The performance metric reported in IGNN [17] is the average of the maximum validation scores from the different cross-validation folds. We also measure the performance of CGS by utilizing the same performance metric. As shown in Table 5, CGS performs better as it utilizes many heads.
+20
+
+Table 5: Graph classification results (accuracy in %).
+
+# graphs # classes Avg # nodes IGNN [17] CGS(4) CGS(8) CGS(16) CGS(32)
+
+IMDB-B 1000 2 19.8 -
+76.0 ± 2.0 76.0 ± 2.3 76.4 ± 2.0 76.4 ± 3.0
+
+IMDB-M 1500 3 13.0 -
+62.3 ± 0.5 62.7 ± 0.5 63.4 ± 0.4 59.4 ± 1.0
+
+MUTAG 188 2 17.9
+89.3 ± 6.7 93.5 ± 7.7 94.2 ± 5.2 94.6 ± 4.3 95.7 ± 4.2
+
+PROT. 1113
+2 39.1 77.7 ± 3.4 81.3 ± 4.5 81.0 ± 4.4 80.2 ± 4.4 80.1 ± 4.4
+
+PTC 344 2 25.5 70.1 ± 5.6 75.3 ± 6.3 74.0 ± 5.5 75.0 ± 7.0 75.0 ± 6.0
+
+NCI1 4110
+2 29.8 80.5 ± 1.9 77.86 ± 1.8 78.9 ± 2.0 79.1 ± 1.6 79.1 ± 2.1
+
+H Limitations and future works
+One distinctive feature of the proposed CGS is to construct the input-dependent transition maps. This algorithmic choice enables CGS to have more flexible transition maps and, thus, it can model a broader class of graph-analytic problems. This section points out the limitations of CGS entangled with our algorithmic choices and implementations, and possible extensions to overcome the limitations.
+Efficient fixed point computation As explained in Section 5, training CGS can be done whenever we can compute H by any means. Even though we utilize naive fixed point iterations to compute H, this property allows us to employ more sophisticated fixed point iteration methods. We expect that we can optimize the forward/backward propagation time of CGS by employing the sophisticated numerical methods, which compute fixed points.
+Efficient batch fixed point computation We employ the multi-head extension of CGS for our experiments. In our current implementation, we keep performing iterative steps until all the transition maps converge. For instance, when a transition map converges faster than the others, the converged map iterates non-necessary steps (steps that will not change the values of fixed points) until all transition maps converge. We can fix this issue by adaptively terminating the iteration for each transition map as done similarly to handle the different lengths of input sequences in RNNs.
+Error-free forward/backward propagation The core of forward/backward propagation of CGS is to solve the fixed point iteration with iterative numerical methods. Such numerical methods are exposed to numerical error, which can propagate to the entire parameter learning process of CGS. We may employ more high-precision numerical solvers to pursue lower numerical errors at the cost of computation times. However, this cannot eradicate the numerical error. In this regard, CGS can employ the exact inversion to compute the fixed points. This may improve the prediction performance. We leave this subject as future research.
+
+21
+
+

@@ -1,0 +1,980 @@
+arXiv:2106.01178v1 [cs.CV] 2 Jun 2021
+
+ImVoxelNet: Image to Voxels Projection for Monocular and Multi-View General-Purpose 3D
+Object Detection
+Danila Rukhovich, Anna Vorontsova, Anton Konushin Samsung AI Center, Moscow
+{d.rukhovich, a.vorontsova, a.konushin}@samsung.com
+Abstract
+In this paper, we introduce the task of multi-view RGB-based 3D object detection as an end-to-end optimization problem. To address this problem, we propose ImVoxelNet, a novel fully convolutional method of 3D object detection based on monocular or multi-view RGB images. The number of monocular images in each multi-view input can variate during training and inference; actually, this number might be unique for each multi-view input. ImVoxelNet successfully handles both indoor and outdoor scenes, which makes it general-purpose. Specifically, it achieves state-of-the-art results in car detection on KITTI (monocular) and nuScenes (multi-view) benchmarks among all methods that accept RGB images. Moreover, it surpasses existing RGB-based 3D object detection methods on the SUN RGB-D dataset. On ScanNet, ImVoxelNet sets a new benchmark for multiview 3D object detection. The source code and the trained models are available at https://github.com/saic-vul/imvoxelnet.
+1 Introduction
+RGB images are an affordable and universal source of data; therefore, RGB-based 3D object detection has been actively investigated in recent years. RGB images provide visual clues about the scene and its objects, yet they do not contain explicit information about the scene geometry and the absolute scale of the data. By virtue of that, detecting 3D objects from the RGB images is an ill-posed task. Given a monocular image, deep learning-based 3D object detection methods can only deduce the scale of the data. Moreover, the scene geometry cannot be unambiguously derived from the RGB images since some areas may be invisible. However, using several posed images might help obtain more information about the scene than a monocular RGB image. Accordingly, some 3D object detection methods [35, 33] run multi-view inference. These methods obtain predictions on each monocular RGB image independently, then aggregate these predictions.
+In contrast, we use multi-view inputs not only for inference but also for training. During both training and inference, the proposed method accepts multi-view inputs with an arbitrary number of views; this number might be unique for each multi-view input. Besides, our method can accept monocular inputs (treated as a special case of multi-view inputs). Furthermore, it works surprisingly well on monocular benchmarks.
+All RGB-based 3D object detection methods are designed either indoor or outdoor and work under certain assumptions about the scene and the objects. For instance, outdoor methods are typically evaluated on cars. In general, cars are of similar size, they are located on the ground, and their projections onto the Bird's Eye View (BEV) do not intersect. Accordingly, a BEV-plane projection contains a lot of information on the 3D location of a car. So, a common approach in outdoor 3D object detection is to reduce a 3D object detection in a point cloud to a 2D object detection in the BEV plane.
+Preprint. Under review.
+
+At the same time, indoor objects might have different heights and be randomly located in space, so their projections onto the floor plane provide little information about their 3D positions. Overall, the design of RGB-based 3D object detection methods tends to be domain-specific. Alternatively, we present a universal approach that handles both indoor and outdoor scenes.
+To accumulate information from multiple inputs, we use a voxel representation of the 3D space. In the proposed method, final predictions are obtained from 3D feature maps, which corresponds to the formulation of the point cloud-based detection problem. On this basis, we use off-the-shelf necks and heads from point cloud-based object detectors with no modifications.
+Our contribution is three-fold:
+ท As far as we know, we are the first to formulate a task of end-to-end training for multi-view 3D object detection based on RGB images only.
+ท We propose a novel fully convolutional 3D object detector that works in both monocular and multi-view settings.
+ท The proposed method is general-purpose, achieving state-of-the-art results for both indoor and outdoor datasets.
+2 Related Works
+2.1 Multi-view Scene Understanding
+Many scene understanding methods accept multi-view inputs. For instance, some scene understanding sub-tasks can only be solved given multi-view inputs. For example, the SLAM task implies reconstructing 3D scene geometry and estimating camera poses given a sequence of frames. Structure-from-Motion (SfM) approaches are designed to estimate camera poses and intrinsics from an unordered set of images, whereas Multi-View Stereo (MVS) methods use SfM outputs to build a 3D point cloud.
+Other scene understanding sub-tasks might be reformulated to be multi-view. Several methods that use multi-view inputs to address these tasks, have been proposed recently. For instance, 3D-SIS [14] performs 3D instance segmentation based on a set of RGB-D inputs. MVPointNet [18] uses multi-view RGB-D inputs for 3D semantic segmentation. Atlas [28] processes several monocular RGB images to perform 3D semantic segmentation and TSDF reconstruction jointly.
+2.2 3D Object Detection.
+Point cloud-based. Point clouds are three-dimensional, so it seems natural to employ a 3D convolutional network for detection. However, this approach requires exhaustive computation that causes slow inference on large outdoor scenes. Recent outdoor methods [39, 22] decrease the runtime by projecting the 3D point cloud to the BEV plane. The common practice in point cloud processing is to subdivide a point cloud into voxels. The projection onto the BEV plane implies that all voxels in each vertical column should be encoded into a fixed-length feature map. Then, this pseudo-image can be passed to a 2D object detection network to obtain final predictions.
+Indoor object detection methods generate object proposals for each point in a point cloud. However, some indoor objects are not convex, so the geometrical center of an indoor object may not belong to this object (e.g., the center of a table or a chair might be in between legs). Accordingly, an object proposal given by a single center point might be irrelevant, so indoor methods use deep Hough voting to generate proposals [11, 31, 40].
+Monocular-based. Mono3D [6] generates 3D anchors by aggregating clues from semantic maps, visible contours of the objects, and location priors via a complex energy function. Deep3DBox [27] uses discretization to estimate the orientation of each object and derives its 3D pose from constraints between 2D and 3D bounding boxes. MonoGRNet [32] decomposes the 3D object detection problem into sub-tasks, namely object distance estimation, object location estimation, and object corners estimation. These sub-tasks are solved by separate networks, which are trained first stage-wise then altogether to refine 3D bounding boxes.
+2
+
+Figure 1: The general scheme of the proposed ImVoxelNet. Dashed lines around network blocks denote that network weights are shared across multiple inputs.
+Other methods, e.g., [4, 15, 29], exploit 2D detection and lift information from 2D to 3D. [16, 15, 29] extend 2D detection network with a 3D branch that regresses object pose. Some methods make use of external data sources, e.g., DeepMANTA [4] uses an iterative coarse-to-fine algorithm of generating 2D object proposals, which are used to select a CAD model. 3D-RCNN [21] also performs 2D detection and matches the outputs to 3D models. Then, it uses a render-and-compare approach to recover the shape and pose of an object.
+Monocular indoor 3D object detection is a less explored problem, with only SUN RGB-D [37] benchmark existing. This benchmark implies that indoor 3D object detection is a sub-task of total scene understanding. Beside detecting 3D objects, [16, 15, 29] estimate camera poses and room layouts. The most recent Total3DUnderstanding [29] reconstructs object meshes using an attention mechanism to consider relationships between objects.
+Some outdoor 3D object detection methods [35, 33] are evaluated on multi-view nuScenes [3] dataset on multi-view inputs. Specifically, these methods infer on each monocular RGB image, then aggregate the outputs. Aggregation is an inevitable part of the pipeline; however, doing this on the latest stage is a controversial choice, as spatial information might not be exploited as effectively as possible.
+So, none of the existing methods formulate 3D object detection given multiple RGB images as an end-to-end optimization problem.
+3 Proposed Method
+Our method accepts an arbitrary-sized set of RGB inputs along with camera poses. First, we extract features from the given images using a 2D convolutional backbone. Then, we project the obtained image features to a 3D voxel volume. For each voxel, the projected features from several images are aggregated via a simple element-wise averaging. Next, the voxel volume with assigned features is passed to a 3D convolutional network referred to as neck. The outputs of the neck serve as inputs to the last few convolutional layers (head) that predict bounding box features for each anchor. The resulting bounding boxes are parameterized as (x, y, z, w, h, l, ), where (x, y, z) are the coordinates of the center, w, h, l are for width, height, and length, and  is the rotation angle around z-axis. The general scheme of the proposed method is depicted in Fig. 1.
+2D features projection and 3D neck network have been proposed in [28, 14]. First, we briefly outline these steps. Then, we introduce a novel multi-scale 3D head designed for indoor detection.
+3
+
+3.1 3D Volume Construction
+
+Let It  RW ืHื3 be the t-th image in a set of T images. Here, T > 1 in case of multi-view inputs
+
+and T = 1 for single-view inputs. Following [28], we first extract 2D features from passed inputs
+
+using
+
+a
+
+pretrained
+
+2D
+
+backbone.
+
+It
+
+outputs
+
+four
+
+feature
+
+maps
+
+of
+
+shapes
+
+W 4
+
+ื
+
+H 4
+
+ื c0,
+
+W 8
+
+ื
+
+H 8
+
+ื 2c0,
+
+W 16
+
+ื
+
+H 16
+
+ื
+
+4c0,
+
+and
+
+W 32
+
+ื
+
+H 32
+
+ื
+
+8c0.
+
+We
+
+aggregate
+
+the
+
+obtained
+
+feature
+
+maps
+
+via
+
+Feature
+
+Pyramid
+
+Network
+
+(FPN),
+
+which
+
+outputs
+
+one tensor
+
+Ft
+
+of
+
+shape
+
+W 4
+
+ื
+
+H 4
+
+ื c1.
+
+c0
+
+and c1
+
+are backbone-specific;
+
+actual values are present in 4.2.
+
+For t-th input, the extracted 2D features Ft are then projected into a 3D voxel volume Vt  RNxืNyืNzืc1 . We set the z-axis to be perpendicular to the floor plane, with the x-axis pointing forward and the y-axis being orthogonal to both x and z-axes. For each dataset, there are known
+spatial limits for all three axes, estimated empirically in [40, 22, 28]. Let us denote these limits as xmin, xmax, ymin, ymax, zmin, zmax. For a fixed voxel size s, spatial constraints can be formulated as Nxs = xmax - xmin, Nys = ymax - ymin, and Nzs = zmax - zmin. We use a pinhole camera model, which determines the correspondence between 2D coordinates (u, v) in feature map Ft and 3D coordinates (x, y, z) in volume Vt:
+
+u v
+
+1
+4
+=  0
+
+0
+1 4
+
+0 0
+
+ 
+
+
+
+K
+
+Rt
+
+ 
+
+x y z
+
+ , 
+
+0 01
+
+1
+
+where K and Rt are the intrinsic and extrinsic matrices, and  is a perspective mapping. After projecting 2D features, all voxels along a camera ray get filled with the same features. We also define a binary mask Mt of the same shape as Vt, which indicates whether each voxel is inside the camera frustum. Thus, for each image It, the mask Mt is defined as:
+
+Mt(x, y, z) =
+
+1, 0,
+
+if 0  u(x, y, z) <
+
+W 4
+
+and 0  v(x, y, z) <
+
+H 4
+
+otherwise.
+
+Then, we project Ft for each valid voxel in a volume Vt:
+
+Vt(x, y, z) =
+
+Ft(u(x, y, z), v(x, y, z)), 0,
+
+if Mt(x, y, z) = 1 otherwise.
+
+The aggregated binary mask M is a sum of M1, . . . , Mt:
+
+M (x, y, z) = t Mt(x, y, z), if t Mt(x, y, z) > 0
+
+1,
+
+otherwise.
+
+Finally, we obtain the 3D volume V by averaging projected features in volumes V1, . . . , Vt across
+
+valid voxels:
+
+1
+
+V= M
+
+MtVt.
+
+t
+
+3.2 3D Feature Extraction
+
+Indoor. Following [28, 14], we pass the voxel volume V through a 3D convolutional encoder-decoder
+
+network to refine the features. For indoor scenes, we use an encoder-decoder architecture described
+
+in [28]. Each layer of the encoder and decoder consists of residual blocks with two 3D convolutional
+
+layers with a kernel of size 3. For downsampling, convolutions with a kernel size of 3 and a stride 2
+
+are applied. Upsampling is performed via trilinear interpolation followed by convolution with a kernel
+
+of size 1.
+
+The decoder branch outputs three feature maps of the following shapes:
+
+Nx 4
+
+ื
+
+Ny 4
+
+ื
+
+Nz 4
+
+ื c2,
+
+Nx 2
+
+ื
+
+Ny 2
+
+ื
+
+Nz 2
+
+ื
+
+c2,
+
+and
+
+Nx
+
+ื Ny
+
+ื
+
+Nz
+
+ื
+
+c2.
+
+For
+
+the
+
+actual
+
+value
+
+of
+
+c2,
+
+see
+
+4.2.
+
+Outdoor. Outdoor methods [36, 22, 39] reduce 3D object detection in 3D space to 2D object detection
+
+in the BEV plane. In these methods, both the neck and head are composed of 2D convolutions. The
+
+outdoor head accepts 2D feature map, so we should obtain a 2D representation of a constructed 3D
+
+voxel volume to use it in our method. In order to do that, we use the encoder part of the encoder-
+
+decoder architecture from [28]. After passing through several 3D convolutional and downsampling layers of this encoder, a voxel volume V of shape Nx ื Ny ื Nz ื c1 is mapped to the tensor of shape Nx ื Ny ื c2.
+
+4
+
+3.3 Detection Heads
+ImVoxelNet constructs a 3D voxel representation of the space; thus, it can use the head from point cloud-based 3D object detection methods. Therefore, instead of time-consuming custom architecture implementation, one can simply employ state-of-the-art methods with no modifications. However, the design of heads significantly differs for outdoor [22, 39] and indoor [11, 31] methods.
+
+3.3.1 Outdoor Head
+
+Following the common practice, we reformulate outdoor 3D object detection as 2D object detection in the BEV plane. We use the 2D anchor head that appeared to be efficient [22, 39] on KITTI [12] and nuScenes [3] datasets. Since outdoor 3D detection methods are evaluated on cars, all objects are of a similar scale and belong to the same category. For single-scale and single-class detection, the head consists of two parallel 2D convolutional layers. One layer estimates class probability, while the other regresses seven parameters of the bounding box.
+
+Input. The input is a tensor of shape Nx ื Ny ื c2.
+
+Output. For each 2D BEV anchor, the head returns a class probability p and a 3D bounding box as a
+
+7-tuple:
+
+xgt - xa
+
+ygt - ya
+
+zgt - za
+
+x = da , y = da , z = da ,
+
+w
+
+=
+
+log
+
+wgt wa
+
+,
+
+l
+
+=
+
+log
+
+lgt la
+
+,
+
+h
+
+=
+
+log
+
+hgt ha
+
+,
+
+
+
+=
+
+sin(gt
+
+-
+
+a).
+
+Here (xgt, ygt, zgt, wgt, lgt, hgt, gt) and (xa, ya, za, wa, la, ha, a) are the ground truth and anchor
+
+boxes, respectively. The length of the bounding box diagonal da = (wa)2 + (la)2. za is constant for all anchors since they are located in the BEV plane.
+
+Loss. We use the loss function introduced in SECOND [39]. The total outdoor loss consists of several loss terms, namely smooth mean absolute error as a location loss Lloc, focal loss for classification Lcls, and cross-entropy loss for direction Ldir. Overall, we can formulate the outdoor loss as
+1 Loutdoor = npos (locLloc + clsLcls + dirLdir),
+
+where npos is the number of positive anchors, loc = 2, cls = 1, dir = 0.2.
+
+3.3.2 Indoor Head
+
+All modern indoor 3D object detection methods [11, 31, 40] perform deep Hough voting for sparse point cloud representation. In contrast, we follow [28, 14] and use dense voxel representation of intermediate features. To the best of our knowledge, there is no dense 3D multi-scale head for 3D object detection. We construct such a head inspired by a 2D detection method FCOS [38]. An original FCOS head accepts 2D features from FPN and estimates 2D bounding boxes via 2D convolutional layers. To adapt FCOS for 3D detection, we replace 2D convolutions with 3D convolutions to process 3D inputs. The resulting head consists of three 3D convolutional layers for classification, location, and center-ness, respectively, with weights shared for all object scales.
+
+Input.
+
+A
+
+multi-scale
+
+input
+
+is
+
+composed
+
+of
+
+three
+
+tensors
+
+of
+
+shapes
+
+Nx 4
+
+ื
+
+Ny 4
+
+ื
+
+Nz 4
+
+ื c2,
+
+Nx 2
+
+ื
+
+Ny 2
+
+ื
+
+Nz 2
+
+ื c2,
+
+and
+
+Nx
+
+ื
+
+Ny
+
+ื
+
+Nz
+
+ื
+
+c2.
+
+Output. For each 3D location (xa, ya, za) and each of three scales, the head estimates a class
+
+probability p, a center-ness c, and a 3D bounding box as a 7-tuple:
+
+xmin = xgmtin - xa, xmax = xgmtax - xa, ymin = ymgtin - ya, ymax = ymgtax - ya,
+zmin = zmgtin - za, zmax = zmgtax - za, . Here, xgmtin, xgmtax, ymgtin, ymgtax, zmgtin, zmgtax denote the minimum and maximum coordinates along axes of a ground truth bounding box.
+
+Loss. We adapt the loss function used in the original FCOS [38]. It consists of focal loss for classification Lcls, cross-entropy loss for center-ness Lcntr, and IoU loss for location Lloc. Since we
+
+5
+
+address the 3D detection task instead of the 2D detection task, we replace 2D IoU loss with rotated 3D IoU loss [41]. In addition, we update ground truth center-ness with the 3rd dimension:
+cgt = min(xmin, xmax) min(ymin, ymax) min(zmin, zmax) . max(xmin, xmax) max(ymin, ymax) max(zmin, zmax)
+The resulting indoor loss can be written as
+1 Lindoor = npos (Lloc + Lcls + Lcntr),
+where npos is the number of positive 3D locations.
+3.4 Extra 2D Head
+In some indoor benchmarks, the 3D object detection task is formulated as a sub-task of scene understanding. Accordingly, evaluation protocols imply solving various scene understanding tasks rather than only estimating 3D bounding boxes. Following [16, 15, 29], we predict camera rotations and room layouts. Similar to [29], we add a simple head for joint Rt and 3D layout estimation. This extra head consists of two parallel branches: two fully connected layers that output room layout and the other two fully connected layers that estimate camera rotation.
+Input. The input is a single tensor of shape 8c0, obtained through global average pooling of the backbone output.
+Output. The head outputs camera pose as a tuple of pitch  and roll  and a 3D layout box as a 7-tuple (x, y, z, w, l, h, ). As [29], we set yaw angle and shift to zeros.
+Loss. We modify losses used in [29] to make them consistent with the losses used to train a detection head. Accordingly, we define layout loss Llayout as rotated 3D IoU loss between predicted and ground truth layout boxes; this is the same loss as we use in 3.3.2. For camera rotation estimation, we use Lpose = | sin(gt - )| + | sin(gt - )| similar to 3.3.1. Overall, the extra loss can be formulated as
+Lextra = layoutLlayout + poseLpose, where layout = 0.1 and pose = 1.0.
+4 Experiments
+4.1 Datasets
+We evaluate the proposed method on four datasets: indoor ScanNet [9] and SUN RGB-D [37], and outdoor KITTI [12] and nuScenes [3]. SUN RGB-D and KITTI are benchmarked in monocular mode, while for ScanNet and nuScenes, we address the detection problem in multi-view formulation.
+KITTI. The KITTI object detection dataset [12] is the most decisive outdoor benchmark for monocular 3D object detection. It consists of 3711 training, 3768 validation and 7518 test images. The common practice [35, 25] is to report results on validation subset and submit test predictions to an open leaderboard. All 3D object annotations have a difficulty level: easy, moderate, and hard. A 3D object detection method is assessed according to the results on moderate objects from the test set. Following [35, 25], we evaluate our method only on objects of the car category.
+nuScenes. The nuScenes dataset [3] provides data for developing algorithms addressing self-drivingrelated tasks. It contains LiDAR point clouds, RGB images captured by six cameras, accompanied by IMU and GPS measurements. The dataset covers 1000 video sequences, each recorded for 20 seconds, totalling 1.4 million images and 390 000 point clouds. Training split covers 28 130 scenes, and validation split contains 6019 scenes. The annotation contains 1.4 million objects divided into 23 categories. Following [35], the accuracy of 3D detection is measured only on car category. In this benchmark, not only the average precision (AP) metric, but average translation error (ATE), average scale error (ASE), and average orientation error (AOE) are calculated as well.
+SUN RGB-D. SUN RGB-D [37] is one of the first and most well-known indoor 3D datasets. It contains 10 335 images captured in various indoor places alongside corresponding depth maps
+6
+
+obtained with four different sensors and camera poses. The training split is composed of 5285 frames, while the rest 5050 comprise the validation subset. The annotation includes 58 657 objects. For each frame, a room layout is provided.
+ScanNet. The ScanNet dataset [9] contains 1513 scans covering over 700 unique indoor scenes, out of which 1201 scans belong to a training split, and 312 scans are used for validation. Overall, this dataset contains over 2.5 million images with corresponding depth maps and camera poses, alongside reconstructed point clouds with 3D semantic annotation. We estimate 3D bounding boxes from semantic point clouds following the standard protocol [11]. The resulting object bounding boxes are axis-aligned, so we do not predict the rotation angle  for ScanNet.
+
+4.2 Implementation Details
+3D Volume. We use ResNet-50 [13] as a feature extractor. Accordingly, the number of convolutions in the first convolutional block c0 equals 256. Following [28], we set the 3D volume feature size c1 to 64. For indoor datasets we set output feature size c2 to be equal to c1 to not increase the amount of memory during refining. For outdoor datasets c2 = 256 as proposed in [22, 39].
+Indoor and outdoor scenes are of different absolute scales. Therefore, we choose the spatial sizes of the feature volume for each dataset considering the data domain. We use the values provided in previous works [28, 22, 39, 36], as shown in Tab. 1. Thus, using anchor settings of the 3D head in [22, 36], we set voxel size s as 0.32 meters for outdoor datasets. Minimal and maximal values for all three axes for outdoor datasets also follow the point cloud ranges for car class in [22, 36]. For selecting indoor dataset constraints we follow [28], where the room size is 6.4 ื 6.4 ื 2.56 meters. The only change is we are doubling voxels size s from 0.04 to 0.08 to increase memory efficiency.
+
+Dataset
+
+xmin xmax ymin ymax zmin zmax s
+
+KITTI nuScenes
+
+-39.68 39.68 0 69.12 -2.92 -49.92 49.92 -49.92 49.92 -2.92
+
+0.92 0.92
+
+0.32
+
+SUN RGB-D -3.2
+
+ScanNet
+
+-3.2
+
+3.2 3.2
+
+0 -3.2
+
+6.4 3.2
+
+-2.28 -1.28
+
+0.28 1.28
+
+0.08
+
+Table 1: Implementation details. Axis limits and voxel size s are measured in meters.
+
+Training. During training, we optimize Lindoor for indoor datasets and Loutdoor for outdoor datasets, unless told otherwise. We use Adam optimizer with an initial learning rate set to 0.0001 and weight decay of 0.0001. The implementation is based on the MMDetection framework [5] and uses its default training settings. The network is trained for 12 epochs, and the learning rate is reduced by ten times after the 8th and 11th epoch. For ScanNet, SUN RGB-D, and KITTI, the network sees each scene three times every training epoch. We use 8 Nvidia Tesla P40 GPUs for training, distributing one scene (multi-view scenario) or four images (monocular scenario) per GPU. We randomly apply horizontal flip and resize inputs in monocular experiments by no more than 25% of their original resolution. Moreover, in indoor scenes, we can augment 3D voxel representations similar to point cloud-based methods, so we randomly shift a voxel grid center by at most 1m along each axis.
+Inference. During inference, outputs are filtered with a Rotated NMS algorithm, which is applied to objects projections onto the ground plane.
+4.3 Results
+First, we report the results of detecting cars on outdoor KITTI and nuScenes benchmarks. Then, we discuss the results of multi-class 3D object detection on SUN RGB-D and ScanNet indoor datasets. Visualization of detected boxes for all four datasets are presented in Appendix B.
+KITTI. We present the results of monocular car detection on KITTI in Tab. 2. ImVoxelNet achieves the best moderate AP on the test split, which is the main metric in the KITTI benchmark. Moreover, our method surpasses previous state-of-the-art by 6% AP3D and 4% APBEV for easy objects. Overall, ImVoxelNet is superior in terms of almost all metrics on both test and val splits.
+nuScenes. For nuScenes, unlike other methods that only run inference on images from 6 onboard cameras, ImVoxelNet uses multi-view inputs for training. As shown in Tab. 3, the proposed method outperforms MonoDIS [35] by more than 1% of mean AP, which is the main metric. According
+
+7
+
+Method
+
+Depth
+
+AP3D@0.7 (val/test)
+
+Easy
+
+Moderate Hard
+
+APBEV@0.7 (val/test)
+
+Easy
+
+Moderate
+
+Hard
+
+MonoFENet[1]  17.54 / 8.34 11.16 / 5.14 9.74 / 4.10 30.21 / 17.03 20.47 / 11.03 17.58 / 9.05
+
+AM3D[26]
+
+ 32.23 / 16.50 21.09 / 10.74 17.26 / 9.52 43.75 / 25.03 28.39 / 17.32 23.87 / 14.91
+
+D4LCN[10]
+
+ 26.97 / 16.65 21.71 / 11.72 18.22 / 9.51 34.82 / 22.51 25.83 / 16.02 23.53 / 12.55
+
+GS3D[23]
+
+ 13.46 / 4.47 10.97 / 2.90 10.38 / 2.47 ญ / 8.41 ญ / 6.08 ญ / 4.94
+
+MonoPSR[20]  12.75 / 10.76 11.48 / 7.25 8.59 / 5.85 20.63 / 18.33 18.67 / 12.58 14.45 / 9.91
+
+MonoGRNet[32]  13.88 / 9.61 10.19 / 5.74 7.62 / 4.25 ญ / 18.19 ญ / 11.17 ญ / 8.73
+
+SS3D[19]
+
+ 14.52 / 10.78 13.15 / 7.68 11.85 / 6.51 ญ / 16.33 ญ / 11.52 ญ / 9.93
+
+MonoDIS[35]
+
+ 18.05 / 10.37 14.98 / 7.94 13.42 / 6.40 24.26 / 17.23 18.43 / 13.19 16.95 / 11.12
+
+MonoPair[7]
+
+
+
+ญ / 13.04 ญ / 9.99 ญ / 8.65 ญ / 19.28 ญ / 14.83 ญ / 12.89
+
+SMOKE[25]
+
+ 14.76 / 14.03 12.85 / 9.76 11.50 / 7.84 19.99 / 20.83 15.61 / 14.49 15.28 / 12.75
+
+M3D-RPN[2]
+
+ 20.27 / 14.76 17.06 / 9.71 15.21 / 7.42 25.94 / 21.02 21.18 / 13.67 17.90 / 10.23
+
+RTM3D[24]
+
+ 20.77 / 14.41 16.86 / 10.34 16.63 / 8.77 25.56 / 19.17 22.12 / 14.20 20.91 / 11.99
+
+ImVoxelNet
+
+ 24.54 / 17.15 17.80 / 10.97 15.67 / 9.15 31.67 / 25.19 23.68 / 16.37 19.73 / 13.58
+
+Table 2: Scores for car category on the KITTI dataset. The depth column indicates whether this
+
+modality is used for training.
+
+to AP@0.5, ImVoxelNet outputs almost twice as many highly accurate estimates comparing to MonoDIS. For car detection, two boxes might have IoU = 0 when a center distance exceeds 1 meter. By that, AP@1.0m, AP@2.0m, and AP@4.0m might be calculated for non-intersecting bounding boxes, which seems counter-intuitive (e.g., for the KITTI dataset, only boxes with IoU > 0.7 are considered to be true positive). Hence, we argue that AP@0.5 is the most decisive metric.
+Moreover, we report values of ATE, ASE, and AOE metrics. As represented in the Tab. 3, ImVoxelNet has at least 0.09 meters smaller ATE than other monocular methods.
+
+Method
+
+RGB
+
+PC
+
+0.5m
+
+AP[%] 1.0m 2.0m 4.0m
+
+mean
+
+ATE [m]
+
+TP ASE[1-IoU]
+
+AOE[rad]
+
+PointPillar[22]   55.5 71.8 76.1 78.6 70.5 0.27
+
+0.17
+
+0.19
+
+OFTNet [33, 35]   ญ ญ 27.0 ญ ญ 0.65
+
+0.16
+
+0.18
+
+MonoDIS [35]   10.7 37.5 69.0 85.7 50.7 0.61
+
+0.15
+
+0.08
+
+ImVoxelNet
+
+  19.3 44.8 66.3 77.0 51.8 0.52
+
+0.15
+
+0.08
+
+Table 3: Scores for car category on the nuScenes dataset. The RGB and PC columns indicate data
+
+modalities used for both training and inference.
+
+SUN RGB-D. We compare ImVoxelNet with existing methods on the most recent monocular benchmark introduced in [29], which includes objects of NYU-37 categories [34]. Per-category scores for each of NYU-37 categories are present in Appendix A. Since the chosen benchmark implies estimating camera pose and layout, we optimize Lindoor + Lextra for training. For a fair comparison with Total3DUnderstanding [29], we report their results without joint training since it requires the additional mesh-annotated dataset. Tab. 4 demonstrates that ImVoxelNet surpasses all previous methods by a margin exceeding 18% in terms of mAP. Furthermore, as shown in Tab. 6, ImVoxelNet outperforms Total3DUnderstanding in both layout and camera pose estimation. We also report metrics on other benchmarks: the PerspectiveNet [17] benchmark with 30 object categories, and VoteNet [11] benchmark with 10 categories, which is used by point cloud-based methods (see Appendix A).
+
+Method bed chair sofa table desk dresser nstand sink cabinet lamp mAP
+
+3DGP[8] 5.62 2.31 3.24 1.23 ญ
+
+ญ
+
+ญญ
+
+ญ
+
+ญญ
+
+HoPR[16] 58.29 13.56 28.37 12.12 4.79 13.71 8.80 2.18 0.48 2.41 14.47
+
+CooP[15] 63.58 17.12 41.22 26.21 9.55 4.28 6.34 5.34 2.63 1.75 17.80
+
+T3DU[29] 59.03 15.98 43.95 35.28 23.65 19.20 6.87 14.40 11.39 3.46 23.32
+
+ImVoxelNet 77.17 54.27 59.07 48.07 22.69 37.83 40.79 45.12 16.13 13.35 41.45
+
+Table 4: AP@0.15 scores for 10 out of 37 object categories [29] from the SUN RGB-D dataset.
+
+ScanNet. We compare ImVoxelNet to existing methods on the common benchmark with 18 classes. During training, we use T = 50 images per scene, as was proposed in [28]. We conduct an ablation study to choose an optimal number of test images per scene (Tab. 5). We run our method five times on
+
+8
+
+Images mAP
+
+1
+
+8.24 ฑ0.90
+
+5
+
+23.57 ฑ1.65
+
+10
+
+31.24 ฑ0.88
+
+50
+
+39.28 ฑ0.63
+
+100 40.59 ฑ0.41
+
+Table 5: mAP@0.25 scores for different number
+
+of ScanNet images per test scene.
+
+Method Layout[IoU] Pitch[ฐ] Roll[ฐ]
+
+3DGP[8]
+
+19.2
+
+ญ
+
+ญ
+
+HoRP[16]
+
+54.9
+
+7.60 3.12
+
+CooP[15]
+
+56.9
+
+3.28 2.19
+
+T3DU[29]
+
+57.6
+
+3.68 2.59
+
+ImVoxelNet 59.3
+
+2.63 1.96
+
+Table 6: Room layout and camera pose estima-
+
+tion metrics for the SUN RGB-D dataset.
+
+different samples for each number of test images and report an average result with a 0.95 confidence interval. Experiments show that the more images per test scene is the better.
+According to Tab. 7, ImVoxelNet still shows competitive results despite not using point clouds. Notably, it outperforms point cloud-based [14] which builds a voxel volume representation using RGB images as an additional modality.
+Method RGB PC cab bed chair sofa tabl door wind bkshf pic cntr desk curt fridg showr toil sink bath ofurn mAP 3D-SIS[14]   12.8 63.1 66.0 46.3 26.9 8.0 2.8 2.3 0.0 6.9 33.3 2.5 10.4 12.2 74.5 22.9 58.7 7.1 25.4 3D-SIS[14]   19.8 69.7 66.2 71.8 36.1 30.6 10.9 27.3 0.0 10.0 46.9 14.1 53.8 36.0 87.6 43.0 84.3 16.2 40.2 VoteNet[11]   36.3 87.9 88.7 89.6 58.8 47.3 38.1 44.6 7.8 56.1 71.7 47.2 45.4 57.1 94.9 54.7 92.1 37.2 58.7 H3DNet[40]   49.4 88.6 91.8 90.2 64.9 61.0 51.9 54.9 18.6 62.0 75.9 57.3 57.2 75.3 97.9 67.4 92.5 53.6 67.2 ImVoxelNet   23.3 83.9 65.3 76.6 47.8 19.2 5.8 37.2 1.1 13.4 56.6 12.0 42.2 12.1 92.9 49.6 65.1 26.7 40.6
+Table 7: AP@0.25 scores for 18 object categories from the ScanNet dataset. All methods but ImVoxelNet accept point cloud (PC) as an input.
+
+5 Conclusion
+In this paper, we formulate the task of multi-view RGB-based 3D object detection as an end-toend optimization problem. To address this problem, we have proposed ImVoxelNet, a novel fully convolutional method of 3D object detection given monocular or multi-view RGB inputs. During both training and inference, ImVoxelNet accepts multi-view inputs with an arbitrary number of views; actually, this number might be unique for each multi-view input. Besides, our method can accept monocular inputs (treated as a special case of multi-view inputs). The proposed method has achieved state-of-the-art results in outdoor car detection on both the monocular KITTI benchmark and the multi-view nuScenes benchmark. Moreover, it has surpassed existing methods of 3D object detection on the indoor SUN RGB-D dataset. For the ScanNet dataset, ImVoxelNet has set a new benchmark for indoor multi-view 3D object detection. Overall, ImVoxelNet successfully works on both indoor and outdoor data, which makes it general-purpose.
+References
+[1] W. Bao, B. Xu, and Z. Chen. Monofenet: Monocular 3d object detection with feature enhancement networks. IEEE Transactions on Image Processing, 29:2753ญ2765, 2019.
+[2] G. Brazil and X. Liu. M3d-rpn: Monocular 3d region proposal network for object detection. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 9287ญ9296, 2019.
+[3] H. Caesar, V. Bankiti, A. H. Lang, S. Vora, V. E. Liong, Q. Xu, A. Krishnan, Y. Pan, G. Baldan, and O. Beijbom. nuscenes: A multimodal dataset for autonomous driving. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 11621ญ11631, 2020.
+[4] F. Chabot, M. Chaouch, J. Rabarisoa, C. Teuliere, and T. Chateau. Deep manta: A coarse-to-fine many-task network for joint 2d and 3d vehicle analysis from monocular image. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 2040ญ2049, 2017.
+[5] K. Chen, J. Wang, J. Pang, Y. Cao, Y. Xiong, X. Li, S. Sun, W. Feng, Z. Liu, J. Xu, et al. Mmdetection: Open mmlab detection toolbox and benchmark. arXiv preprint arXiv:1906.07155, 2019.
+[6] X. Chen, K. Kundu, Z. Zhang, H. Ma, S. Fidler, and R. Urtasun. Monocular 3d object detection for autonomous driving. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 2147ญ2156, 2016.
+9
+
+[7] Y. Chen, L. Tai, K. Sun, and M. Li. Monopair: Monocular 3d object detection using pairwise spatial relationships. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12093ญ12102, 2020.
+[8] W. Choi, Y.-W. Chao, C. Pantofaru, and S. Savarese. Understanding indoor scenes using 3d geometric phrases. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 33ญ40, 2013.
+[9] A. Dai, A. X. Chang, M. Savva, M. Halber, T. Funkhouser, and M. Nie฿ner. Scannet: Richly-annotated 3d reconstructions of indoor scenes. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 5828ญ5839, 2017.
+[10] M. Ding, Y. Huo, H. Yi, Z. Wang, J. Shi, Z. Lu, and P. Luo. Learning depth-guided convolutions for monocular 3d object detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, pages 1000ญ1001, 2020.
+[11] Z. Ding, X. Han, and M. Niethammer. Votenet: A deep learning label fusion method for multi-atlas segmentation. In International Conference on Medical Image Computing and Computer-Assisted Intervention, pages 202ญ210. Springer, 2019.
+[12] A. Geiger, P. Lenz, and R. Urtasun. Are we ready for autonomous driving? the kitti vision benchmark suite. In 2012 IEEE Conference on Computer Vision and Pattern Recognition, pages 3354ญ3361. IEEE, 2012.
+[13] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 770ญ778, 2016.
+[14] J. Hou, A. Dai, and M. Nie฿ner. 3d-sis: 3d semantic instance segmentation of rgb-d scans. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4421ญ4430, 2019.
+[15] S. Huang, S. Qi, Y. Xiao, Y. Zhu, Y. N. Wu, and S.-C. Zhu. Cooperative holistic scene understanding: Unifying 3d object, layout, and camera pose estimation. arXiv preprint arXiv:1810.13049, 2018.
+[16] S. Huang, S. Qi, Y. Zhu, Y. Xiao, Y. Xu, and S.-C. Zhu. Holistic 3d scene parsing and reconstruction from a single rgb image. In Proceedings of the European Conference on Computer Vision (ECCV), pages 187ญ203, 2018.
+[17] S. Huang, Y. Chen, T. Yuan, S. Qi, Y. Zhu, and S.-C. Zhu. Perspectivenet: 3d object detection from a single rgb image via perspective points. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alch้-Buc, E. Fox, and R. Garnett, editors, Advances in Neural Information Processing Systems, volume 32. Curran Associates, Inc., 2019.
+[18] M. Jaritz, J. Gu, and H. Su. Multi-view pointnet for 3d scene understanding. In Proceedings of the IEEE/CVF International Conference on Computer Vision Workshops, pages 0ญ0, 2019.
+[19] E. J๖rgensen, C. Zach, and F. Kahl. Monocular 3d object detection and box fitting trained end-to-end using intersection-over-union loss. arXiv preprint arXiv:1906.08070, 2019.
+[20] J. Ku, A. D. Pon, and S. L. Waslander. Monocular 3d object detection leveraging accurate proposals and shape reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 11867ญ11876, 2019.
+[21] A. Kundu, Y. Li, and J. M. Rehg. 3d-rcnn: Instance-level 3d object reconstruction via render-and-compare. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 3559ญ3568, 2018.
+[22] A. H. Lang, S. Vora, H. Caesar, L. Zhou, J. Yang, and O. Beijbom. Pointpillars: Fast encoders for object detection from point clouds. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12697ญ12705, 2019.
+[23] B. Li, W. Ouyang, L. Sheng, X. Zeng, and X. Wang. Gs3d: An efficient 3d object detection framework for autonomous driving. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1019ญ1028, 2019.
+[24] P. Li, H. Zhao, P. Liu, and F. Cao. Rtm3d: Real-time monocular 3d detection from object keypoints for autonomous driving. arXiv preprint arXiv:2001.03343, 2, 2020.
+[25] Z. Liu, Z. Wu, and R. T๓th. Smoke: single-stage monocular 3d object detection via keypoint estimation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, pages 996ญ997, 2020.
+10
+
+[26] X. Ma, Z. Wang, H. Li, P. Zhang, W. Ouyang, and X. Fan. Accurate monocular 3d object detection via color-embedded 3d reconstruction for autonomous driving. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 6851ญ6860, 2019.
+[27] A. Mousavian, D. Anguelov, J. Flynn, and J. Kosecka. 3d bounding box estimation using deep learning and geometry. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 7074ญ7082, 2017.
+[28] Z. Murez, T. van As, J. Bartolozzi, A. Sinha, V. Badrinarayanan, and A. Rabinovich. Atlas: End-to-end 3d scene reconstruction from posed images. arXiv preprint arXiv:2003.10432, 2020.
+[29] Y. Nie, X. Han, S. Guo, Y. Zheng, J. Chang, and J. J. Zhang. Total3dunderstanding: Joint layout, object pose and mesh reconstruction for indoor scenes from a single image. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 55ญ64, 2020.
+[30] C. R. Qi, W. Liu, C. Wu, H. Su, and L. J. Guibas. Frustum pointnets for 3d object detection from rgb-d data. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 918ญ927, 2018.
+[31] C. R. Qi, X. Chen, O. Litany, and L. J. Guibas. Imvotenet: Boosting 3d object detection in point clouds with image votes. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 4404ญ4413, 2020.
+[32] Z. Qin, J. Wang, and Y. Lu. Monogrnet: A geometric reasoning network for monocular 3d object localization. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 33, pages 8851ญ 8858, 2019.
+[33] T. Roddick, A. Kendall, and R. Cipolla. Orthographic feature transform for monocular 3d object detection. arXiv preprint arXiv:1811.08188, 2018.
+[34] N. Silberman, D. Hoiem, P. Kohli, and R. Fergus. Indoor segmentation and support inference from rgbd images. In European conference on computer vision, pages 746ญ760. Springer, 2012.
+[35] A. Simonelli, S. R. Bulo, L. Porzi, M. L. Antequera, and P. Kontschieder. Disentangling monocular 3d object detection: From single to multi-class recognition. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2020.
+[36] V. A. Sindagi, Y. Zhou, and O. Tuzel. Mvx-net: Multimodal voxelnet for 3d object detection. In 2019 International Conference on Robotics and Automation (ICRA), pages 7276ญ7282. IEEE, 2019.
+[37] S. Song, S. P. Lichtenberg, and J. Xiao. Sun rgb-d: A rgb-d scene understanding benchmark suite. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 567ญ576, 2015.
+[38] Z. Tian, C. Shen, H. Chen, and T. He. Fcos: Fully convolutional one-stage object detection. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 9627ญ9636, 2019.
+[39] Y. Yan, Y. Mao, and B. Li. Second: Sparsely embedded convolutional detection. Sensors, 18(10):3337, 2018.
+[40] Z. Zhang, B. Sun, H. Yang, and Q. Huang. H3dnet: 3d object detection using hybrid geometric primitives. In European Conference on Computer Vision, pages 311ญ329. Springer, 2020.
+[41] D. Zhou, J. Fang, X. Song, C. Guan, J. Yin, Y. Dai, and R. Yang. Iou loss for 2d/3d object detection. In 2019 International Conference on 3D Vision (3DV), pages 85ญ94. IEEE, 2019.
+Appendix
+A More results on SUN RGB-D
+For a comprehensive comparison, we also mention PerspectiveNet [17], which is evaluated following a different protocol. In that protocol, the annotations are mapped into 30 object categories. Accordingly, we train ImVoxelNet using the same object categories. The results are reported in Tab. 9. Among these 30 categories, 10 object categories are consistent with 10 categories used in [16, 15, 29]. So, we can merge these benchmarks and report metrics for [16, 15, 29, 17] that are obtained on the same subset of 10 object categories 8. Following [17], we assume camera poses are known, so we optimize only Lindoor and do not use any additional camera pose loss.
+11
+
+Method
+
+bed chair sofa table desk toilet bin sink shelf lamp mAP
+
+3DGP[8]
+
+5.62 2.31 3.24 1.23 ญ ญ ญ ญ ญ ญ ญ
+
+HoPR[16]
+
+58.29 13.56 28.37 12.12 4.79 16.50 0.63 2.18 1.29 2.41 14.01
+
+CooP[15]
+
+63.58 17.12 41.22 26.21 9.55 58.55 10.19 5.34 3.01 1.75 23.65
+
+PerspectiveNet[17] 79.69 40.42 62.35 44.12 20.19 81.22 22.42 41.35 8.29 13.14 39.09
+
+ImVoxelNet
+
+77.13 55.58 61.05 47.28 26.43 83.06 24.84 39.32 17.79 16.65 44.91
+
+Table 8: AP@0.15 scores for 10 out of 30 object categories [17] from the SUN RGB-D dataset.
+
+Method
+PerspectiveNet[17] ImVoxelNet
+
+toilet recycle night bin stand
+81.22 37.68 35.16 83.06 48.87 47.07
+
+end drawer computer key
+
+table
+
+board
+
+19.77 1.28 1.24 2.86
+
+23.74 3.88 2.81 0.00
+
+table
+44.12 47.28
+
+chair monitor stool
+40.42 1.14 22.65 55.58 18.26 8.57
+
+Method
+
+lamp dresser picture garbage shelf
+
+bin
+
+PerspectiveNet[17] 13.14 27.38 0.00 22.42 0.97
+
+ImVoxelNet
+
+16.65 21.11 0.38 24.82 4.00
+
+sofa cabinet sink chair 51.86 1.70 41.35 55.45 4.99 39.32
+
+desk
+20.19 26.43
+
+book shelf 8.29 17.79
+
+coffee table 28.80 28.10
+
+Method
+
+box sofa white bed pillow paper painting cpu
+
+board
+
+PerspectiveNet[17] 1.64 62.35 0.02 79.69 11.36 0.00 0.17 21.60
+
+ImVoxelNet
+
+2.98 61.05 0.30 77.13 11.23 0.00 0.12 3.17
+
+Table 9: AP@0.15 scores for 30 object categories [17] from the SUN RGB-D dataset.
+
+Another SUN RGB-D benchmark has been proposed in [11] for point cloud-based methods evaluation. This benchmark implies detecting objects of 10 categories with mAP@0.25 chosen as the main metric. In Tab. 10, we report the results of our method against point cloud-based methods. This comparison is unfair, favoring point cloud-based methods since they have access to more complete data. Nevertheless, we report the metrics to establish a baseline for monocular 3D object detection on SUN RGB-D.
+
+Method
+
+RGB PC bath bed bkshf chair desk dresser nstand sofa table toilet mAP
+
+F-PointNet[30]   43.3 81.1 33.3 64.2 24.7 32.0 58.1 61.1 51.1 90.9 54.0
+
+VoteNet[11]   74.4 83.0 28.8 75.3 22.0 29.8 62.2 64.0 47.3 90.1 57.7
+
+H3DNet[40]   73.8 85.6 31.0 76.7 29.6 33.4 65.5 66.5 50.8 88.2 60.1
+
+ImVoteNet[31]   75.9 87.6 41.3 76.7 28.7 41.4 69.9 70.7 51.1 90.5 63.4
+
+ImVoxelNet   43.5 72.0 7.1 44.4 16.8 17.5 28.6 48.2 35.2 75.0 38.8
+
+Table 10: AP@0.25 scores for 10 object categories from SUN RGB-D dataset. All methods but
+
+ImVoxelNet use point cloud (PC) as an input.
+
+Comparison with Total3DUnderstanding [29] on all NYU-37 object categories is present in Tab. 11. In this experiment, we optimize Lindoor + Lextra since camera pose is assumed unknown.
+
+12
+
+Method cabinet bed chair sofa table
+CooP[15] 10.47 57.71 15.21 36.67 31.16 T3DU[29] 11.39 59.03 15.98 43.95 35.28 ImVoxelNet 16.13 77.17 54.27 59.07 48.07
+
+door window book picture counter blinds shelf
+0.14 0.00 3.81 0.00 27.67 2.27 0.36 0.16 5.26 0.24 33.51 0.00 0.00 0.00 15.18 0.07 14.05 0.00
+
+Method
+
+desk shelves curtain dresser pillow mirror floor clothes books fridge tv
+
+mat
+
+CooP[15] 19.90 2.96 1.35 15.98 2.53 0.47 ญ 0.00 3.19 21.50 5.20
+
+T3DU[29] 23.65 4.96 2.68 19.20 2.99 0.19 ญ 0.00 1.30 20.68 4.44
+
+ImVoxelNet 22.69 2.97 0.52 37.83 8.01 0.00 ญ 0.96 0.04 23.21 12.78
+
+Method paper towel shower box curtain
+CooP[15] 0.20 2.14 20.00 2.59 T3DU[29] 0.41 2.20 20.00 2.25 ImVoxelNet 0.00 1.57 0.00 1.61
+
+white person board 0.16 20.96 0.43 23.36 0.24 11.62
+
+night stand 11.36 6.87 40.79
+
+toilet
+42.53 48.37 80.96
+
+sink
+15.95 14.40 45.12
+
+lamp bathtub
+3.28 24.71 3.46 27.85 13.35 38.43
+
+Method
+
+bag wall floor ceiling
+
+CooP[15] 1.53 ญ
+
+ญ
+
+ญ
+
+T3DU[29] 2.27 ญ
+
+ญ
+
+ญ
+
+ImVoxelNet 0.51 ญ
+
+ญ
+
+ญ
+
+Table 11: AP@0.15 scores for 37 object categories [29] from the SUN RGB-D dataset.
+
+B Visualization
+All visualized images belong to validation subsets of the corresponding datasets. Different colors of the depicted bounding boxes mark different object categories; the color encoding is consistent within each dataset.
+
+13
+
+Figure 2: Objects detected on the monocular images from the SUN RGB-D dataset. 14
+
+a) Scene n008-2018-08-01-15-16-36-0400__15331512526.
+b) Scene n008-2018-09-18-15-12-01-0400__15372981046. Figure 3: Cars detected in two scenes from the nuScenes dataset in multi-view settings. The first two rows correspond to the first scene, and the last rows correspond to another one. For each scene, the upper row consists of front left, front, and front right image (from left to right), the second row contains back left, back, and back right images, respectively.
+15
+
+a) Scene 0169_00. b) Scene 0086_00. Figure 4: Objects detected on the multi-view inputs from the ScanNet dataset.
+16
+
+Figure 5: Cars detected on monocular images from the KITTI dataset. .
+17
+
+

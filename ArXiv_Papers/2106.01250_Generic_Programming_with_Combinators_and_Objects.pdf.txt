@@ -1,0 +1,686 @@
+Generic Programming with Combinators and Objects*
+
+Dmitry Kosarev
+St. Petersburg State University JetBrains Research
+St. Petersburg, Russia
+Dmitrii.Kosarev@protonmail.ch
+
+Dmitry Boulytchev
+St. Petersburg State University JetBrains Research
+St. Petersburg, Russia
+dboulytchev@math.spbu.ru
+
+arXiv:2106.01250v1 [cs.PL] 2 Jun 2021
+
+We present a generic programming framework for OCAML which makes it possible to implement extensible transformations for a large scale of type definitions. Our framework makes use of objectoriented features of OCAML, utilising late binding to override the default behaviour of generated transformations. The support for polymorphic variant types complements the ability to describe composable data types with the ability to implement composable transformations.
+
+1 Introduction
+
+Frederic Brooks in his seminal book on software engineering "The Mythical Man-Month" [7] has characterised the essence of programming with the following words:
+"The programmer, like the poet, works only slightly removed from pure thought-stuff. He builds his castles in the air, from air, creating by exertion of the imagination. Few media of creation are so flexible, so easy to polish and rework, so readily capable of realising grand conceptual structures. (As we shall see later, this very tractability has its own problems.)"
+Indeed, the virtuality of programs and flexibility of their representation call for structuring; the lack of proper structure easily leads to disastrous consequences (as it happened to some real-world industrial projects in the past). One of commonly used ways to bring a structure in software are data types. Data types allow to describe the properties of data, what can and cannot be done, and to some extent they prescribe the semantics to data structures. Being kept in runtime, data types make it possible to implement meta-transformations by analysing types (introspection) or even creating new types on the fly (reflection).
+However, in statically typed languages, as a rule, types are completely erased after the compilation and do not retained in runtime. This has a huge advantage over dynamic typing as, first, programs do not need to inspect types at runtime anymore and, second, a whole class of bad runtime behaviours -- type errors -- is eliminated. The other side of the coin, however, is that now some transformations, which in untyped languages can be implemented "once and for all", can not be typed and have to be reimplemented for each type of interest. One way to overcome this deficiency is to develop a more powerful type system in which more functions can be typed; as an example we may mention the support for ad-hoc polymorphism in HASKELL in the forms of type classes [31] and type families [16]. However, due to the totality of type checking and fundamental undecidability results there will always be some "good" programs which cannot be typed. Another approach, datatype-generic programming [13], is aimed at developing techniques for implementation of practically important families of type-indexed functions using existing language features. For example, types can be encoded in a substrate language [14, 8, 3],
+*This work was partially supported by the grant 18-01-00380 from the Russian Foundation for Basic Research.
+
+Submitted to: ML 2018
+
+© D.Kosarev, D.Boulytchev This work is licensed under the Creative Commons Attribution License.
+
+2
+
+Generic Programming with Combinators and Objects
+
+or a part of type information can be saved for runtime [20, 6], or generic functions for a given type can be generated at compile-time automatically [34, 2]. The two approaches we mentioned are in fact complementary -- the more powerful type system is the more means for datatype-generic programming the language can incorporate natively. For example, parametric polymorphism makes it possible to natively express many generic functions like length of list of arbitrary elements, etc.
+We present a generic programming library GT1 (Generic Transformers), which has been in an active development and use since 2014. One of the important observations, which motivated the development of our framework, was that many generic functions can be considered as a modifications of some other generic functions. While our approach is generative -- we generate generic functionality from type definitions -- it also makes possible for end users to easily derive variants of generated functions by redefining some parts of their functionality. This is achieved using a method-per-constructor encoding for concrete transformations, which resembles the approach of object algebras [24].
+The main properties of our solution are as follows:
+· each transformation is expressed in terms of a traversal function and a transformation object, which encapsulate the "interesting part" of the transformation;
+· the traversal function is unique for given type and all transformation objects for the type are instances of a unique class;
+· both the traversal function and the class are generated from type definition; we support regular ADTs, structures, polymorphic variants and predefined types;
+· we provide a number of plugins which generate practically important transformations in the form of concrete transformation classes;
+· the plugin system is extensible: end users can implement their own plugins.
+The library we present is an inheritor of our earlier work [6] on implementation of "Scrap Your Boilerplate" approach [20, 21, 22]. However, our experience has shown, that the expressivity and extensibility of SYB is insufficient; in addition the uniform transformations, based solely on type discrimination, turned out to be inconvenient to use. Our idea initially was to combine combinator and object-oriented approaches -- the former would provide means for parameterization, while the latter -- for extensibility via late binding utilisation. This idea in the form of a certain design pattern was successfully evaluated [5] and then reified in a library and a syntax extension [4]. Our follow-up experience with the library [19] has (once again) shown some flaws in the implementation. The version we present here is almost a complete re-implementation with these flaws fixed.
+The rest of the paper is organised as follows. In the next section we give an informal, example-driven exposition of the approach we use. Then we describe the implementation in more details, highlighting some aspects which we find important or interesting. In the following section we consider some examples, implemented with the aid of the library. Related works section observes the relevant approaches and frameworks and compares them to ours. The final section discusses the directions for future development.
+2 Exposition
+In this section we gradually unfold the approach we propose using a number of examples; while this exposition lacks many concrete details and can not be used as a precise reference, it presents the main
+1https://github.com/kakadu/GT/tree/ppx
+
+D.Kosarev, D.Boulytchev
+
+3
+
+"ingredients" of the solution and motivation which has drove us to identify them. From now on we use the following convention: we denote . . . the representation of a certain notion in the concrete syntax of OCAML. For example, " ft " is an encoding of instance of type-indexed function " f " for a type `'t". In the concrete syntax it may be expressed as "f_t" but for now we would refrain from specifying the exact form.
+We start from a simple example. Let us have the following type definition for arithmetic expressions:
+
+type expr = | Const of int | Var of string | Binop of string * expr * expr
+Recursive function " showexpr " (the first evident candidate for generic implementation) converts an expression into its string representation:
+
+let rec showexpr = function
+
+| Const n
+
+ "Const " ^ string_of_int n
+
+| Var x
+
+ "Var " ^ x
+
+| Binop (o , l , r) 
+
+Printf . sprintf "Binop (%S , %s , %s)" o ( showexpr l) ( showexpr r)
+
+The representation, which " showexpr " provides, preserves the names of constructors; this can be convenient for debugging or serialisation purposes. However, as a rule, an alternative -- pretty-printed -- representation is desirable as well. In this representation an expression is shown in its "natural syntax" with infix operators and no constructor names, where brackets are inserted only when they are really needed. Of course, implementing pretty-printer is easy:
+
+let prettyexpr e = let rec pretty_prio p = function
+
+| Const n
+
+ string_of_int n
+
+| Var x
+
+x
+
+| Binop (o , l , r) 
+
+let po = prio o in
+
+(if po  p then br else id) @@
+
+pretty_prio po l ^ " " ^ o ^ " " ^ pretty_prio po r
+
+in
+
+pretty_prio min_int e
+
+Here we make use of functions "prio", "br" and "id", defined elsewhere. "prio" returns the priority of a binary operator, "br" puts its parameter in brackets and "id" is identity. The auxiliary function "pretty_prio" takes additional integer parameter, which describes the priority of an enclosing binary operator (if any). If the priority of current operator is less of equal than that, the expression is taken into brackets (for simplicity we assume all operators non-associative; the same code skeleton with minor modifications can be used for the associative case as well). On the top level we supply the smallest representable integer as the priority to make sure no brackets will appear around the top level expression.
+The bodies of these two functions have very little in common -- both return strings, but the second takes additional argument, and all the constructor cases are essentially different. The only identical thing is pattern matching itself. We can extract the pattern matching into a separate function and parameterise this function with a set of per-constructor transformations:
+
+4
+
+Generic Programming with Combinators and Objects
+
+let gcataexpr   = function
+
+| Const n
+
+ # Const  n
+
+| Var x
+
+ # Var  x
+
+| Binop (o , l , r)  # Binop  o l r
+
+Here we use object as a natural representation for a set of semantically connected functions. "" is a transformation object with methods corresponding to the constructors of type "expr"; "" represents the extra parameter which may be used by functions like " prettyexpr " (and safely ignored by functions like " showexpr ").
+The initial " showexpr " now can be expressed as follows2:
+let rec showexpr e = gcataexpr object method Const _ n = "Const " ^ string_of_int n method Var _ x = "Var " ^ x method Binop _ o l r = Printf . sprintf "Binop (%S , %s , %s)" o ( showexpr l) ( showexpr r) end () e
+
+and, of course, the same is true for prettyexpr . We can notice, that both objects, needed to implement these functions, can be instantiated from a common virtual class:
+
+class virtual [ ,  ] expr = object
+method virtual Const :   int   method virtual Var :   string   method virtual Binop :   string  expr  expr   end
+
+A concrete transformation class inherits from this common ancestor; as we have to make recursive calls to the transformation itself we parameterise the class by the self-transforming function "fself" (open recursion). The decision to use open recursion is vital for the support of polymorphic variant types and mutual recursion. Now we can implement, say, pretty-printing in isolation (not within the pretty-printing function, note the usage of "fself"):
+
+class prettyexpr (fself :   expr   ) = object inherit [int , string ] expr
+method Const p n = string_of_int n method Var p x = x method Binop p o l r =
+let po = prio o in (if po  p then fun s  "(" ^ s ^ ")" else fun s  s) @@ fself po l ^ " " ^ o ^ " " ^ fself po r end
+
+2For the sake of brevity we omitted some type annotations, needed for this snippet to type check.
+
+D.Kosarev, D.Boulytchev
+
+5
+
+The pretty-printing function itself can now be easily expressed using this class and the generic transformation3 :
+
+let prettyexpr e = let rec pretty_prio p e = gcataexpr (new prettyexpr pretty_prio ) p e in pretty_prio min_int e
+
+Finally, we can avoid using the nested function definition by tying the recursive knot with the fix point combinator "fix":
+
+let prettyexpr e = fix (fun fself p e  gcataexpr (new prettyexpr fself ) p e) min_int e
+
+During this demonstration we managed to extract two common features for two essentially different transformations: a generic traversal (" gcataexpr ") and a virtual class (" expr ") to represent all transformations as its instances. But, did it worth trying? In fact in this concrete example we achieved a very little code reuse at the price of introducing a number of extra abstractions; actually, the size of code we came up with is larger than the initial one.
+We argue that in this particular case the transformations were not general enough. In order to justify our approach we consider another, more optimistic scenario. It is well-known, that many transformations can be represented (and for a good reason) using catamorphisms, or "folds" [15, 23, 12]. Technically, to implement regular catamorphism we would need to abstract the type "expr" of itself to make it a proper functor, but for now we stick with a more lightweight version:
+
+class [ ] f oldexpr (fself :   expr   ) = object inherit [ ,  ] expr
+method Const i n = i method Var i x = i method Binop i o l r = fself (fself i l) r end
+
+This implementation simply threads the argument "i" through all nodes of an expression and returns it unchanged. This seems pretty useless at a first glance. However, if we modify this default behaviour a little, we can obtain something useful:
+
+let fv e = fix (fun fself i e  gcataexpr (object inherit [string list] method Var i x = x : : i end) i e ) [] e
+
+f oldexpr
+
+fself
+
+This function calculates the list of all free variables in an expression (as there can be no binders this is simply the list of all variables). Immediate object we construct here inherits from the "useless" " f oldexpr " and redefines only one method -- for variables. All other code makes exactly what we need -- " gcataexpr " traverses the expression, and all other methods of transformation object accurately pass the list of variables through. So, we indeed managed to implement some interesting transformation with a very small modification of existing code (provided that " f oldexpr " class was already supplied).
+
+3As function and class names reside in different namespaces in OCAML, we use the same name for both concrete transformation class and transformation function.
+
+6
+
+Generic Programming with Combinators and Objects
+
+To avoid the impression that we carefully prepared everything to implement this particular example we can show another one:
+
+let height e = fix (fun fself i e  gcataexpr (object inherit [int] f oldexpr fself method Binop i _ l r = 1 + max (fself i l) (fself i r) end) i e ) 0e
+
+Now we calculated the height of an expression. We used the same " f oldexpr " class as a base for another immediate object; we redefined the method for binary operators, which now calculates the heights of both sub expressions, takes the maximum and adds one.
+Another commonly recognised generic feature is "map":
+
+class mapexpr fself = object inherit [unit , expr] expr
+method Var _ x = Var x method Const _ n = Const n method Binop _ o l r = Binop (o , fself ( ) l , fself ( ) r) end
+
+Again, as type "expr" is not a functor, all we can do with " mapexpr " is copying. However, by inheriting from it we can provide more transformations:
+
+class simplify fself =
+
+object inherit mapexpr fself
+
+method Binop _ o l r =
+
+match fself ( ) l , fself ( ) r with
+
+| Const l , Const r  Const ( ( op o) l r)
+
+|l
+
+,r
+
+ Binop (o , l , r)
+
+end
+
+This class performs a constant folding: if both arguments of a binary operator are reduced (by the same transformation) to constants, then in performs the operation. The function "op" is defined elsewhere; it returns an integer function for evaluating given binary operator. One more:
+
+class substitute fself state = object inherit mapexpr fself
+method Var _ x = Const (state x) end
+
+This one substitutes variables in an expression with their values in some state, represented as function "state". Two last classes can be seamlessly combined to construct an evaluator:
+
+class eval fself state = object
+inherit substitute fself state inherit simplify fself end
+
+D.Kosarev, D.Boulytchev
+
+7
+
+let eval state e = fix (fun fself i e  gcataexpr (new eval fself state ) i e) ( ) e
+In all these examples we, starting from some very common generic feature, implemented all needed transformations with a very little efforts (modulo the verbose OCAML syntax for objects and classes). In each case we needed to override only one method, and we used a single per-type generic function. On the other hand we dealt with a very simple type -- for example, it was not even polymorphic, and supporting polymorphism might have its own issues. In the rest of the paper we show that, indeed, the sketch we presented here can be extended to a generic programming framework, in which all the components can be synthesised from type definitions. In particular, our approach provides the full support for:
+· Polymorphism.
+· Type constructor application.
+· Mutual recursion. While there is no problem with implementation of hard-coded generic transformations, the implementation of extensible ones requires extra efforts.
+· Polymorphic variant types. It includes the seamless integration via class inheritance of all features for polymorphic variant types when these types are combined into the one.
+· Separate compilation: we can generate code from type definitions for a module separately with no lookup into modules this one depends on.
+· Encapsulation: we support module signatures, including abstract and private type declarations. Generic functions, implemented for abstract types, can be safely used outside the module, but can be neither modified nor used to "peep" at the internal structure of the type.
+We also address some performance issues -- as one could notice, in all preceding examples we created a whole bunch of identical objects during a transformation (one per each node of a data structure); as we will see, this can be avoided via memoization. Finally, our framework provides a plugin system which can be used to generate a number of useful transformations (like "show", "fold" or "map"). The plugin system is extensible as well -- end users can implement their own plugins with a very little amount of extra effort since a large part of their functionality (the traversal function and virtual transformation class) is already supplied by the framework.
+3 Implementation
+The main components of our solution are syntax extensions (both in terms of camlp5 [1] and ppxlib [2]), a runtime library and a plugin system. The syntax extensions process type definitions, attributed by an end user, and generate the following entities:
+· a transformation function (one per a type);
+· a virtual class which is used as a common ancestor for all concrete transformations (one per a type);
+· a number of concrete classes (one per requested plugin);
+· a typeinfo structure, which incorporates a type-specific information like the transformation function and a bundle of plugin-generated concrete functions, represented as an immediate object.
+We support the majority of variants in the right-hand side of type definitions with the following limitations:
+
+8
+
+Generic Programming with Combinators and Objects
+
+camlp5 version
+
+@type ... [ with p1, p2, . . . ]
+
+a syntax construct to generate a support for a type with plugins p1, p2, . . . ; mutually recursive definitions are supported
+
+@t y p
+
+the name for the virtual class for type typ
+
+@ pl ugin[t y p]
+
+the name for a plugin class for type typ and
+
+plugin plugin
+
+ppxlib version
+
+type ... = ...
+
+a syntax construct to generate a support for a type
+
+and ... = ...
+
+with plugins p1, p2, . . .
+
+[@@deriving gt ~options :{ p1, p2, . . .}]
+
+Figure 1: Extended syntax constructs
+
+· only regular algebraic data types are supported; GADTs are treated as simple algebraic data types; · constraints are not taken into account; · "nonrec" definitions, object and module types are not supported; · extensible datatypes (" ... "/"+=") are not supported.
+For example, for a type "t" with requested plugin "show" the structure with the following skeleton is generated (". . . " stands for the parts we omit for now):
+let gcatat . . . = . . .
+
+class virtual [. . .] t = object
+... end
+
+class [. . .] showt . . . = object inherit [. . .] t . . .
+... end
+
+let t = { gcata = gcatat ; ... plugins = object method show = . . . end
+}
+
+Using the typeinfo structure "t" we can mimic the type-indexed nature of concrete transformations:
+
+let transform typeinfo = typeinfo . gcata
+
+let show
+
+typeinfo = typeinfo . plugins#show
+
+D.Kosarev, D.Boulytchev
+
+9
+
+The function "transform (t)" is a top-level transformation function, which can be instantiated for any supported type "t". On the Figure 1 we describe the concrete constructs, implemented by the syntax extensions. Note, the concrete way of encoding names for classes and transformation function (represented above as ... ) is not important as long as camlp5 is used since it provides corresponding syntax extensions.
+3.1 Types of Transformations
+The design of the library is based on the idea to describe transformations (e.g. catamorphisms [23]) in terms of attribute grammars [18, 30, 27]. In short, we consider only the transformations of the following type
+ t
+where t is the type of a value to transform,  and  -- types for inherited and synthesised attributes. We do not use attribute grammars as a mean to describe the algorithmic part of transformations; we only utilise their terminology to describe the types.
+When the type under consideration is parameterised, the transformation becomes parameterised as well. From now on we will use a convention to denote {...} multiple occurrences of a an entity inside the brackets. Under this convention we may stipulate the generic form of any transformation, representable with the aid of our library, as
+{i  i  i}    {i} t  
+Here i  i  i is an argument-transforming function for the type parameter i. In general the argument-transforming functions operate on inherited values of different types and return synthesised values of different types. The common ancestor class in turn is massively polymorphic: for an n-parametric type it receives 3(n + 1) type parameters:
+· a triplet i, i, i for each type parameter i, where i and i are type variables for inherited and synthesised attributes for the transformation of i;
+· a pair of type variables  and  for inherited and synthesised attributes for the type itself; · an extra type variable , which is inferred to "{i} t" for non-polymorphic variant types and to an
+open version "[> {i} t]" for polymorphic variants (see Section 3.5).
+For example, if we have a two-parametric type (,  ) t the head of common ancestor class definition will look like
+class virtual [ ,  ,  ,  ,  ,  ,  ,  ,  ] t
+The concrete transformations inherit from the common ancestor class and, possibly, instantiate some of its type parameters to a more specific types. Additionally, concrete classes receive a number of functional arguments:
+· n argument-transforming functions: fi : i  i  i; · a function to implement open recursion: fself :      .
+For example, for the same type as above and a transformation "show" the header of concrete class looks like
+
+10
+
+Generic Programming with Combinators and Objects
+
+class [ ,  ,  ] showt (f : unit    string ) (f : unit    string ) (fself : unit    string ) =
+object inherit [unit ,  , string , unit ,  , string , unit ,  , string ] t ...
+end
+Note, we maintain these conventions for all types although for some of them some of components are superfluous: for example, "fself" is needed only for recursive types. The explanation for this decision is simple: when we use a type we generally do not know its definition. Thus, in order to support separate compilation the interfaces of all entities we generate must have identical structure.
+This scheme of typing and pasteurisation looks quite verbose and cumbersome: there are a lot of type parameters which are quite easy to get a mess with. However, end users would need to deal with this stuff directly only when they desire to implement a transformation manually from scratch by immediately inheriting from the common ancestor class. In the majority of use cases the transformation is implemented either by customising a certain plugin or using the plugin system. In the first case many type parameters are already instantiated (for example, for "show" the majority of type parameters are instantiated to ground types), in the second the plugin system takes care of instantiating the parameters correctly (see Section 3.3).
+We also need to describe the types for the methods of common ancestor classes. The method for a constructor "C of a1 * a2 * ... * ak" has the following definition:
+method virtual C :     a1  a2  . . .  ak  
+Note, the method takes not only inherited attribute and the arguments of corresponding constructor, but the value under transformation itself.
+Finally, we describe the type of transformation function. This type is slightly different for polymorphic variant types.
+For a non-polymorphic variant type "{i} t" the transformation function has the following type:
+val gcatat : [{i , i , i} ,  , {i} t ,  ]# t    {i} t  
+Thus, it takes a transformation object (which has a type of properly parameterised subclass of the common ancestor class), an inherited attribute, a value to transform, and returns synthesised attribute. The extra type parameter "" is instantiated to the type itself. For a polymorphic variant type the extra type parameter is instantiated to the open version of the type ("[> {i} t]"). This enables the possibility to apply a transformation function for a type to a transformation object for another type with more constructors.
+3.2 Fixed Point Combinator and Memoization
+In our approach we use open recursion: a class for a concrete transformation takes a function for the same transformation as a parameter. In order to instantiate this function we have to use a fix point combinator. In this section we consider only a simple fix point combinator for an isolated type definition; in mutually-recursive case a more elaborated combinator is needed (see Section 3.4).
+We repeat here an example from Section 2:
+let prettyexpr e = fix (fun fself p e  gcataexpr (new prettyexpr fself ) p e) min_int e
+
+D.Kosarev, D.Boulytchev
+
+11
+
+Name
+
+Type of the transformation
+
+Comment
+
+show fmt html compare eq foldl
+foldr
+gmap
+
+{ unit  i  string }  unit  {i} t string { formatter  i  unit }  formatter  {i} t unit
+{ unit  i  HTML . t }  unit  {i} t HTML.t { i  i  comparison }  {i} t {i} t comparison
+{ i  i  bool }  {i} t {i} t bool {   i   }    {i} t 
+{   i   }    {i} t 
+{ unit  i  i }  unit  {i} t {i} t
+
+conversion to a string
+formatted output using the "Format" module conversion to HTML representation comparison
+equality test
+threading an inherited attribute through all the nodes using a top-down traversal threading an inherited attribute through all the nodes using a bottom-up traversal a functor
+
+Figure 2: The list of predefined plugins
+
+As the lambda argument of "fix" is called each time when "fself" is called (virtually, for each node of an expression), a new transformation object is created for each node. As all these objects are identical, this can be optimised.
+We memoize the creation of transformation objects using lazy evaluation. For this we abstract the object creation sub expression into a function which takes "fself" as an argument. Then the implementation of the fix point combinator is as follows:
+let fix gcata make_obj  x = let rec obj = lazy (make_obj fself ) and fself  x = gcata (Lazy . force obj)  x in fself  x
+This combinator can be used for all types and is not generated. Now we can fix a little bit the definition of "transform":
+let transform typeinfo = fix typeinfo . gcata
+With this definition an end used does not need to deal with the fix point combinator explicitly anymore:
+let showexpr e = transform (expr) (fun fself  new showexpr fself ) ( ) e
+
+3.3 The Plugin System
+The default behaviour of our framework is to generate the transformation function, the common ancestor class and the typeinfo structure only. It does not generate any concrete built-in transformations. All concrete transformations are generated by plugins, and the plugin system allows end users to implement their own. There is a number of predefined plugins (see Figure 2), but none of them receives a special treatment from the rest of the framework.
+
+12
+
+Generic Programming with Combinators and Objects
+
+Each plugin is implemented as a dynamically-loaded object, and to create a plugin an end user has to properly instantiate a compilation unit using an interface provided by the framework. The same approach is used in a number of existing frameworks [2, 34]; however, we claim, that in our case the implementation of a plugin is much simpler. The reason is that the concrete and generic parts of transformations are properly separated. Thus, a plugin only instantiates a class, and only a limited assistance from an end-user side is needed. Generally speaking, the following information has to be provided:
+· What are the types of inherited and synthesised attributes for a given type parameter?
+· What are the types of inherited and synthesised attributes for the type itself?
+· What is the body of the method which transforms given constructor (the arguments of the method and their types are specified by the framework)?
+· What the toplevel method of the typeinfo structure for the plugin is look like?
+So, there are only a limited number of places where a plugin actually needs to generate a code, and as a rule the generated code is very simple. The code generation interface the plugin system provides resembles that of ppxlib (more precise, Ast_builder), which has to be familiar to anyone, who has ever implemented syntax extensions. In the Section 4.3 we present a complete example of fresh plugin implementation.
+3.4 Mutual Recursion
+The full support for mutually recursive type definitions requires extra efforts. While, formally, the generation of all needed entities for mutually recursive definitions can be done in a similar manner as for the isolated case, it would break the extensibility of transformations. We demonstrate this phenomenon by the following example. Let us have the definition
+type expr = . . . | LocalDef of def * expr and def = Def of string * expr where we omitted a non-relevant part (variables, binary operators, etc.) in expression type declaration. It is rather obvious, that generic transformation functions for both types can be kept as they are; indeed, they only "outsource" the transformations to corresponding methods and do not depend on recursion in type definitions:
+let gcataexpr   = function ... | LocalDef (d , e) as x  # LocalDe f  x d e
+let gcatade f   = function | Def (s , e) as x  # De f  x s e
+The same is true for the common ancestor classes. However, when we start implementing concrete transformations, we would need to use a transformation for "expr" inside the class for "def", and vice versa. This can be done with mutually recursive class definitions (we, again, omit the non relevant parts):
+class showexpr fself = object inherit [unit , _ , string ] expr fself
+... method LocalDe f  x d e =
+
+D.Kosarev, D.Boulytchev
+
+13
+
+. . . (fix gcatade f (fun fself end
+and showde f fself = object inherit [unit , _ , string ]
+method De f  x s e = . . . (fix gcataexpr (fun fself
+end
+
+ new showde f
+de f fself  new showexpr
+
+fself ) . . .) . . . fself ) . . .) . . .
+
+Note, in both "fix" sub expressions we instantiated concrete classes (" showde f " and " showexpr "). This should work as expected at the first glance. Strictly speaking, this concrete transformation works. But, what happens when we decide to redefine the behaviour of this default " showexpr "? According to our general approach, we would need to inherit from " showexpr ", override certain methods and construct a function using fix point:
+
+class custom_show fself = object inherit showexpr fself
+method Const  x n = "a constant" end
+
+let custom_show e = fix gcataexpr (fun fself  new custom_show fself) ( ) e
+Alas, this won't work as we desire: we did not override the method " LocalDe f ", and it still uses the default version for the type "def", which still uses the default version for the type "expr". Thus, we only redefined the behaviour of default " showexpr " for one component of mutually recursive type definition -- the type "expr" as such. All occurrences of "expr" inside other types will still be handled by the default transformation. In order to make things work as we want we would need to repeat the whole mutually-recursive class definition, which invalidates the very idea of extensibility.
+Our solution for the problem, again, utilises the idea of open recursion. In short, we parameterise the concrete transformation classes with the same transformations for all components of mutually recursive definition. Since this parameterisation violates the conventions on class interfaces we first generate auxiliary classes. For our example this auxiliary classes look as follows:
+class show stubexpr fexpr fde f = object inherit [unit , _ , string ] expr fexpr
+... method LocalDe f  x d e = . . . ( fde f . . .) . . . end
+
+class show stubde f fexpr fde f = object inherit [unit , _ , string ] de f fde f
+method De f  x s e = . . . ( fexpr . . . ) . . . end
+Note the absence of mutually recursive class definitions. Then, we generate a fix point operator for each mutually recursive definition:
+let f ixexpr,de f (cexpr , cde f ) = let rec texpr  x = gcataexpr (cexpr texpr tde f )  x and tde f  x = gcatade f (cde f texpr tde f )  x in (texpr , tde f )
+
+14
+
+Generic Programming with Combinators and Objects
+
+Here cexpr and cde f are object generators which take the transformation functions for all components of mutually recursive definition as parameters. Note, the same fix point generator can be used to construct any concrete transformation for given mutually recursive definition.
+With auxiliary classes and the fix point operator we can construct the default implementations for any concrete transformation:
+let showexpr , showde f = f ixexpr,de f (new show stubexpr , new show stubde f )
+These default implementations, first, are distributed among the typeinfo structures for relevant types and, second, are used to define conventional transformation classes:
+class showexpr fself = object inherit show stubexpr fself showde f end
+class showde f fself = object inherit show stubde f showexpr fself end
+Thus, we again made mutually recursive types indistinguishable from the simple ones (in terms of class interfaces), making it possible to uniformly generate all transformations with separate compilation support.
+On the other hand, in order to extend an existing transformation one needs to inherit from auxiliary classes and use the custom fix point operator. For our previously unsuccessful case the implementation is almost as simple as for the single type definition:
+let custom_show , _ = f ixexpr,de f ( ( fun fexpr fde f  object inherit show stubexpr fexpr fde f method Const  x n = "a constant" end ) , new show stubde f )
+In the actual implementation we generate a memoizing fix point combinator, which follows the same pattern we've described in Section 3.2. In addition, we put the fix point combinator into the typeinfo structure, so, for a type "t" the fix point combinator can be addressed as "fix (t)". End users, however, still need to know the structure of mutually-recursive type definitions in order to use the fix point combinator properly.
+There is one subtlety with our support for mutual recursion: we rely on the property, that adding one function per type is enough to implement open recursion. However, generally speaking, this is not true: take, for example, the following definition:
+type ( ,  ) a = A of  b *  b and  b = X of ( ,  ) a
+In the parameters of constructor "A" we have here different parameterisations of type "b" and, thus, we would need two functions -- for " b" and for " b". However, the type "a" is not regular -- starting with the parameterisation "(,  ) a" we can end up with "(, ) a" and "( ,  ) a". Thus, we have already ruled such definitions out. In this reasoning we assume that mutually recursive definitions are essential in the sense that they can not be split into separate type declarations (i.e. that every pair of types are mutually "reachable"). If we replace the second definition in the example above with, say,
+
+D.Kosarev, D.Boulytchev
+
+15
+
+... and  b = int
+then we would end up with a case which is not supported by our framework. However, as types "a" and "b" are actually not mutually recursive, the whole definition can be rewritten, which restores the support.
+3.5 Polymorphic Variants
+We consider the support for polymorphic variants [10, 11] as an important feature of our framework since it complements the ability of defining composable data structures with the ability of creating composable transformations. The main difference between polymorphic variants and usual algebraic data types is that it is possible to extend previously declared polymorphic variants by adding more constructors or to combine a few types into the one.
+Our goal is to provide a seamless integration of generic features: when a few types are being combined we would want to acquire all generic features for the result type by inheriting the same features from the constituent types.
+As we said previously, an extra type parameter "" is inferred to an open version of the polymorphic variant type. Thus, the same generic transformation function can be used to transform a value using a transformation object for a wider type4. This is achieved by a specific form of generic transformation function, which performs an "opening":
+let gcatat   subj = match subj with ... | C . . .  # C  (match subj with #t as subj  subj ) . . . ...
+This results in applying the methods of transformation object to an opened version of the type, while the transformation function itself still operates only of the closed version.
+When a few polymorphic variant types are combined, the transformation function simply matches a value against type patterns and dispatches the transformation to the transformation functions of a corresponding constituent type.
+4 Examples
+In this section we present some examples, written with the aid of our library. In this examples we will use camlp5 syntax extension, although ppxlib plugin can be used equally. As we said, the library is a direct inheritor of our prior work [4], and all examples from that paper can be implemented using the new version. Here we show some more.
+4.1 Typed Logic Values
+The first example arose in the context of our work on strongly typed logical DSL for OCAML [19]. One of the most important construct there was a unification of terms with free logical variables, and dealing with such data structures involves a lot of tedious and error-prone work. The typical scenario of
+4We refrain from calling this type a "subtype" since there is no subtyping in OCAML.
+
+16
+
+Generic Programming with Combinators and Objects
+
+interaction between a logical and non-logical worlds is constructing a goal containing a data structure with free logical variables and solving it. The solution provides bindings for these variables, which, in optimistic scenario, do not contain free variables anymore. To construct a goal one would need a systematic way to introduce logic variables in some typed data structure, and to recover answers -- a systematic way to return to a plan, non-logical representation.
+The (simplified) type for logic values can be defined as follows:
+@type 'a logic = | V of int | Value of 'a with show , gmap
+A logic value can either be a free logic variable ("V") or a some other value ("Value") which is not a free variable (but which can possibly contain free variables inside). To convert to- and from- the logic domain we can use the following functions:
+let lift x = Value x
+let reify = function | V _  invalid_arg "Free variable" | Value x  x
+The function "reify" raises and exception on a free variable; indeed, if an occurrence of a free variable is encountered the logic value can no longer be considered as a regular (non-logical) data structure and has to be interpreted in some other way.
+When we dealing with logic data structures we need to have an opportunity to put a free variable in an arbitrary position. This means that we have to switch to another type, "lifted" into the logic domain. For example, for arithmetic expressions, which we use as an example through the paper, we would need to construct a value like
+Value ( Binop ( V 1, Value (Const (V 2)) , V3 )
+)
+which has a type "lexpr", defined as
+type expr' = Var of string logic | Const of int logic | Binop of lexpr * lexpr and lexpr = expr' logic
+We also need to implement two conversion functions. All these definitions present a typical example of boilerplate code.
+With our framework the solution is almost purely declarative5. First, we abstract the type of interest, replacing all positions, in which we may desire to place a type variable, with fresh type parameters:
+@type ( 'string , 'int , 'expr) a_expr =
+5But we need to switch the compiler into -rectypes mode
+
+D.Kosarev, D.Boulytchev
+
+17
+
+| Var of 'string | Const of 'int | Binop of 'string * 'expr * 'expr with show , gmap
+Here we abstract the type of everything, but we could equally abstract it only of itself. Note, we make use of two generic features -- "show" and "gmap". The first one is needed for debugging purposes, while the second is essential for our solution.
+Now we can define the logical and non-logical counterparts as customised versions of the abstracted type:
+@type expr = (string , int , expr ) a_expr with show , gmap @type lexpr = (string logic , int logic , lexpr ) a_expr logic with show , gmap
+Note, the "new" type "expr" is equivalent to the "old" one, thus, this transformation makes no harm to the existing code.
+Finally, the definitions of conversion functions make use of the generic "gmap" feature the framework provides:
+let rec to_logic expr = gmap (a_expr ) lift lift to_logic expr let rec from_logic expr = gmap (a_expr ) reify reify from_logic @@ reify expr
+As we can see, the support for type constructor application is vital for the success of this scenario. In our prior implementation [4] type constructor application was not supported and could not be easily added.
+4.2 Conversion to a Nameless Representation
+Polymorphic variant types make it possible to define composable statically typed and separately compiled data structures [11]. Dealing with them to implement composable statically typed and separately compiled transformations looks like a natural idea. The problem of constructing transformations from separately compiled, strongly typed components is known as "The Expression Problem" [32], which is often used as a "litmus test" for generic programming frameworks [24, 29]. In this section we show the solution for the expression problem with the aid of our framework. For a concrete problem we take the transformation from named to a nameless representations for lambda terms.
+First, we define the non-binding part of the terms:
+@type ( 'name , 'lam) lam = [ | `App of 'lam * 'lam | `Var of 'name ] with show
+Separating this type looks a natural idea since potentially there can be many binding constructs (lambdas, lets, etc.) and by combining them with the non-binding part (and with themselves) one can acquire a variety of languages with a coherent behaviour.
+The type "lam" is polymorphic: the first parameter is used to represent names or de Bruijn indices, the second one is needed for open recursion (we here follow the known technique for describing extensible data structures with polymorphic variants [11]).
+What would the transformation to the nameless representation look like for this type? In our terms, what the transformation class is? It is shown below:
+
+18
+
+Generic Programming with Combinators and Objects
+
+class [ 'lam , 'nameless ] lam_to_nameless (flam : string list  'lam  'nameless ) =
+object inherit [string list , string , int , string list , 'lam , 'nameless , string list , 'lam , 'nameless ] lam method App env _ l r = `App (flam env l , flam env r) method Var env _ x = `Var (index env x)
+end
+First, we use a list of strings as an environment, and we pass it as an inherited attribute. Then, we use a function "index" to find a position of a string in the environment (thus, it translates names to the de Bruijn indices). The interesting part is the typing of the common ancestor class " lam ". The first triple of its parameters describes the transformation for the first type parameter of the type. As we can see, we transform strings into integers, using an environment. Next, the type variable "'lam", as we know, will be set to the open version of the "lam". Finally, the result of the transformation is typed as "'nameless". This is because the result will be, indeed, a different type, as we will see soon. As the type parameter "'lam" designates the type itself, the last three parameters repeat the next to last three.
+Now we define a binding construct -- abstraction:
+@type ( 'name , 'lam) abs = [ `Abs of 'name * 'lam ] with show
+The same reasoning applies here: we use an open recursion and a parameterization over name representation. The transformation class can be implemented in a similar manner:
+class [ 'lam , 'nameless ] abs_to_nameless (flam : string list  'lam  'nameless ) =
+object inherit [string list , string , int , string list , 'lam , 'nameless , string list , 'lam , 'nameless ] abs method Abs env name term = `Abs (flam (name : : env) term )
+end
+Note, the method " Abs " constructs a value which has a different type, than any parameterization of "abs". Indeed, in a nameless representation abstraction does not keep any name.
+We can now combine two type definitions to build a type for terms with binders:
+@type ( 'name , 'lam) term = [ ( 'name , 'lam) lam | ( 'name , 'lam) abs) ] with show
+We can also provide two new types for named and nameless representation6:
+@type named = (string , named ) term with show @type nameless = [ (int , nameless ) lam | `Abs of nameless ] with show
+Finally, we build a transformation for converting a named to a nameless representation:
+class to_nameless (fself : string list  named  nameless ) =
+object
+6We need to enable -rectypes mode for these definitions to compile.
+
+D.Kosarev, D.Boulytchev
+
+19
+
+inherit [string list , named , nameless ] named inherit [named , nameless ] lam_to_nameless fself inherit [named , nameless ] abs_to_nameless fself end
+This transformation is constructed by inheriting all relevant counterparts: a common ancestor class for all transformations for the type "named" and two concrete transformations for its counterparts. The transformation function can be build in a standard way:
+let to_nameless term = transform (named ) (fun fself  new to_nameless fself ) [ ] term
+Thus, we constructed a solution for a type from the solutions for its counterparts. This partial solutions can be separately compiled, and the whole system remains strongly statically typed.
+4.3 A Custom Plugin
+Finally we demonstrate the utilisation of the plugin system using the example of a fresh custom plugin implementation. For this purpose we take a well-known hash-consing transformation [9]. This transformation converts a data structure to its maximally shared representation, when structurally equal substructures are represented by the same physical object. For example, an expression tree
+let t = Binop ("+" , Binop (" -" , Var "b" , Binop ("*" , Var "b" , Var "a " ) ) , Binop ("*" , Var "b" , Var "a "))
+can be rewritten into
+let t = let b = Var "b" in let ba = Binop ("*" , b , Var "a") in Binop ("+" , Binop (" -" , b , ba ) , ba)
+where equal sub expressions are represented by shared sub trees. Our plugin for a type "{i} t" will provide a hash-consing function "hc(t)" of the type
+{ H . t  i  H . t * i }  H . t  {i} t  H . t * {i} t where "H . t" -- a heterogeneous hash table for values of arbitrary types. The interface for the hash table is as follows:
+module H : sig
+type t val hc : t  'a  t * 'a end
+The function "H . hc" takes a hash table and some value and returns a possibly updated table and a structurally equivalent value of the same type. For now we postpone the description of this module implementation and consider an example of constructor transformation method:
+
+20
+
+Generic Programming with Combinators and Objects
+
+method Binop h _ op l r = let h , op = hc(string ) h op in let h , l = fself h l in let h , r = fself h r in H . hc h (Binop (op , l , r ) )
+The method takes an inherited attribute --this time a hash table "h", -- the whole expressions node (which we do not need in this case, hence underscore), and three arguments of the constructor: "op" of type string, and "l" and "r" of type expr. We first hash-cons all three arguments (which gives us a possibly updated hash table and three hash-consed values of the same types), then we apply the constructor and hash-cons the value again. To hash-cons the arguments of the constructor we can use the functions provided by the framework -- for the type string it is "hc(string )"7, and for both sub expressions it is "fself".
+As a final component we need to decide on the type parameters for a plugin class for a type "{i} t". Clearly, all inherited attribute types has to be "H . t", and synthesised attribute types has to be "H . t * a" for the type of interest "a". This gives us the following plugin class definition:
+class [{i} ,  ] hct . . . = object
+inherit [{ H . t , i , H . t * i } , H . t ,  , H . t *  ] t ... end
+For simplicity we omitted the specification of functional parameters for the class since their types can be trivially recovered.
+Now we need to generate this logic using a plugin. The infrastructure code for the plugin implementation is shown below:
+let trait_name = "hc"
+module Make (AstHelpers : GTHELPERS_sig . S) = struct
+open AstHelpers
+module P = Plugin . Make (AstHelpers )
+class g tdecls = object (self : 'self)
+inherit P . with_inherited_attr tdecls as super ... end
+end
+let _ =
+7Generally speaking, we would need to implement a hash-consing function for each primitive type; in our case, however, we could equally use "H . hc".
+
+D.Kosarev, D.Boulytchev
+
+21
+
+Expander . register_plugin trait_name (module Make : Plugin_intf . Plugin )
+To implement a plugin, one needs to implement a functor parameterised by a helper module, which resembles "Ast_builder" from ppxlib to create OCAML syntax trees. We need to use a functor since we have to provide two implementations for a plugin -- for camlp5 syntax extension as well as for ppxlib itself. The main entity in the body of the functor is a class "g" declaration ("generator"), which for simplicity can be inherited from one of generic classes from the framework. In this case we, first, instantiate the generic plugin "P" for "AstHelpers" and then inherit from the class "P . with_inherited_attr", which means that we are going to implement a plugin making use of inherited attribute. The class takes a type declaration as a parameter. Finally, we register the functor as a first-class module in the framework to make it accessible.
+Now we show what the methods of the generator class look like. First, we need to specify what are the types of inherited and synthesised attributes for the plugin:
+method main_inh ~loc _tdecl = ht_typ ~loc
+method main_syn ~loc ?in_class tdecl = Typ . tuple ~loc [ ht_typ ~loc ; Typ . use_tdecl tdecl ]
+method inh_of_param tdecl _name = ht_typ ~loc : ( loc_from_caml tdecl . ptype_loc )
+method syn_of_param ~loc s = Typ . tuple ~loc [ ht_typ ~loc ; Typ . var ~loc s ]
+where we assume "ht_typ" is defined as
+let ht_typ ~loc = Typ . of_longident ~loc (Ldot (Lident "H" , "t"))
+In other words, we say here that the type of inherited attribute is always "H . t" and the type of a synthesised attribute for a type of interest "t" is "H . t * t".
+The next group of methods specifies the behaviour of plugin class type parameters:
+method plugin_class_params tdecl = let ps = List . map tdecl . ptype_params ~f : ( fun (t , _)  typ_arg_of_core_type t) in ps @ [ named_type_arg ~loc : ( loc_from_caml tdecl . ptype_loc ) @@ Naming . make_extra_param tdecl . ptype_name . txt ]
+
+22
+
+Generic Programming with Combinators and Objects
+
+method prepare_inherit_typ_params_for_alias ~loc tdecl rhs_args = List . map rhs_args ~f : Typ . from_caml
+The first method specifies the type parameters for the plugin class itself: this time they are exactly the type parameters of the type declaration plus the extra parameter "". The second one describes the method of recalculation of type parameters for application of type constructor: when the type declaration looks like
+type {i} t = {ai} tc
+we need to acquire the implementation of the plugin for "t" from the implementation of the same plugin for "tc", inheriting from properly instantiated corresponding class. As for our plugin the class is parameterised by the same types as the type, we just keep the parameters.
+The last group of methods generate the bodies of constructor transformation. As we support regular constructors with both tuple and record argument specifications as well as top-level tuples and records, there are four methods, which as a rule share many details of implementation. We show the skeleton for one of them:
+method on_tuple_constr ~loc ~is_self_rec ~mutual_decls ~inhe tdecl constr_info ts = ... match ts with | [ ]  Exp . tuple ~loc [ inhe ; c [ ] ] | ts  let res_var_name = sprintf "%s_rez" in let argcount = List . length ts in let hfhc = Exp . of_longident ~loc (Ldot (Lident "H" , "hc")) in List . fold_right (List . mapi ~f : ( fun n x  (n , x ) ) ts) ~init : . . . ~f : ( fun (i , (name , typ ) ) acc  Exp . let_one ~loc (Pat . tuple ~loc [ Pat . sprintf ~loc "ht%d" (i+1) ; Pat . sprintf ~loc "%s" @@ res_var_name name ] ) (self#app_transformation_expr ~loc (self#do_typ_gen ~loc ~is_self_rec ~mutual_decls tdecl typ) (if i = 0 then inhe else Exp . sprintf ~loc "ht%d" i) (Exp . ident ~loc name ) ) acc ) ...
+This implementation makes use of the generic method "self#app_transformation_expr" from the framework, which generates an application of the transformation in question for a given type.
+The final component for the implementation is module "H" itself. The standard functor "Hashtbl . Make" instantiates a hash table making use of some hash function and equality predicate, supplied by an end user. In a whole, we follow a conventional pattern: for the hash function we use
+
+D.Kosarev, D.Boulytchev
+
+23
+
+polymorphic "Hashtbl . hash" and for the equality we use physical equality "==". There are, however, two subtleties:
+· Since our hash table is heterogeneous, we have to utilise unsafe coercion "Obj . magic".
+· Our implementation for equality has to be a little more complex than simple "==": we need to compare the top-level constructors and the number of their arguments structurally, and only then compare the corresponding arguments by physical equality. Technically this may result in hashconsing structurally equal values of different types.
+We rely here on the follow observation: as hash-consing is only consistent with referentiallytransparent data structures, we can assume that structurally equal data structures can be interchangeable regardless their types. The complete implementation for this plugin can be seen in the main project repository; it occupies 164 LOC, including comments and blank lines.
+5 Related Works
+As our work makes use of both functional (combinators) and object-oriented (classes and objects) features of OCAML there are some relevant works in both domains of typeful functional and objectoriented programming. The most relevant framework, developed for OCAML, which utilises the same ideas, but makes essentially different design decisions, is VISITORS [25]; we postpone the in-depth comparison of our framework with VISITORS until the end of this section.
+First, there is a number of frameworks for generic programming in OCAML, which utilise a completely generative approach [34, 2] -- all requested generic functions for all types are generated by the framework separately. This approach is very practical as long as the assortment of shipped functions is rich enough and sufficient for a given use case. However, if not, someone has to extend the framework, implementing all missing functions anew (and, potentially, with a very little code reuse). In addition, the functions themselves are hard coded and lack extensibility. With our framework, first, many end-user generic functions can be easily derived from the generated ones, and second, in order to implement a completely fresh plugin it is sufficient to hard code only "the interesting" part, as the generation of the single traversal function and transformation class are already provided by the framework itself.
+A number of approaches to functional generic programming utilises the idea of type representation [14]. The idea is to develop a uniform representation for any type under transformation and provide two conversion functions from- and to this representation (ideally, comprising an isomorphism). A generic function performs transformation on a representation of actual data structure, which makes it possible to implement every such function only once. The conversion functions themselves can in turn be constructed (semi) automatically using such features of the language type system as type classes [14, 29] or type families [8] (in HASKELL) or generated using syntax extension mechanism [3] (in OCAML). While some of these approaches allow extension and modification of generic functions by, for example, specifying a specific treatment for some types or supporting extensible types, our solution is still more flexible as it allows modification with granularity of individual constructors. In addition, with our framework it is possible for multiple versions of the same generic function for the same type to coexist.
+A different approach is taken in "Scrap Your Boilerplate", or SYB [20], initially developed for HASKELL. This approach makes it possible to implement transformations which identify the occurrences of instances of a certain datatype inside arbitrary data structure. Two main kinds of transformations are supported: queries, which collect and return the instances of the designated datatype based on some user-defined criterion, and transformations, which uniformly propagate some type-preserving
+
+24
+
+Generic Programming with Combinators and Objects
+
+transformation for a datatype of interest. In the follow-up papers the approach was extended to deal with transformations which traverse pairs of data structures [21] and to support the extension of already implemented transformations with new type cases [22]. Later the approach was implemented for other languages, including OCAML [6, 35]. Unlike our case, SYB takes the route of discriminating on a whole type, not individual constructors. In addition the shape of available transformations look rather restrictive, and, once implemented, transformations for a given type can not be modified. It is interesting, that, potentially, SYB-style generic functions can "break through the encapsulation barrier" -- indeed, they can identify the occurrences of values of type of interest inside arbitrarily typed data structures. Thus, their behaviour depend on the actual details of data structure organisation, including those which were intentionally hidden by encapsulation. This may result in, first, the possibility for undesirable reverseengineering (by applying various type-sensitive transformations and analysing the results) and, second, in fragility of interfaces -- after a modification of data structure implementation generic functions for old version can still be applied with neither static nor dynamic error, but with wrong (or undesirable) results.
+There is a certain similarity between our approach and object algebras [24]. Object algebras were proposed as a solution for expression problem in mainstream object-oriented languages (JAVA, C++, C#), which would not require advanced type system features besides regular inheritance and generics. In the original exposition object algebras were presented as a design and implementation pattern; the follow-up works have improved the initial proposal in various directions [27, 36]. With object algebras a data structure under transformation is also encoded using the method-per-variant (constructor) idea, which makes it possible to provide the extensibility in both dimensions and retroactive implementation. However, being developed for essentially different language environment, the solution using object algebras would differ from ours in many concrete aspects. First, with object algebras the "shape" of a data structure has to be represented by a generic function, which takes a concrete object algebra instance as a parameter ("Church encoding" for types [14]). Applying this function to various implementations of object algebra one can acquire various transformations (for example, printing). To instantiate the data structure itself one needs to provide a specific object algebra instance -- factory. However, after the instantiation the data structure itself can not be generically transformed anymore. Thus, object algebras force end users to switch to data-as-function representation, which may or may not be beneficial in different concrete cases. In contrast our approach non-destructively adds new functionality to the familiar world of algebraic data types, pattern matching and recursive functions. Generic transformation implementations are completely separated from data representation, and end users may freely transform their data structures in a familiar way without losing the ability to apply (or extend) generic functions. Another difference stems from the fact that in our case, unlike mainstream object-oriented languages, polymorphic variants are used as a main tool for datatype extension. Supporting polymorphic variants as a mean for datatype extensibility requires a fresh solution.
+Finally, among existing generic programming frameworks for OCAML we can name two, which resemble ours: ppx_deriving/ppx_traverse (a part of ppxlib [2]) and VISITORS [25].
+ppx_deriving is the simplest approach possible: type declarations are mapped one-to-one to recursive functions representing a specific kind of transformation. It is the most efficient implementation (functions are called directly, no late biding involved) but it is not extensible. If end users need to modify slightly the generated function, they should copy and paste generated code to modify it manually. The amount of work to support a new transformation will drastically increase if type definitions change during the development cycle.
+In ppx_traverse extensible transformations are represented as objects; unlike our case, method-pertype approach is used. In addition ppx_traverse does not make use of inherited attributes, thus some
+
+D.Kosarev, D.Boulytchev
+
+25
+
+transformations like equality or comparison are not representable. VISITORS, on the other hand, explores a similar to ours object-oriented approach, in which many
+decisions, rejected by us, were taken (and vice versa). Here we summarise the main differences:
+· VISITORS is excessively object-oriented -- in order to use it one needs to instantiate some object and call proper method. In our case as long as only predefined features are required one can use a more native combinatorial interface.
+· VISITORS implements a number of useful transformations in an ad-hoc manner; in our case all transformations are instances of the same generic scheme. It is possible to combine different transformations via inheritance as long as the types of underlying scheme unify. We also argue, that in our framework the implementation of user-defined plugins is much easier.
+· Following SYB, VISITORS takes a type-discriminating route: for each type of interest (including the built-in ones) there is a dedicated transformation method in each object, representing a transformation. While this solution indeed adds some flexibility, we firmly oppose it, since it breaks the encapsulation: inspecting the methods of a transformation (which cannot be hidden in a module signature) one can retrieve some information about the implementation of encapsulated types. Even worse, the data structures of abstract types can be manipulated in an unprescribed manner using the public type-transforming interface.
+· In our case the type parameters for transformation classes have to be specified by an end user. With VISITORS this burden is offloaded to the compiler with the aid of some neat trick. However, this trick makes it impossible to use VISITORS syntax extension in module signatures. There is no such problem in our case -- our framework can be equally used in both implementation and interface files.
+· VISITORS in its current state8 does not support polymorphic variants.
+· GT supports arbitrary type constructor applications but VISITORS in its current state doesn't (both in monomorphic and polymorphic mode). For instance, the following example doesn't compile:
+type ( 'a , ' b) alist = Nil | Cons of 'a * 'b [@@deriving visitors { variety = "map"; polymorphic = true }]
+type 'a list = ( 'a , 'a list) alist [@@deriving visitors { variety = "map"; polymorphic = false }]
+Moreover, adding an extra construct doesn't solve the problem:
+type 'a list = L of ( 'a , 'a list ) alist [@@unboxed ] [@@deriving visitors { variety = "map "; polymorphic = false }]
+There is also an issue with type aliases in polymorphic mode (monomorphic part of VISITORS compiles successfully):
+type ( 'a , ' b) t = Foo of 'a * 'b (* OK *) [@@deriving visitors { variety = "map "; polymorphic = true }]
+type 'a t2 = ( 'a , int) t [@@deriving visitors { variety = "map "; name="yyy"; polymorphic = true }]
+8The latest available version is 20180513
+
+26
+
+Generic Programming with Combinators and Objects
+
+The generated code can be fixed manually by removing explicit polymorphic type annotations from objects' methods, which leads to the code very similar to the one generated by GT. From these we can conclude that GT can be seen an a reimplementation of polymorphic mode of VISITORS where more type declarations compile successfully.
+
+6 Future Work
+There are a few possible directions for future work. First, in this paper we did not address the performance issues. As we represent the transformations in a very generic form with many levels of indirection, obviously, the transformations, implemented with our framework, are at disadvantage in comparison with hard coded ones in terms of performance. We assume that the performance of transformations can be essentially improved by applying some techniques like staging [35] or, perhaps, object-specific optimisations.
+Another important direction is supporting more kinds of type declarations, in the first hand, GADTs and non-regular types. Although we have some implementation ideas for this case, the solution we came up with so far makes the interface of the whole framework too cumbersome to use even for simple cases.
+Finally, the typeinfo structure we generate can be used to mimic the ad-hoc polymorphism as it contains the implementation of type-indexed functions. This, together with some proposed extensions [33], can open interesting perspectives.
+
+References
+[1] camlp5. https://camlp5.github.io.
+[2] ppxlib. https://github.com/ocaml-ppx/ppxlib.
+[3] Florent Balestrieri & Michel Mauny (2018): Generic Programming in OCaml. In Kenichi Asai & Mark Shinwell, editors: Proceedings ML Family Workshop / OCaml Users and Developers workshops, Nara, Japan, September 22-23, 2016, Electronic Proceedings in Theoretical Computer Science 285, Open Publishing Association, pp. 59­100, doi:10.4204/EPTCS.285.3.
+[4] Dmitri Boulytchev (2018): Code Reuse With Transformation Objects. CoRR abs/1802.01930. Available at http://arxiv.org/abs/1802.01930.
+[5] Dmitry Boulytchev (2015): Combinators and Type-driven Transformers in Objective Caml. Sci. Comput. Program. 114(C), pp. 57­73, doi:10.1016/j.scico.2015.07.008. Available at https://doi.org/10. 1016/j.scico.2015.07.008.
+[6] Dmitry Boulytchev & Sergey Mechtaev (2011): Efficiently Scrapping Boilerplate Code in OCaml. In: Workshop on ML, ML '11.
+[7] Frederick P. Brooks, Jr. (1995): The Mythical Man-month (Anniversary Ed.). Addison-Wesley Longman Publishing Co., Inc., Boston, MA, USA.
+[8] Manuel M. T. Chakravarty, Gabriel Ditu & Roman Leshchinskiy (2009): Instant Generics : Fast and Easy.
+[9] Jean-Christophe Fillia^tre & Sylvain Conchon (2006): Type-safe Modular Hash-consing. In: Proceedings of the 2006 Workshop on ML, ML '06, ACM, New York, NY, USA, pp. 12­19, doi:10.1145/1159876. 1159880. Available at http://doi.acm.org/10.1145/1159876.1159880.
+[10] Jacques Garrigue (1998): Programming with Polymorphic Variants. In: Workshop on ML.
+[11] Jacques Garrigue (2000): Code reuse through polymorphic variants. In: In Workshop on Foundations of Software Engineering.
+
+D.Kosarev, D.Boulytchev
+
+27
+
+[12] Jeremy Gibbons (2002): Calculating Functional Programs, pp. 151­203. Springer Berlin Heidelberg, Berlin, Heidelberg, doi:10.1007/3-540-47797-7 5. Available at https://doi.org/10.1007/3-540-47797-7 5.
+[13] Jeremy Gibbons (2007): Datatype-generic Programming. In: Proceedings of the 2006 International Conference on Datatype-generic Programming, SSDGP'06, Springer-Verlag, Berlin, Heidelberg, pp. 1­71. Available at http://dl.acm.org/citation.cfm?id=1782894.1782895.
+[14] Ralf Hinze (2006): Generics for the Masses. J. Funct. Program. 16(4-5), pp. 451­483, doi:10.1017/ S0956796806006022. Available at http://dx.doi.org/10.1017/S0956796806006022.
+[15] Graham Hutton (1999): A Tutorial on the Universality and Expressiveness of Fold. J. Funct. Program. 9(4), pp. 355­372, doi:10.1017/S0956796899003500. Available at http://dx.doi.org/10.1017/ S0956796899003500.
+[16] Oleg Kiselyov, Simon Peyton Jones & Chung-chieh Shan (2010): Fun with Type Functions, pp. 301­ 331. Springer London, London, doi:10.1007/978-1-84882-912-1 14. Available at https://doi.org/ 10.1007/978-1-84882-912-1 14.
+[17] Oleg Kiselyov & Ralf La¨mmel (2005): Haskell's overlooked object system. CoRR abs/cs/0509027. Available at http://arxiv.org/abs/cs/0509027.
+[18] Donald E. Knuth (1968): Semantics of context-free languages. Mathematical systems theory 2(2), pp. 127­ 145, doi:10.1007/BF01692511. Available at https://doi.org/10.1007/BF01692511.
+[19] Dmitry Kosarev & Dmitry Boulytchev (2016): Typed Embedding of a Relational Language in OCaml. In: Proceedings ML Family Workshop / OCaml Users and Developers workshops, ML/OCAML 2016, Nara, Japan, September 22-23, 2016., pp. 1­22, doi:10.4204/EPTCS.285.1. Available at https://doi.org/10. 4204/EPTCS.285.1.
+[20] Ralf La¨mmel & Simon Peyton Jones (2003): Scrap Your Boilerplate: A Practical Design Pattern for Generic Programming. SIGPLAN Not. 38(3), pp. 26­37, doi:10.1145/640136.604179. Available at http://doi. acm.org/10.1145/640136.604179.
+[21] Ralf La¨mmel & Simon Peyton Jones (2004): Scrap More Boilerplate: Reflection, Zips, and Generalised Casts. In: Proceedings of the Ninth ACM SIGPLAN International Conference on Functional Programming, ICFP '04, ACM, New York, NY, USA, pp. 244­255, doi:10.1145/1016850.1016883. Available at http:// doi.acm.org/10.1145/1016850.1016883.
+[22] Ralf La¨mmel & Simon Peyton Jones (2005): Scrap Your Boilerplate with Class: Extensible Generic Functions. SIGPLAN Not. 40(9), pp. 204­215, doi:10.1145/1090189.1086391. Available at http://doi.acm. org/10.1145/1090189.1086391.
+[23] Erik Meijer, Maarten Fokkinga & Ross Paterson (1991): Functional Programming with Bananas, Lenses, Envelopes and Barbed Wire. Springer-Verlag, pp. 124­144.
+[24] Bruno C. d. S. Oliveira & William R. Cook (2012): Extensibility for the Masses: Practical Extensibility with Object Algebras. In: Proceedings of the 26th European Conference on Object-Oriented Programming, ECOOP'12, Springer-Verlag, Berlin, Heidelberg, pp. 2­27, doi:10.1007/978-3-642-31057-7 2. Available at http://dx.doi.org/10.1007/978-3-642-31057-7 2.
+[25] Franc¸ois Pottier (2017): Visitors Unchained. Proc. ACM Program. Lang. 1(ICFP), pp. 28:1­28:28, doi:10. 1145/3110272. Available at http://doi.acm.org/10.1145/3110272.
+[26] Didier Re´my (2002): Using, Understanding, and Unraveling the OCaml Language From Practice to Theory and Vice Versa. In Gilles Barthe, Peter Dybjer, Lu´is Pinto & Joa~o Saraiva, editors: Applied Semantics, Springer Berlin Heidelberg, Berlin, Heidelberg, pp. 413­536.
+[27] Tillmann Rendel, Jonathan Immanuel Brachtha¨user & Klaus Ostermann (2014): From Object Algebras to Attribute Grammars. SIGPLAN Not. 49(10), pp. 377­395, doi:10.1145/2714064.2660237. Available at http://doi.acm.org/10.1145/2714064.2660237.
+[28] Peter Sestoft (2002): The Essence of Computation. chapter Demonstrating Lambda Calculus Reduction, Springer-Verlag New York, Inc., New York, NY, USA, pp. 420­435. Available at http://dl.acm.org/ citation.cfm?id=860256.860276.
+
+28
+
+Generic Programming with Combinators and Objects
+
+[29] Wouter Swierstra (2008): Data Types a` La Carte. J. Funct. Program. 18(4), pp. 423­436, doi:10.1017/ S0956796808006758. Available at http://dx.doi.org/10.1017/S0956796808006758.
+[30] Marcos Viera, S. Doaitse Swierstra & Wouter Swierstra (2009): Attribute Grammars Fly First-class: How to Do Aspect Oriented Programming in Haskell. In: Proceedings of the 14th ACM SIGPLAN International Conference on Functional Programming, ICFP '09, ACM, New York, NY, USA, pp. 245­256, doi:10.1145/ 1596550.1596586. Available at http://doi.acm.org/10.1145/1596550.1596586.
+[31] P. Wadler & S. Blott (1989): How to Make Ad-hoc Polymorphism Less Ad Hoc. In: Proceedings of the 16th ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages, POPL '89, ACM, New York, NY, USA, pp. 60­76, doi:10.1145/75277.75283. Available at http://doi.acm.org/10.1145/ 75277.75283.
+[32] Philip Wadler (1998): The Expression Problem.
+[33] Leo White, Fre´de´ric Bour & Jeremy Yallop (2015): Modular implicits. Electronic Proceedings in Theoretical Computer Science 198, doi:10.4204/EPTCS.198.2.
+[34] Jeremy Yallop (2007): Practical Generic Programming in OCaml. In: Proceedings of the 2007 Workshop on Workshop on ML, ML '07, ACM, New York, NY, USA, pp. 83­94, doi:10.1145/1292535.1292548. Available at http://doi.acm.org/10.1145/1292535.1292548.
+[35] Jeremy Yallop (2017): Staged Generic Programming. Proc. ACM Program. Lang. 1(ICFP), pp. 29:1­29:29, doi:10.1145/3110273. Available at http://doi.acm.org/10.1145/3110273.
+[36] Haoyuan Zhang, Zewei Chu, Bruno C.d. S. Oliveira & Tijs van der Storm (2015): Scrap Your Boilerplate With Object Algebras. In: Proceedings of the Object-oriented Programming, Systems, Languages, and Applications (OOPSLA, 2015), New York, United States. Available at https://hal.inria.fr/hal-01261477.
+
+

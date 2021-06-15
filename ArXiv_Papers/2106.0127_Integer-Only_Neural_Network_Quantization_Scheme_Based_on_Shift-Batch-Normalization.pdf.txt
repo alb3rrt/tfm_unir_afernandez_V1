@@ -1,0 +1,320 @@
+Integer-Only Neural Network Quantization Scheme Based on Shift-Batch-Normalization
+Qingyu Guo, Yuan Wang, Xiaoxin Cui Peking University
+{guoqinyu, wangyuan, cuixx}@pku.edu.cn
+
+arXiv:2106.00127v1 [cs.LG] 28 May 2021
+
+Abstract--Neural networks are very popular in many areas, but great computing complexity makes it hard to run neural networks on devices with limited resources. To address this problem, quantization methods are used to reduce model size and computation cost, making it possible to use neural networks on embedded platforms or mobile devices.
+In this paper, an integer-only-quantization scheme is introduced. This scheme uses one layer that combines shift-based batch normalization and uniform quantization to implement 4-bit integer-only inference. Without big integer multiplication(which is used in previous integeronly-quantization methods), this scheme can achieve good power and latency efficiency, and is especially suitable to be deployed on co-designed hardware platforms. Tests have proved that this scheme works very well for easy tasks. And for tough tasks, performance loss can be tolerated for its inference efficiency. Our work is available on github1.
+I. INTRODUCTION
+Convolutional Neural Network(CNN) consumes a large amount of computing resources. Even in the inference stage, the computing cost is still not affordable for most mobile and embedded devices. To deploy CNN on these resource-limited devices, there has been a large body of work. Approaches can be roughly categorized as follows.
+a) Designing more efficient neural network architecture: Neural networks are usually recognized to be over-parameterized. Some work focuses on designing more efficient networks that have less parameter and do less calculation. For example, MobileNet[13], SqueezeNet[7], ShuffleNet[17] and so on. Some work tries to prune and compress the whole model. For example, Deep Compression[3].
+b) Quantization: Typically, a neural network calculates with float numbers. According to [5], the floating operation requires much more power and latency than
+1IntegerNet
+
+integer operations. By approximate float-point operations with integer or fixed-point operations(which is known as "Quantization"), will greatly accelerate the process of inference. Some work quantizes weight and activations to 8 bit fixed-point, and the performance has no degradation even on tough tasks. Examples are [9, 15]. Other works do extreme quantization, reducing the bit width of activation and weight to 2 and even 1. Examples are TNN[18], BNN[6], Binary Connect[1], XNOR [12], etc.
+c) Architecture-Hardware co-designing: By co-designing neural network architecture and hardware architecture, the inference will meet less bottleneck on these specifically designed platforms, bringing great power and latency optimization.
+These three methods are not exclusive to each other. For example, architecture-hardware co-designing can be applied to a quantized network, which will harness the advantages of the two methods. Also, quantization can be applied to efficient architecture like MobileNet.
+Among the three categories, Quantization is a commonly adopted method to reduce model size as well as improve latency and power performance. But, not all quantization methods are friendly to hardware. The most important problem is that some quantization schemes only quantize part of floating point operations. For hardware platforms that don't support float calculation, these quantized models will not be able to be deployed.
+To address this problem, integer-only-quantization schemes are proposed. In these schemes, all floating point operations are converted to integer operations. [9] proposed that, by storing the scale and zero point of each tensor, integer-only quantization scheme can be achieved. [10] proposed integer-only-quantization methods for some non-linear operations like softmax and GELU. [15] proposed a quantization scheme for residual block and batch normalization layer, so ResNet[4] architecture can be implemented with only integer operation.
+In these integer-only schemes, neural network inference
+
+can be carried out with only integer operation, but there is still one thing that can be improved: reducing largely accumulated big activation integer(32bit) back to lower precision integer(8bit or 4bit) requires big integer multiplications. These multiplications may make up a big part of the power consumption of the whole hardware platform.
+To address this drawback, we implement an integeronly-quantization scheme without big integer multiplications. Our work is inspired by [6], which leverages the efficiency of shifting operation to do batch normalization.
+
+-
+
+S = 2N - 2
+
+(2)
+
+The quantization function Q uses a division to do linear
+
+mapping:
+
+act - z
+
+Q(act) = Int(
+
+)
+
+(3)
+
+S
+
+This uniform quantization function is simple and
+
+effective, but there are two problems. The first problem
+
+exists in both simulated quantization and integer-only
+
+quantization. The second problem only exists in integer-
+
+only quantization.
+
+II. QUANTIZATION SCHEME
+
+B. Quantization Problem 1: Clipping Range
+
+In this section, our quantization scheme will be explained. Firstly, two problems in uniform quantization method will be discussed. Then we will demonstrate one important empirical fact about batch normalization, which inspired us to solve both problems by using Shift-based Batch Normalization(SBN). Finally, we will introduce a new quantization layer fusing SBN and quantization that only uses integer adding and shifting. The quantization method is called SBNQ, and can be used to quantize signed activations, unsigned activations and weights.
+
+A. Uniform Quantization
+In the scheme of integer-only quantization, for one input activition consisted of big integers:
+
+actint  N
+
+the target of N-bit quantization is to convert it to integer with limited range2:
+
+Q(actint)  [-2N-1 + 1, 2N-1 - 1]  N
+
+The most used quantization method is uniform quantization, which means the mapping from real domain to integer domain is linear. In uniform quantization, there are several parameters:
+· The bitwidth of quantization target: N · The lower limit to clip input tensor:  · The upper limit to clip input tensor:  · The zero point to be mapped to 0: z · The scaling factor: S
+
+To fully exploit N-bit integer expression ability, z and S can be determined:
+
++
+
+z=
+
+(1)
+
+2
+
+2For signed integer quantization, the most negative number -2N-1 is not used, the reason is illustrated in [9]
+
+In uniform quantization, the first problem is the determination of  an : a unified clipping range is needed for all input activations, but the actual ranges vary among different batches of activations. Whether the quantization scheme is integer-only or not integeronly, this problem exists. If [, ] covers a big range, the expressive ability of quantized tensor will be wasted; if [, ] covers a small range, some float value will be clipped, causing performance degradation.
+One method to gain  and  is to set the minimum and maximum value of each activation to be  and , and to sample their moving average in the quantization inference[9].
+The drawback of this method is that distribution of activation has long "tails"[2], making  too "negative" and  too "positive". The distribution of numbers near  and  may be too sparse.
+Another method is to use the percentile method[11], for example, use the range [, ] to cover only 95% of the activation range. By stripping the long "tails", this method performs better. The percentile method works well for 8 bit quantization. But in the training process, the calculation to gain  and  may require sorting of tensor elements, which can cost a lot.
+
+C. Quantization Problem 2: Division
+
+The second problem in uniform quantization is the division operation in Eq. 3. Division is not a hardwarefriendly operation. Even if the dividend and divisor are both integer, the calculation still require a lot of time and power. In the process of linear mapping, division is essential, causing most uniform quantization methods to be not integer-only.
+[9] proposed a method to approximate division. In this method, the division is replicated by multiplying a big integer and then doing right shifting:
+
+1/S  MS × 2-mS
+
+(4)
+
+2
+
+So Eq. 3 can be rewritten as:
+
+Q(act) = Int((act - z)  MS) mS)
+
+(5)
+
+This method avoids division, but there's one drawback: It contains big integer multiplication(32bit×32bit), which still can cost a lot.
+
+D. Important empirical fact about Batch Normalization
+
+BN layer is widely used in neural networks. By using an empirical fact of batch normalization layer, there is a subtle way to solve both problems illustrated in Subsection II-B and Subsection II-C.
+The purpose of BN layer is to force activations to follow standard Gaussian distribution. Batch normalizing an activition act will be like:
+
+act - µ(act)
+
+BN(act) =
+
+(6)
+
+(act)
+
+where µ(.) is the mean function and (.) is the standard deviation function. BN layer assumes that all activations follow Gaussian distribution. Subtracting mean and dividing standard deviation will force them to follow standard Gaussian distribution.
+Here's the key empirical fact: one tensor following standard Gaussian distribution can be clipped by range [-4, +4]. Figure 1 shows the histogram of 1 million float numbers following standard Gaussian distribution, only very few numbers fall out of the range. This empirical estimation can be directly used in quantization. If we want to quantize a tensor that follows standard Gaussian distribution, we can directly take  to be -4 and  to be +4, without any calculation. It's also important that the absolute values of both  and  are powers of 2, which will convert division operation to bit shifting operation. So, this empirical estimation kills two birds.
+However, BN algorithm cannot be applied in integeronly network, because it contains division operation, which is not hardware-friendly. The method to address this is called Shift-based Batch Normalization(SBN).
+
+E. Shift-Based Batch Normalization[6].
+To avoid float operation, SBN uses bit shifting to replicate division. In SBN layer, function AP2 is used for this approximation:
+
+AP(x) = log2(x)
+
+(7)
+
+After applying the AP2 function, dividing x can be approximated to right shifting AP2(x). This approximation is much rougher than that mentioned in Subsection II-C. The impact of this approximation will be illustrated later.
+
+Figure 1: The histogram of 1 million float numbers following standard Gaussian distribution. Almost all numbers can be covered by range [-4, 4].
+
+With this approximation, the SBN function is:
+
+SBN(actint) = (actint - µ(actint) ) AP2((act)) (8)
+
+During training, the process should be simulated with float point, therefore floor operator will be used, the actual calculation process is like:
+
+SBN(actint) =
+
+actint - µ(actint) pow(2, AP2((actint)))
+
+(9)
+
+The SBN layer includes floor operation, so the output tensor is automatically quantized. Figure 2 shows the SBN result of 1 million numbers that follows Gaussian distribution (mean = 100, std = 1000). SBN layer is directly used to replicate normal BN layer in order to reduce training cost in [6]. In this extreme quantization network, SBN didn't bring any performance loss compared to normal BN.
+In fact, the SBN function will bring significant approximation error for replicating division by shifting. The approximation performance of SBN is far worse than the multiplying-shifting method mentioned in Subsection II-C. Figure 3 shows the approximation performance of two methods:
+· Replicating division with multiplying and shifting. · Replicating division with merely shifting(SBN).
+The ideal output standard deviation is 1. The results show that the first method almost has no approximation error and the deviation of output tensor is always nearly 1. But for SBN, the approximation error can be big. If the standard deviation of input tensor is near to power of
+
+3
+
+F. Combining SBN with Quantization
+Subsection II-D shows that, the clipping range of one batch normalized tensor is easy to determine. Also, the range is easy to be quantized using shift operation. Therefore, we combine the hardware-friendly version of BN(which means SBN) with quantization, creating a new layer: Shift-based Batch Normalization Quantization(SBNQ).
+In SBN, there is a shift operation. And in the quantization process, there is also a shift operation. These two shift operations can be composed into one. In order to achieve this fusion, we use a non-quantization version of SBN, which doesn't contain the floor operation.
+
+Figure 2: The histogram of the SBN result of 1 million float numbers following Gaussian distribution (mean = 100, std = 1000). The result tensor is automatically quantized by floor operation.
+
+SBN(actint)
+
+=
+
+actint - µ(actint) pow(2, AP2((act)))
+
+(10)
+
+For the tensor already applied SBN, we still take the following parameter:
+
+ = -4,  = +4
+
+(11)
+
+then z and S can be determined:
+
+ +  (-4) + (+4)
+
+z=
+
+=
+
+=0
+
+(12)
+
+2
+
+2
+
+ -  (-4) + (+4)
+
+S = 2N - 2 = 2N - 2  pow(2, 3 - N)
+
+(13)
+
+therefore, the quantization SBNQ is:
+
+SBNQ(actint)
+
+=Int(
+
+SBN(actint)
+
+-
+
+z )
+
+S
+
+Figure 3: The standard of deviation after applying two methods(mul-shifting and merely shifting). On points landing on power of 2(i.e. 20, 21, 22...), there's no approximation error. On points landing between power of 2(i.e. 21.5, 22.5, 23.5...), the approximation error reaches maximum.
+2(i.e. 21, 22, 23...), there's no approximation error. But if the standard deviation lands between the powersof 2(i.e. 21.5, 22.5, 23.5...), the output deviation will be 2 or 1/ 2. However, even with such big approximation error, the quantization scheme in [6] works well.
+
+actint - µ(actint) - 0
+
+=Int( pow(2, AP2((actint))) )
+
+(14)
+
+pow(2, 3 - N)
+
+=Int(
+
+actint - µ(actint)
+
+)
+
+pow(2, N - 3 + AP2((actint)))
+
+(actint - µ(actint) ) (N - 3 + AP2((actint)))
+In the training process, quantization is simulated using float point numbers, and we store a moving average of µ and . In order to convert the network into an integeronly network, we create two persistent buffers in SBNQ layer:
+bias = MovingAvg(µ(actint)) (15)
+shift =N - 3 + AP2(MovingAvg((actint)))
+
+4
+
+So in the inference stage, the SBNQ function is very simple:
+
+SBNQ(actint) = (actint - bias) shift
+
+(16)
+
+in which bias and shift are both integer.
+
+dataset
+MNIST CIFAR10 CIFAR100 IMAGENET
+
+float top-1 top-5 99.35% 99.99% 86.45% 98.65% 55.70% 77.69% 54.89% 78.15%
+
+integer-only top-1 top-5 99.39% 99.99% 86.92% 98.47% 55.71% 75.76% 42.77% 71.28%
+
+G. Quantization for Unsigned Activations and Weights
+For activations after ReLU layer, the SBNQ method cannot be applied because it doesn't follow Gaussian distribution. But we can assume that, before ReLU layer, the activation follows Gaussian distribution, then the ReLU layer can be fused into SBNQ layer. We can sample the value of µ and  before applying ReLU layer, and do quantization after ReLU layer. And for unsigned quantization, the range of integers is [0, 2N - 1], the value of  is 0 instead of -4. Therefore, the scale factor will be:
+ -  (+4) - 0 S = 2N - 1 = 2N - 1  pow(2, 2 - N) (17)
+Therefore, the value of shift is different from Eq. 15:
+
+shift = N - 2 + AP2(moving_average((actint))) (18)
+
+And the ReLU layer is fused into SBNQ before shifting:
+
+SBNQ(actint) = ReLU(actint - bias) shift
+
+(19)
+
+The technique of SBNQ can also be used in the quantization of weights. We assume that all weight follows Gaussian distribution. If the weight needs be quantized into N-bit integer, we will initialize the weight w with random numbers with specified standard deviation value:
+
+(winit) = pow(2, N - 3)
+
+(20)
+
+then we can use range [-2N-1 + 1, 2N-1 - 1] to accu-
+
+rately clip the weight. To quantize w, only rounding will
+
+be needed:
+
+Q(w) = w
+
+(21)
+
+III. EXPERIMENTS
+We applied this integer-only quantization scheme to train some classical datasets. Because we have limited computing resources (one NVIDIA V100), some results are not as good as SOTA results. Therefore, we carried out controlled experiments on floating networks and integeronly networks. In one controlled experiment, one float network and one quantized network shared the same
+
+Table I: The experiment results of float network and integer-only network(4bit).
+topological architecture. The quantization precision is 4-bit3. The performance is shown in Table I.
+The results for MNIST, CIFAR10 and CIFAR100 show that the quantization network even performs better. Maybe during the STE back propagation, the quantization noise becomes one kind of regularizer, which helps to avoid over-fitting.
+For ImageNet, we constructed a simplified VGG net with fewer fully connected layers. The result shows that, on tough tasks, SBNQ will have observable performance degradation(about 12%). But the loss may be tolerated, because 4 bit quantization is extreme and may bring great inference efficiency.
+IV. DISCUSSION
+We proposed a quantization scheme that can avoid big integer multiplication, which can be used in low precision neural network training and inference. In the whole integer-only inference process, only these integer operations are used:
+· Multiplication of 4 bit integer, producing 8 bit integer.
+· Addition of 8 bit and 32 bit integer, producing 32 bit integer.
+· Right shifting of 32 bit integer, producing 4 bit integer.
+We tried 4-bit quantization on some simple datasets(MNIST, CIFAR10, CIFAR100), and there was no quantization loss. We also tried 4-bit quantization on big dataset(ImageNet). The experiment result shows that there is about 12% performance loss, but due to the inference efficiency of 4-bit quantization, this loss may be tolerable in some application scenarios.
+V. FUTURE WORK
+We are trying to design a RISC-V co-processor using hardware-architecture co-designing. The co-processor will
+3The results for 8 bit quantization is worse than 4 bit quantization. It's weird, but we haven't solve this problem yet.
+
+5
+
+have least hardware operations and bring most inference efficiency.
+REFERENCES
+[1] M. Courbariaux, Y. Bengio, and J. P. David. Binaryconnect: Training deep neural networks with binary weights during propagations. MIT Press, 2015.
+[2] A. Gholami, S. Kim, Z. Dong, Z. Yao, M. W. Mahoney, and K. Keutzer. A survey of quantization methods for efficient neural network inference. 2021.
+[3] S. Han, H. Mao, and W. J. Dally. Deep compression: Compressing deep neural networks with pruning, trained quantization and huffman coding. In Fiber, pages 3­7, 2015.
+[4] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. IEEE, 2016.
+[5] M. Horowitz. 1.1 computing's energy problem (and what we can do about it). In 2014 IEEE International Solid- State Circuits Conference (ISSCC), 2014.
+[6] I. Hubara, M. Courbariaux, D Soudry, R. El-Yaniv, and Y. Bengio. Quantized neural networks: Training neural networks with low precision weights and activations. Journal of Machine Learning Research, 18, 2016.
+[7] F. N. Iandola, S. Han, M. W. Moskewicz, K. Ashraf, W. J. Dally, and K. Keutzer. Squeezenet: Alexnetlevel accuracy with 50x fewer parameters and <0.5mb model size. 2016.
+[8] Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. CoRR, abs/1502.03167, 2015.
+[9] B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard, H. Adam, and D. Kalenichenko. Quantization and training of neural networks for efficient integer-arithmetic-only inference. 2017.
+[10] S. Kim, A. Gholami, Z. Yao, M. W. Mahoney, and K Keutzer. I-bert: Integer-only bert quantization. 2021.
+[11] Jeffrey L Mckinstry, Steven K Esser, R Appuswamy, D. Bablani, John V Arthur, Izzet B Yildiz, and Dharmendra S Modha. Discovering low-precision networks close to full-precision networks for efficient embedded inference. 2018.
+[12] M. Rastegari, V. Ordonez, J. Redmon, and A. Farhadi. Xnor-net: Imagenet classification using
+
+binary convolutional neural networks. In European Conference on Computer Vision, 2016. [13] M. Sandler, A. Howard, M. Zhu, A. Zhmoginov, and L. C. Chen. Mobilenetv2: Inverted residuals and linear bottlenecks. In 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2018. [14] J. Song, Y. Cho, J. S. Park, J. W. Jang, and I. Kang. 7.1 an 11.5tops/w 1024-mac butterfly structure dualcore sparsity-aware neural processing unit in 8nm flagship mobile soc. In 2019 IEEE International Solid- State Circuits Conference - (ISSCC), 2019. [15] Z. Yao, Z. Dong, Z. Zheng, A. Gholami, and K. Keutzer. Hawqv3: Dyadic neural network quantization. 2020. [16] P. Yin, J. Lyu, S. Zhang, S. Osher, Y. Qi, and J. Xin. Understanding straight-through estimator in training activation quantized neural nets. 2019. [17] X. Zhang, X. Zhou, M. Lin, and J. Sun. Shufflenet: An extremely efficient convolutional neural network for mobile devices. 2017. [18] C. Zhu, S. Han, H. Mao, and W. J. Dally. Trained ternary quantization. 2016.
+
+6
+
+

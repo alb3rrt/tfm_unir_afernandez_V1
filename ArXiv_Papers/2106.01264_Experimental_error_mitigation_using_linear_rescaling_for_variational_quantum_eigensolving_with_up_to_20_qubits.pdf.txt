@@ -1,0 +1,655 @@
+arXiv:2106.01264v1 [quant-ph] 2 Jun 2021
+
+Experimental error mitigation using linear rescaling for variational quantum eigensolving with up to 20 qubits
+Eliott Rosenberg,1,  Paul Ginsparg,1 and Peter L. McMahon2,  1Department of Physics, Cornell University, Ithaca, NY 14853, USA 2School of Applied and Engineering Physics, Cornell University, Ithaca, NY 14853, USA
+Quantum computers have the potential to help solve a range of physics and chemistry problems, but noise in quantum hardware currently limits our ability to obtain accurate results from the execution of quantum-simulation algorithms. Various methods have been proposed to mitigate the impact of noise on variational algorithms, including several that model the noise as damping expectation values of observables. In this work, we benchmark various methods, including two new methods proposed here, for estimating the damping factor and hence recovering the noise-free expectation values. We compare their performance in estimating the ground-state energies of several instances of the 1D mixed-field Ising model using the variational-quantum-eigensolver algorithm with up to 20 qubits on two of IBM's quantum computers. We find that several error-mitigation techniques allow us to recover energies to within 10% of the true values for circuits containing up to about 25 ansatz layers, where each layer consists of CNOT gates between all neighboring qubits and Y-rotations on all qubits.
+I. INTRODUCTION
+Quantum computation promises to revolutionize physics and chemistry. Our ability to make quantitative predictions about many-body and strongly coupled quantum mechanical systems, such as atoms with many electrons, or systems of quarks and gluons, has, with classical computers, been severely hampered by the exponential memory requirements of storing and operating on many-body wavefunctions. Quantum computers overcome this difficulty by representing the wavefunction in the state of the qubits themselves. Noise, however, has prevented current quantum computers from surpassing the capabilities of classical computers in almost all applications, including quantum simulation.
+In the long term, fault-tolerant quantum computation may be achieved using error-correction techniques that employ many physical qubits to encode each logical qubit. In the near term, there is much effort aimed at less costly methods to mitigate or compensate for the effects of noise in current quantum hardware. Some of these errormitigation techniques involve artificially increasing the noise and extrapolating the output to zero noise [1­6]. Others involve representing the ideal circuit in terms of noisy ones (the so-called "quasi-probability method") [2, 3]. Still others involve using replica copies of the system to effectively take powers of the density matrix and suppress errors [7, 8], while others attempt to learn the effect of the noise by training on classically simulable circuits [6, 9­11].
+Several proposed error-mitigation methods have successfully modeled the noise as damping the expectation values of observables towards their expectation values in maximally mixed states, i.e., O^ noisy  C O^ exact + (1 - C)Tr[O^]/2n, where 0 < C < 1, O^ is an observable, and n is the number of qubits [6, 9­16]. In this work, we consider traceless observables, so the last term is not present (although its inclusion would not present any significant difficulties). Knowing the damping factor, C, the exact expectation value can be recovered from the noisy one. Various methods for estimating the damping factor are proposed in the works cited above. Here we propose two more methods and compare the performance of these various methods for recovering ground-state energies of 1D mixed-field Ising spin chains. We also compare to the damping factors predicted by a Qiskit Aer noise model consisting of uncorrelated depolarizing gate errors, thermal relaxation errors, and readout errors.
+II. PROBLEM STATEMENT
+Our goal is to benchmark methods of estimating the damping factor by which noise suppresses expectation values on quantum computers, in order to get a sense for when excessive circuit depth impedes obtaining meaningful results. To benchmark these methods, we consider the problem of finding ground states of the 1D mixed-field Ising model with up to 20 qubits.
+ enr27@cornell.edu  pmcmahon@cornell.edu
+
+2
+
+The mixed-field Ising model is defined by the following Hamiltonian:
+
+H = -J ZiZi+1 - hx Xi - hz Zi,
+
+(1)
+
+i
+
+i
+
+i
+
+where we impose cyclic boundary conditions on the spins. If hz = 0, this reduces to the transverse-field Ising model, which is exactly solvable using a Jordan-Wigner transformation when the number of qubits is large. In this case, a term arising from the cyclic boundary conditions can be neglected [17]. It is, of course, also solvable in the limits h2x/(J2 + h2z) 1 and J2/h2x 1. For intermediate values of the field strengths, however, it is non-integrable and quantum chaotic [18, 19]. Approximate methods have been developed to study this model outside of its integrable regime [20]. For the system sizes studied here (at most 20 qubits), such approximate methods are not necessary since the Hamiltonian can be exactly diagonalized on a classical computer. Fig. A.1 compares the exact ground state energies of this model to those computable in second-order perturbation theory from the analytically solvable limits. Throughout this work, we set J = 1, which sets the overall scale of H.
+We use an ansatz to parameterize approximate ground states of this Hamiltonian. In particular, we consider a variant of the Alternating Layered Ansatz (ALT) [21, 22], shown in Fig. C.2. We consider both the full ALT ansatz and a constrained version of it, with even cyclic permutation symmetry imposed. The permutation symmetry reduces the number of parameters from n(l + 1) to 2(l + 1), where n is the number of qubits and l is the number of ansatz layers. Fig. C.3 shows that this ansatz is able to capture the ground states of these Hamiltonians as the number of layers is increased.
+For future applications of the Variational Quantum Eigensolver (VQE), in which the ansatz circuits are wide and deep enough that they are not classically simulable, the optimization step will need to be performed using measurements from the quantum computer. If the effect of the noise is indeed to damp expectation values of observables, and the parameter dependence of the damping factor does not noticeably shift the location of the minimum, then it is not necessary to apply error mitigation during the optimization routine. In this case, correcting the damping is more relevant after the optimization, when we evaluate the optimized circuit. We demonstrate that our symmetrized ansatz circuits can be optimized for the mixed-field Ising model on 20 qubits using unmitigated measurements from quantum computers (Figs. 1 and 2). Since we are primarily interested in predicting the damping factor, however, in most the experiments presented in this paper we save time and resources by performing the optimization classically. In all Figures other than 1 and 2, the results were obtained with circuits that were optimized classically.
+We consider the following problems: Given optimized circuits that approximate ground states of the Hamiltonian (1), how can we best estimate the damping factor that characterizes the suppression of the expectation value of the Hamiltonian when evaluated on a quantum computer? How deep can we make our ansatz using this method? The remainder of this section contrasts techniques for estimating the damping factor. We do not include the method of Ref. [15], which requires simultaneous measurements of all of the qubits, because readout-error mitigation on a large number of qubits is a significant challenge beyond the scope of this work. We also do not include the motion-reversal method of Ref. [11] because, for circuits of the depths considered here, repeating them and their inverses several times leads to very small fidelities, to which it is impossible to accurately fit an exponential using a reasonable number of measurements. Further, this method relies on the assumption that the circuit and its inverse lead to similar decays in fidelity, which may not be true.
+
+A. Depolarizing noise model
+Although this method is not scalable, since it requires classical simulation of the circuit, we benchmark the performance of a noise model that consists of depolarizing gate errors, thermal-relaxation errors, and uncorrelated readout errors. This noise model is implemented in Qiskit Aer [23] and utilizes calibration data from the IBM quantum computers, ibmq sydney [24] and ibmq toronto [25], on which our circuits are run. We compare the damping factors predicted by this noise model to those predicted by the other methods and to the actual measured damping factors. For more details, see the Qiskit Aer documentation [26].
+
+B. Calibrating using the perturbative regime
+Recently, the Google team observed that, at least for the specific system they studied, the damping factor was independent of the coupling strength [12]. They proposed, therefore, that one can measure the damping factor in a perturbative regime of the Hamiltonian, and then use the same damping factor outside of the perturbative regime to correct the results from the quantum computer.
+
+3
+This method is, of course, limited to Hamiltonians that have a perturbative regime, which doesn't include all Hamiltonians of scientific interest. For example, instances of the Sachdev-Kitaev-Ye (SYK) Hamiltonian do not have a perturbative regime, but simulations of the model may give insights into holography and quantum gravity (e.g., [27­31]). Nevertheless, many Hamiltonians of interest do have a perturbative regime, so this technique may still prove useful.
+The mixed-field Ising model has several different perturbative regimes, discussed in Sec. II. For the purposes of this error-mitigation technique, we consider only perturbation in small hx; we fix hz = 0.1 and consider 0 < hx  0.5 to be the perturbative regime and hx = 1.5 to be outside of the perturbative regime. While we might obtain a better estimate of the damping factor by averaging measurements over multiple perturbative regimes, approaching the desired field strength from both sides, multiple perturbative regimes is not a generic feature of Hamiltonians so we do not employ this trick.
+
+C. Calibrating by omitting 1-qubit gates
+Another recent paper [14] proposed estimating the damping factor by eliminating all of the 1-qubit gates in the circuit. The remaining 2-qubit gates, which are all controlled-NOTs, leave the state in |00 . . . 0 , and the damping factor is estimated as the fidelity of measuring all zeros. For our system, eliminating the single-qubit gates is achieved by setting  = 0. In addition to estimating the damping factor using the fidelity, as suggested by Ref. [14], we also compare the measured energy to the energy in the ideal state to estimate the damping factor.
+This method can be regarded as a special case of a method in which the ansatz is evaluated at classically solvable points. For our ansatz, if we pick the Y-rotations to be i = ni/2, for integers ni, then the circuit is within the Clifford group and hence classically simulable. Using Clifford circuits to estimate the damping factor has been proposed previously [9]. For generic choices of the ni, however, the expectation value of the Hamiltonian becomes vanishingly small -- and hence impossible to measure with a finite number of shots -- as the number of ansatz layers becomes large. The fidelity also cannot be measured without adding more gates to the circuit because the final state is not generically a computational basis state, so estimating the predicted damping factor from the fidelity is not possible. Therefore, these circuits cannot be used to measure the damping factor using the method described in the previous paragraph. We might instead consider picking all of the ni to be even, so that the state remains a computational basis state. In generic computational basis states, at large n, the Hamiltonian will still have a small expectation value, although not as small as in a generic state. Nevertheless, we could estimate the damping factor by measuring the fidelity of the final state in such a circuit. In the present work, we focus on the case  = 0, which produces the ground state of the free (hx = 0) Hamiltonian, a state close to the states of interest. We leave the study of other Clifford circuits to future work.
+
+D. Multiplying gate fidelities
+
+In this and the following subsection, we propose methods of estimating the damping factor that we have not seen previously tested in the literature. This first method is based on two assumptions. First, we assume that when an error occurs during the execution of the circuit, it results in a quantum state in which, on average, the Hamiltonian has an expectation value of zero (its trace). Second, we assume that the probability that no error occurred is
+
+C = (1 - ei),
+
+(2)
+
+ilc
+
+where the product is over all gates in the backwards lightcone of the measured qubits, and ei is the error rate of gate i, obtained through randomized benchmarking by IBM during their daily calibrations. In addition to the gate errors, we have to mitigate the readout errors. Assuming that the readout errors are uncorrelated among the qubits, their effect is to further damp the expectation value, and also to shift it slightly (see Appendix E for details). We measure each Hamiltonian term separately. Different terms have different predicted damping factors and are rescaled accordingly.
+
+E. Extrapolation in circuit depth
+In contrast to Ref. [12], we expect that the damping factor should decay exponentially in the number of ansatz layers and generally observe this to be the case. Further, circuits with small depth may be classically simulable
+
+4
+because only qubits in the backwards light cone of the measured qubits need to be included. For 1D ans¨atze with nearest-neighbor 2-qubit gates, such as the ansatz considered here, the number of qubits needed for exact classical simulation is min(m + 2l, n), where l is the number of ansatz layers, m is the number of qubits on which the observable acts, assumed to be adjacent, and n is the total number of qubits. If 36 qubits are classically simulable, then for the Hamiltonian considered here (Eq. 1), with m = 2, we can simulate up to 17 ansatz layers for arbitrarily large n. More generally, one needs to consider the size of the backwards light cone as a function of the number of ansatz layers to determine the maximum number of layers that can be simulated classically. This method will not work as well or at all for observables that act on many qubits in the same term, such as the SYK Hamiltonian in either the Jordan-Wigner or Bravyi-Kitaev [32] representation. To test this mitigation method for our system, we fit an exponential to the damping factor for up to 15 ansatz layers and then use the fit to predict the damping factor for up to 50 layers.
+III. EXPERIMENTAL TECHNIQUES
+Independent of the error-mitigation technique under consideration, we always do the following to reduce noise:
+1. We omit gates outside of the backwards light cone of the measured observable. This technique has previously been called a light-cone filter and has been found to be beneficial [13].
+2. In order to implement the previous technique to its fullest advantage, and also to reduce the number of qubits measured simultaneously, we measure each Hamiltonian term separately.
+3. The qubits in our ansatz are connected in a loop, as are the qubits on the quantum computer. For a loop of n qubits, there are 2n ways to map the circuit qubits to the physical qubits that preserve this connectivity (cyclic permutations and a reflection). We average over four of these mappings. Such an average has been called qubit assignment averaging [12]. Instead of picking these mappings randomly, we pick configurations for which the damping factor, as predicted by multiplying fidelities, is the largest (closest to one). This ensures that we avoid particularly noisy qubits or gates to the extent possible while also averaging out systematic biases.
+IV. RESULTS AND DISCUSSION
+First, we demonstrate that the training phase of VQE can converge even when we don't apply error-mitigation techniques to correct the damping. Then we compare the performance of the various error-mitigation techniques at estimating the damping factor for tuned circuits.
+A. VQE using unmitigated quantum circuit evaluations
+First, consider the training phase of VQE. In order to improve the convergence of our optimizer, we impose a cyclic permutation symmetry on the ansatz, so that each row of Y -rotations is described by two angles instead of n. This reduces the number of parameters from n(l + 1) to 2(l + 1), where n is the number of qubits and l is the number of ansatz layers. We begin at a random point in parameter space and use the quantum computer to measure the energy. We feed the measured energy into the Simultaneous Perturbation Stochastic Approximation (SPSA) optimizer, running on a classical computer, which picks the updated parameters [33]. The first 50 function evaluations are used to calibrate an SPSA hyperparameter as in [34], following which the optimizer iterates through the SPSA algorithm. At each iteration, SPSA uses two evaluations of the energy, at  = i ± cii, and we submit both of these evaluations together in the same job for improved speed.
+Figs. 1 and 2 show the results of this VQE optimization for a 20-qubit mixed-field 1D Ising model on ibmq sydney and ibmq toronto, respectively, with 3­6 ansatz layers. We see that the optimizer is able to converge to a state close to the true ground state. We might worry that this convergence would be spoiled by a parameter-dependent damping factor. Indeed, in some of our runs, the damping factor can be seen to increase as the optimizer converges to the ground state, indicating its parameter dependence.
+Although the parameter dependence of the damping factor does not prevent convergence in our system, we cannot guarantee that it never will. If the damping factor shifts the locations of the minima, techniques to minimize this effect will be necessary. These could include additional experimental techniques to symmetrize over measurement outcomes, such as exchanging the roles of "1" and "0", or applying an error mitigation technique during the optimization routine. Many of the error-mitigation techniques discussed here, however, assume either that the damping factor is parameter
+
+damping factor energy
+
+5
+
+damping factor energy
+
+3 ansatz layers
+
+4 ansatz layers
+
+0
+
+unmitigated
+
+25
+
+exact
+
+0
+
+20
+
+25
+
+0 1.0
+
+100
+
+200
+
+300
+
+0 50 100 150 200 250 1.0
+
+0.5
+
+0.0
+
+damping = unmitigated/exact
+0 numbe1r0o0f functio2n00evaluat3io0n0s
+
+5 ansatz layers
+
+0
+
+20
+
+0.5
+0.0 0 num50ber o1f00func1t5io0n e2v0a0luat2io50ns 6 ansatz layers
+0
+20
+
+damping factor energy
+
+0 1.0
+
+100
+
+200
+
+300
+
+0 1.0
+
+50 100 150 200
+
+0.5
+
+0.5
+
+0.0 0 number10o0f functio2n00evaluati3o0n0s
+
+0.0 0 numb5e0r of fun10c0tion ev1a50luation2s00
+
+damping factor energy
+
+FIG. 1: VQE for the 20-qubit Ising Hamiltonian, with energy evaluations performed on ibmq sydney, with hx = 1.5 and hz = 0.1. Unmitigated energies are fed into the SPSA algorithm. We impose cyclic permutation symmetry on the ansatz to reduce the number of parameters. Note that SPSA involves computing E(i ± cii), not E(i). In the
+upper panels, the dark-blue dots are the unmitigated energies measured on the quantum computer. These are damped compared to the dark-yellow dots, which show exact classical evaluations of the same circuits, from which we compute the observed damping factor (blue dots in lower panels). The purple horizontal line in each upper panel shows the energy of the classically optimized ansatz circuit, and the magenta dashed line shows the energy of the
+exact ground state.
+
+independent or that the circuit has been optimized; these methods could not be used to eliminate the parameter dependence during the optimization routine.
+One might naturally guess that some of the parameter dependence of the damping factor comes from asymmetric readout errors. We show in Appendix E that, indeed, the asymmetric readout errors lead to a predictable additive shift of expectation values, and hence a parameter-dependent damping factor (Eq. E3). However, because the shift is constant, its effect is to shift the overall energy by a constant amount, leaving the location in parameter space of the minimum unchanged. For the mixed-field Ising Hamiltonian, this overall shift is approximately -n(hx +hz)(e1 -e0)  -1.6 for n = 20, hx = 1.5, hz = 0.1, and (e1 - e0)  0.05. This is a larger relative shift when the energy is closer to zero. It should therefore have the effect of making the damping factor closer to unity at negative energies further from the minimum (closer to zero). We see instead the opposite effect, so this is not the source of the parameter-dependent damping factor.
+
+B. Comparison of mitigation techniques
+Having established that, in at least some cases, error mitigation is not needed to tune the circuit parameters, we now compare the performance of various error-mitigation techniques at estimating the damping factor for the optimized circuits. We report the measured damping factors, as well as those predicted using our current methods. We also report the relative error of the reconstructed energy, which is equal to (C - Cp)/Cp, where C is the actual damping factor, and Cp is the predicted damping factor.
+
+damping factor energy damping factor energy
+damping factor energy
+
+6
+
+0 20
+0 1.0
+
+3 ansatz layers
+unmitigated exact
+50 100 150 200 250
+
+25
+
+4 ansatz layers
+
+0
+
+25 0
+1.0
+
+200 400 600 800 1000
+
+0.5
+
+0.5
+
+0.0
+
+damping = unmitigated/exact
+0 num5b0er o1f0f0unct1i5o0n ev2a0l0uatio25n0s
+
+0.0 0 num2b00er of4f0u0nctio6n00eval8u0a0tion1s000
+
+20
+
+5 ansatz layers
+
+0
+
+20
+
+0 1.0
+
+50 100 150 200
+
+0.5
+
+0.0 0 numb50er of f1u0n0ction15e0valua2t0io0ns
+
+FIG. 2: Same as Fig. 1 except on ibmq toronto. The discontinuities, particularly apparent in the 4-layer experiment, coincide with daily recalibrations of the device.
+
+1. Using reported error rates
+Here, we consider the methods introduced in Secs. II A and II D, both of which construct the damping factor from the error rates of individual circuit components and assume that all errors are uncorrelated. The method of multiplying gate fidelities (Sec. II D) effectively treats each noisy gate as a global depolarizing channel, which disturbs all of the qubits in the system, whereas the depolarizing noise model of Sec. II A uses local depolarizing channels, which disturb the state less. The local depolarizing channel model is not scalable, since it requires classical simulation of the circuit, and is only included for comparison purposes. Fig. 3 shows that neither method gives an unbiased estimate of the damping factor for deep circuits. Multiplying fidelities consistently predicts too much suppression, whereas the Qiskit Aer noise model consistently predicts too little suppression. We have observed similar results for the Heisenberg Model Hamiltonian. Because the mitigation procedure consists of dividing by the damping factor, multiplying fidelities leads to very large relative errors. Qiskit Aer's noise model also leads to quite large relative errors of about -70% by 35 ansatz layers.
+
+2. Mitigating using calibration circuits
+Next, we compare the three methods that use calibration circuits to estimate the damping factor for the circuit of interest. These are the methods introduced in Secs. II B, II C, and II E, which extrapolate the damping factor from the perturbative regime of the Hamiltonian, from  = 0, or from shallower depth circuits, respectively. We show their performance in Figs. 4-6. These methods work well compared to those considered in Sec. IV B 1. The exponential extrapolation in the number of layers, which we introduced in this work, combined with readout error mitigation, seems to be the most consistently reliable method. It allows for circuit depths of about 25 layers if we demand at most 10% relative error in the reconstructed energy. Without any error mitigation, we could only afford about 2­3 layers, or perhaps 4 layers if we include readout error mitigation. Estimating the damping factor from the perturbative regime also often works well. When combined with readout error mitigation, it can afford us circuit depths of about
+
+7
+20 layers. We see in Fig. 4 that estimating the damping factors from the fidelity of the  = 0 circuits works below about 10 layers when combined with readout error mitigation, with the performance varying somewhat. Although this performance is not as good as the other two methods considered here, it may be more generally applicable, since it does not require the Hamiltonian to have a perturbative regime or to have only terms which act on a small number of qubits.
+FIG. 3: The measured damping factor (black error bars) versus the number of ansatz layers, for classically optimized circuits that are then run on ibmq sydney or ibmq toronto. The circuits are optimized to the ground state of the 12-qubit mixed-field Ising Hamiltonian with hx = 1.5 and hz = 0.1. The damping factor is the factor by which
+the energy measured on the quantum computer is suppressed. The blue line shows the damping factor that is predicted from multiplying the fidelities of the gates in the backwards light cone of the measured qubits. The orange
+line shows the prediction from a Qiskit Aer noise model with local depolarizing errors, thermal relaxation errors, and readout errors. In both cases, the error rates are obtained from the device's calibration. For deep circuits, multiplying the gate fidelities consistently predicts too much suppression, whereas the Qisit Aer model with local
+gate errors predicts too little suppression.
+V. DISCUSSION AND CONCLUSION
+We have used the variational-quantum-eigensolver algorithm to solve a quantum spin model with up to 20 qubits (spins), and have compared various error-mitigation techniques that can be applied to the VQE output to correct the measured ground-state energy. The error-mitigation techniques considered here model the effect of the noise as damping expectation values of observables. We see that, for studying ground states of the mixed-field Ising model on 12 and 20 qubits on ibmq toronto and ibmq sydney, all of these methods provide improvements over no mitigation. Estimating the damping factor using an exponential fit in the number of ansatz layers works particularly well, and estimating the damping factor from the perturbative regime of the Hamiltonian also works well. Combined with readout error mitigation, we can reconstruct correct energy expectation values to within 10% for up to about 25 ansatz layers. This threshold depth is not seen to decrease in going from 12 to 20 qubits. If anything, the performance is better on 20 qubits, perhaps because the qubit assignment averaging has more layouts from which to choose the four predicted to be most optimal (see Sec. III). In future work, we plan to extend this study to systems with more qubits and find how deep different ansatz circuits can be while still yielding accurate answers after error mitigation.
+Once we know the feasible circuit depth, a natural question is whether that depth permits simulation of useful problems. Another future investigation will be to study the circuit depths needed to represent ground states of scientifically interesting Hamiltonians. For the 1D mixed-field Ising model, relatively few layers are needed (Fig. C.3), but many scientifically interesting Hamiltonians require deeper ans¨atze. For example, in a separate study, we have found that for SYK on 12 qubits (24 Majorana fermions), an ansatz of the type studied in this paper would need to be significantly deeper than 25 layers in order to approach the ground state.
+The parameter dependence of the damping factor remains a potential issue, both for optimizing the ansatz circuits and for mitigating error in the result. We have seen that, at least for our choice of ansatz and Hamiltonian, this dependence is not strong enough to prevent the optimizer from converging to something close to the ground state, nor is it strong enough to cause the error-mitigation techniques to fail when fewer than approximately 25 ansatz layers are used. When using the error-mitigation techniques studied in this work for other choices of ansatz and Hamiltonian, it will be important to check if the impact of the parameter dependence remains small.
+
+8 Our results are a step towards finding where and how near-term quantum computers running variational quantum algorithms might achieve a quantum advantage. We are optimistic that error mitigation will play a useful role in this endeavor.
+DATA AND CODE AVAILABILITY The code used to perform the numerical simulations, the experimental runs on IBM's hardware, and the data analysis (including error mitigation) is available at https://github.com/mcmahon-lab/error_mitigation_vqe. The data used to produce the figures may be made available upon request.
+ACKNOWLEDGEMENTS We thank Thomas Hartman for helpful discussions and Mandar Sohoni for providing feedback on a draft of this paper. We gratefully acknowledge financial support from US DOE grant DE-SC0020397 and access to IBM quantumcomputer time via the AFRL IBM Q Network Hub, facilitated by Laura Wessing and Jon Maggiolino. The views expressed are those of the authors, and do not reflect the official policy or position of IBM or the IBM Quantum team. We used Qiskit [23] to interact with IBM's devices. PLM acknowledges membership in the CIFAR Quantum Information Science Program as an Azrieli Global Scholar.
+FIG. 4: Predicted and measured damping factors. Black "x"s indicate the measured damping factors, and the colored lines indicate various predicted damping factors. The methods used to predict the damping factor are described in Secs. II B, II C, and II E. For the first method, we take hx = {0.1, 0.2, 0.3, 0.4, 0.5} to represent the perturbative regime and average the measured damping factors for those five circuits. The ground states shown here are for hx = 1.5 and hz = 0.1. When computing energies, we apply readout error mitigation using the reported
+readout error rates, as discussed in Appendix E.
+
+9
+FIG. 5: Effectiveness of error mitigation. "3" means that the reconstructed energy is within 10% of the correct value. "2" means statistically indeterminate at 1 standard deviation. "1" means statistically indeterminate at 2 standard deviations. "0" means that the reconstructed energy deviated by more than 10% from the true energy. In
+this figure, the methods involving calibration circuits do not include separate readout error mitigation.
+FIG. 6: Same as Fig. 5, but applying readout error mitigation (Appendix E) to all energy evaluations, including in calibration circuits.
+[1] Y. Li and S. C. Benjamin, Efficient variational quantum simulator incorporating active error minimization, Physical Review X 7, 021050 (2017).
+[2] K. Temme, S. Bravyi, and J. M. Gambetta, Error mitigation for short-depth quantum circuits, Physical Review Letters 119, 180509 (2017).
+[3] S. Endo, S. C. Benjamin, and Y. Li, Practical quantum error mitigation for near-future applications, Physical Review X 8, 031027 (2018).
+[4] A. Kandala, K. Temme, A. D. Co´rcoles, A. Mezzacapo, J. M. Chow, and J. M. Gambetta, Error mitigation extends the computational reach of a noisy quantum processor, Nature 567, 491 (2019).
+[5] M. Otten and S. K. Gray, Recovering noise-free quantum observables, Physical Review A 99, 012338 (2019). [6] A. He, B. Nachman, W. A. de Jong, and C. W. Bauer, Zero-noise extrapolation for quantum-gate error mitigation with
+identity insertions, Physical Review A 102, 012426 (2020). [7] B. Koczor, Exponential error suppression for near-term quantum devices (2021), arXiv:2011.05942 [quant-ph]. [8] W. J. Huggins, S. McArdle, T. E. O'Brien, J. Lee, N. C. Rubin, S. Boixo, K. B. Whaley, R. Babbush, and J. R. McClean,
+Virtual distillation for quantum error mitigation (2021), arXiv:2011.07064 [quant-ph]. [9] P. Czarnik, A. Arrasmith, P. J. Coles, and L. Cincio, Error mitigation with Clifford quantum-circuit data (2021),
+arXiv:2005.10189 [quant-ph]. [10] A. Montanaro and S. Stanisic, Error mitigation by training with fermionic linear optics (2021), arXiv:2102.02120 [quant-ph]. [11] A. Shaw, Classical-quantum noise mitigation for NISQ hardware (2021), arXiv:2105.08701 [quant-ph]. [12] Google AI Quantum and collaborators, Observation of separated dynamics of charge and spin in the Fermi-Hubbard model
+(2020), arXiv:2010.07965 [quant-ph]. [13] X. Mi et al., Information scrambling in computationally complex quantum circuits (2021), arXiv:2101.08870 [quant-ph].
+
+10
+
+[14] M. Urbanek, B. Nachman, V. R. Pascuzzi, A. He, C. W. Bauer, and W. A. de Jong, Mitigating depolarizing noise on
+
+quantum computers with noise-estimation circuits (2021), arXiv:2103.08591 [quant-ph].
+
+[15] J. Vovrosh, K. E. Khosla, S. Greenaway, C. Self, M. Kim, and J. Knolle, Efficient mitigation of depolarizing errors in
+
+quantum simulations (2021), arXiv:2101.01690 [quant-ph].
+
+[16] J.-L. Ville, A. Morvan, A. Hashim, R. K. Naik, B. Mitchell, J.-M. Kreikebaum, K. P. O'Brien, J. J. Wallman, I. Hincks,
+
+J. Emerson, E. Smith, E. Younis, C. Iancu, D. I. Santiago, and I. Siddiqi, Leveraging randomized compiling for the QITE
+
+algorithm (2021), arXiv:2104.08785 [quant-ph].
+
+[17] P. Pfeuty, The one-dimensional Ising model with a transverse field, Annals of Physics 57, 79 (1970).
+
+[18] H. Kim and D. A. Huse, Ballistic spreading of entanglement in a diffusive nonintegrable system, Physical Review Letters
+
+111, 127205 (2013).
+
+[19] H. Kim, T. N. Ikeda, and D. A. Huse, Testing whether all eigenstates obey the eigenstate thermalization hypothesis,
+
+Physical Review E 90, 052105 (2014).
+
+[20] J. Wurtz and A. Polkovnikov, Emergent conservation laws and nonthermal states in the mixed-field Ising model, Physical
+
+Review B 101, 195138 (2020).
+
+[21] M. Cerezo, A. Sone, T. Volkoff, L. Cincio, and P. J. Coles, Cost-function-dependent barren plateaus in shallow quantum
+
+neural networks (2020), arXiv:2001.00550 [quant-ph].
+
+[22] K. Nakaji and N. Yamamoto, Expressibility of the alternating layered ansatz for quantum computation (2020),
+
+arXiv:2005.12537 [quant-ph].
+
+[23] H. Abraham et al., Qiskit: An open-source framework for quantum computing (2019).
+
+[24] ibmq sydney v1.0.20, IBM Quantum team. Retrieved from https://quantum-computing.ibm.com (2021).
+
+[25] ibmq toronto v1.4.4, IBM Quantum team. Retrieved from https://quantum-computing.ibm.com (2021).
+
+[26] The relevant documentation pages are https://qiskit.org/documentation/stubs/qiskit.providers.aer.noise.
+
+depolarizing_error.html,
+
+https://qiskit.org/documentation/stubs/qiskit.providers.aer.noise.thermal_
+
+relaxation_error.html, https://qiskit.org/documentation/stubs/qiskit.providers.aer.noise.ReadoutError.
+
+html, https://qiskit.org/documentation/stubs/qiskit.providers.aer.noise.device.basic_device_gate_errors.
+
+html, and https://qiskit.org/documentation/stubs/qiskit.providers.aer.noise.device.basic_device_readout_
+
+errors.html.
+
+[27] R. Babbush, D. W. Berry, and H. Neven, Quantum simulation of the Sachdev-Ye-Kitaev model by asymmetric qubitization,
+
+Physical Review A 99, 040301 (2019).
+
+[28] J. Martyn and B. Swingle, Product spectrum ansatz and the simplicity of thermal states, Physical Review A 100, 032107
+
+(2019).
+
+[29] Z. Luo, Y.-Z. You, J. Li, C.-M. Jian, D. Lu, C. Xu, B. Zeng, and R. Laflamme, Quantum simulation of the non-fermi-liquid
+
+state of Sachdev-Ye-Kitaev model, npj Quantum Information 5, 53 (2019).
+
+[30] A. R. Brown, H. Gharibyan, S. Leichenauer, H. W. Lin, S. Nezami, G. Salton, L. Susskind, B. Swingle, and M. Walter,
+
+Quantum gravity in the lab: Teleportation by size and traversable wormholes (2021), arXiv:1911.06314 [quant-ph].
+
+[31] S. Nezami, H. W. Lin, A. R. Brown, H. Gharibyan, S. Leichenauer, G. Salton, L. Susskind, B. Swingle, and M. Walter,
+
+Quantum gravity in the lab: Teleportation by size and traversable wormholes, Part II (2021), arXiv:2102.01064 [quant-ph].
+
+[32] S. B. Bravyi and A. Y. Kitaev, Fermionic quantum computation, Annals of Physics 298, 210­226 (2002).
+
+[33] We use Qiskit's implementation of SPSA, which is documented at https://qiskit.org/documentation/stubs/qiskit.
+
+aqua.components.optimizers.SPSA.html.
+
+[34] A. Kandala, A. Mezzacapo, K. Temme, M. Takita, M. Brink, J. M. Chow, and J. M. Gambetta, Hardware-efficient
+
+variational quantum eigensolver for small molecules and quantum magnets, Nature 549, 242­246 (2017).
+
+[35] A. Asfaw et al., Learn Quantum Computation Using Qiskit (2020).
+
+[36] See https://quantum-computing.ibm.com/lab/docs/iql/manage/systems/properties.
+
+Appendix A: Perturbation theory for the mixed-field Ising model
+
+The mixed-field Ising Hamiltonian (Eq. 1) is analytically solvable in several limits, as discussed in the main text. In the small-hx limit, it is diagonal in the computational basis, and the ground state (assuming J > 0 and hz > 0) approaches |00 . . . 00 . The ground state energy, to second order in hx is
+
+Egs = -n
+
+hz
+
++J
+
++
+
+h2x 2hz + 4J
+
++ O(h3x)
+
+.
+
+(A1)
+
+Further, in the large hx limit, the ground state approaches | + + . . . + + , where |+
+
+= 1 (|0
+2
+
++ |1 ). In this limit,
+
+the ground state energy is
+
+Egs = -n
+
+hx
+
++
+
+2h2z + J 2 4hx
+
++
+
+O
+
+h-x 2
+
+.
+
+(A2)
+
+Finally, in the small hz limit, the Hamiltonian approaches the transverse-field Ising model, which, in the large-n limit, is exactly solvable via a Jordan-Wigner transformation [17]. Deriving an analytical expression for the ground
+
+11
+state energy in the small hz limit is beyond the scope of this work. Instead, we numerically compute the energy to second-order in perturbation theory in this limit (i.e. using the exact numerical eigenvectors from hz = 0).
+The perturbative results are compared to the exact ground state energies in Fig. A.1.
+
+Appendix B: A note about error bars
+Throughout this paper, error bars indicate statistical errors only. There are, of course, a variety of systematic errors as well. However, the present goal is to correct these systematic errors, so it is more appropriate for error bars to only show statistical errors, which result from having a finite number of counts. We consider the variation among the qubit assignments used in the qubit assignment averaging to be a systematic error, as the same choices of qubit assignments are used in the calibration circuits as in the circuit that we wish to correct. However, we consider the variation over the different "perturbative" points in the method introduced in Sec. II B to be statistical error, since a larger sample of such points can always be taken.
+
+Appendix C: Variational ansatz circuit
+
+As described in the main text, our ansatz consists of CNOTs between adjacent qubits and Y-rotations on all qubits
+
+(Fig. C.2). CNOT is a basis gate on IBM's quantum computers. However, the Y-rotations and the change of basis
+
+required to measure Xi must also be written in terms of basis gates. We use the following basis-gate decompositions:
+
+
+
+
+
+Ry() = Rz() XRz( + ) X
+
+
+
+
+
+HRy() = Rz() XRz(3/2 - ) XRz(-).
+
+(C1)
+
+ibmq toronto and ibmq sydney include 12- and 20-qubit loops, the topologies studied here, so we have not needed to apply any gates between non-neighboring qubits.
+
+Appendix D: Readout error mitigation
+In the standard technique for readout error mitigation on n measured qubits, one prepares the qubits in each of the 2n computational basis states and measures the probabilities of reading out the different outcomes (e.g. [35]). This results in a 2n × 2n matrix, which is inverted to perform the mitigation. When n is large, this method becomes intractable and one must make simplifying assumptions, such as ignoring correlations among the qubits or among sets of qubits. For the Mixed-Field Ising Hamiltonian (Eq. 1), we only need to measure at most two qubits simultaneously, so the standard readout error mitigation method is easily tractable. Nevertheless, we assume uncorrelated readout errors and use the methods developed in Appendix E to perform the mitigation. We use the readout error rates measured by IBM during their approximately daily calibrations [36]. We have found that this works about as well as doing the full readout error mitigation using our own calibrations.
+
+Appendix E: Uncorrelated readout errors
+
+In this appendix, we show that the effect of uncorrelated readout errors is to reduce the expectation value of a Pauli
+operator by the factor (1 - 2em), for each qubit measured, where em = (e0 + e1)/2 is the average readout error, and offset it by a small additive amount.
+Suppose that we want to measure a Pauli string of length N by applying readout gates to all of the qubits. If the
+readout gates were noiseless, we would measure outcome q with probability f (q). The noiseless expectation value
+of the Pauli operator is then P = q P (q)f (q), where P (q) = ±1 is the bit parity of q. Now, suppose that the measurement gates add noise such that the probability of a 0 getting measured as a 1 is e0 and the probability of a 1 getting measured as a 0 is e1. Let f~(q) be the probability distribution of the outcomes, including this readout error. Let P~ = q P (q)f~(q).
+The main result that we will establish is that
+
+P~ = P (q)f (q)(1 - 2e0)n0(q)(1 - 2e1)n1(q),
+q
+
+(E1)
+
+12
+
+-15
+
+-20
+
+-25
+
+-30
+
+-35
+
+0
+
+0.5
+
+1
+
+1.5
+
+2
+
+2.5
+
+3
+
+-25
+
+-30
+
+-35
+
+-40
+
+-45
+
+-50
+
+-55
+
+-60
+
+0
+
+0.5
+
+1
+
+1.5
+
+2
+
+2.5
+
+3
+
+FIG. A.1: Exact ground state energy of the mixed-field Ising model (Eq. 1) and predictions from second-order
+perturbation theory, for hz = 0.1. Relevant to this work, we see that hx  0.5 is in the small hx perturbative regime, while hx = 1.5 is outside of it (at least to second order). For the small-hz limit, we cheat slightly and use exact diagonalization to compute the eigenstates and eigenenergies when hz = 0. We thus include the cyclic boundary
+term that is neglected in analytic treatments (cf., Eq. 2.4 in [17], and the following discussion), so the small-hz line should be regarded as slightly better than one could do analytically, but approaching the analytical solution as the
+number of spins increases.
+
+Initialization Layer 1 Layer 2 Layer 3
+FIG. C.2: The Alternating Layered Ansatz that we use throughout this work, shown for 6 qubits and 3 layers. When we impose partial cyclic permutation symmetry, we demand that, within a layer of y rotations, all of the
+rotations on even qubits have the same angle, and all of the rotations on odd qubits have the same angle.
+
+FIG. C.3: Ansatz performance in representing ground states of the mixed-field Ising Hamiltonian on 20 qubits, with hx = 1.5 and hz = 0.1. The symmetric ansatz is able to represent the ground states nearly as well as the full ansatz
+with the same number of layers.
+
+13
+
+where n0(q) is the number of bits in q that are 0, and n1(q) is the number of bits in q that are 1. If the two error rates are equal (e0 = e1 = em), Eq. E1 becomes
+
+P~ = P (1 - 2em)N , e0 = e1 = em.
+
+(E2)
+
+However, we can also simplify Eq. E1 without assuming the error rates are equal. For N = 1, P = f (0) - f (1), so Eq. E1 becomes
+
+P~ = P (1 - e0 - e1) + e1 - e0, N = 1.
+
+(E3)
+
+For larger N , P does not determine f (q). However, the largest and smallest P~ for a given P will always result
+from letting f (q) be nonzero for at most two choices of n1(q), one with n1 even and the other with n1 odd. Define these values as n+1 and n-1 , respectively. Define n±0 = N - n±1 and f± to be the corresponding probabilities. Then P = f+ - f-, and so Eq. E1 becomes
+
+P~ = 1 + P 2
+
+(1 - 2e0)n+ 0 (1 - 2e1)n+ 1 -
+
+1- P 2
+
+(1 - 2e0)n- 0 (1 - 2e1)n- 1
+
+(E4)
+
+Without loss of generality, we assume that e1  e0. We also assume that e1 < 0.5. Then P~ is maximized by picking n+1 = 0 and n-1 to be either N or N - 1, whichever is odd. Similarly, the smallest P~ is obtained by picking n+1 = N or N - 1, whichever is even, and n-1 = 1. For the case of N = 2, this becomes
+
+(1 - 2e1) [ P (1 - e1 - e0) - (e1 - e0)]  P~  (1 - 2e0) [(1 - e0 - e1) P + e1 - e0] , N = 2.
+
+(E5)
+
+The midpoint between these two bounds gives an estimate of P~ when N = 2:
+
+P~  P (1 - e0 - e1)2 P + (e1 - e0)2, N = 2.
+
+(E6)
+
+Note that the y-intercept is suppressed compared to the N = 1 case (Eq. E3). Indeed, it becomes more suppressed as we go to higher N . Numerically, we find that, for N 3, for randomly chosen f (q),
+
+P~  (1 - e0 - e1)N P , N 3
+
+(E7)
+
+where this becomes a better approximation as N increases. We present numerical evidence for this result in Figs. E.4­ E.5.
+
+1. Proof of Eq. E1
+
+Consider two bit strings, both of length N , q and q . Define the following quantities:
+
+N -1
+
+k0(q, q ) =
+
+1 1 qi=0 qi=1,
+
+i=0
+
+N -1
+
+k1(q, q ) =
+
+1 1 qi=1 qi=0,
+
+i=0
+
+N -1
+
+u0(q, q ) =
+
+1 1 qi=0 qi=0,
+
+i=0
+
+N -1
+
+u1(q, q ) =
+
+1 1 qi=1 qi=1.
+
+i=0
+
+Then, upon adding readout error, the probability f~(q) of measuring bit string q is
+
+f~(q) = f (q)(1 - e0)n0(q)(1 - e1)n1(q) +
+
+f (q )e0k0(q,q )ek11(q,q )(1 - e0)u0(q,q )(1 - e1)u1(q,q ).
+
+q =q
+
+(E8) (E9)
+
+14
+
+FIG. E.4: In this Figure and in Fig. E.5, we generate random probability distributions f (q) that give the desired expected values of bit parity P , which are equally spaced between -1 and 1. P~ is then calculated using Eq. E1.
+The resulting data are compared to Eq. E6, and the residuals R^ are plotted. In this Figure, two qubits are
+measured, and the effect of the readout error is bounded by Eq. E5 (blue lines) and approximated by E6 (red line).
+We set e1 = 0.1 and e0 = 0.05.
+
+The expectation value of bit parity in the distribution f~ is
+
+P~ = P (q)f (q)(1 - e0)n0(q)(1 - e1)n1(q)
+q
+
++
+
+f (q )P (q )(-1)k0(q,q )+k1(q,q )e0k0(q,q )ek11(q,q )(1 - e0)n0(q )-k0(q,q )(1 - e1)n1(q )-k1(q,q )
+
+q q =q
+
+= P (q)f (q)(1 - e0)n0(q)(1 - e1)n1(q)
+q
+
++
+q
+
+n0(q ) n1(q ) k0=0 k1=0
+
+n0(q ) k0
+
+n1(q ) k1
+
+1 f (q )P (q )ek00 ek11 (1 - e0)n0(q )-k0 (1 - e1)n1(q )-k1 (-1)k0+k1 k0+k1>0
+
+=
+q
+
+n0(q ) n1(q ) k0=0 k1=0
+
+n0(q ) k0
+
+n1(q ) k1
+
+f (q )P (q )ek00 ek11 (1 - e0)n0(q )-k0 (1 - e1)n1(q )-k1 (-1)k0+k1
+
+= P (q)f (q)(1 - 2e0)n0(q)(1 - 2e1)n1(q),
+
+q
+
+(E10)
+
+which is Eq. E1.
+
+15
+FIG. E.5: Same as Fig. E.4 but reading out 3, 4, 10, and 11 qubits, respectively. Eq. E7 (red line) is a good approximation and becomes better as the number of measured qubits increases.
+
+

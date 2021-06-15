@@ -1,0 +1,940 @@
+arXiv:2106.00538v1 [cs.AI] 1 Jun 2021
+
+ECML-PKDD manuscript No. (will be inserted by the editor)
+Value propagation-based spatio-temporal interpolation inspired by Markov reward processes
+Laurens Arp · Mitra Baratchi · Holger Hoos
+Received: date / Accepted: date
+Abstract Given the common problem of missing data in real-world applications from various fields, such as remote sensing, ecology and meteorology, the interpolation of missing spatial and spatio-temporal data can be of tremendous value. Existing methods for spatial interpolation, most notably Gaussian processes and spatial autoregressive models, tend to suffer from (a) a trade-off between modelling local or global spatial interaction, (b) the assumption there is only one possible path between two points, and (c) the assumption of homogeneity of intermediate locations between points. Addressing these issues, we propose a value propagation method, inspired by Markov reward processes (MRPs), as a spatial interpolation method, and introduce two variants thereof: (i) a static discount (SD-MRP) and (ii) a data-driven weight prediction (WP-MRP) variant. Both these interpolation variants operate locally, while implicitly accounting for global spatial relationships in the entire system through recursion. We evaluated our proposed methods by comparing the mean absolute errors and running times of interpolated grid cells to those of 7 common baselines. Our analysis involved detailed experiments on two synthetic and two real-world datasets over 44 total experimental conditions. Experimental results show the competitive advantage of MRP interpolation on real-world data, as the average performance of SD-MRP on real-world data under all experimental conditions was ranked significantly higher than that of all other methods, followed by WP-MRP. On synthetic data, we show that WP-MRP can perform better than SD-MRP given sufficiently informative features. We further found that, even in cases where our methods had no significant advantage over baselines numerically, our methods preserved the spatial structure of the target grid better than the baselines.
+Keywords Spatial interpolation · Spatio-temporal interpolation · Missing data · Data imputation
+Laurens Arp, Mitra Baratchi, Holger Hoos Leiden University Niels Bohrweg 1 Tel.: +31 71 527 4799 Corresponding author e-mail: l.r.arp@liacs.leidenuniv.nl
+
+2
+
+Laurens Arp et al.
+
+1 Introduction
+Under perfect lab conditions, a data scientist can train models, infer variables of interest and discover new knowledge from neatly organised, consistent and complete datasets. However, in real-world scenarios, one is rarely so lucky. Whether it is random measurement noise, inconsistent annotation, missing data or another problem, real-world data can be messy, and tricky to process in such a way that downstream models and processes can use it effectively.
+In this work, we aim to address the problem of missing data in the specific case of spatial and spatio-temporal gridded data by proposing a computational method for spatial and spatio-temporal interpolation. Prominent examples of such missing data in real-world scenarios include the use of satellite imagery in remote sensing (due to orbits, swaths and cloud clover [5]), mapping of ecological field measurements and samples collected at a limited set of locations [11], and local precipitation forecasting from meteorological measuring stations covering a limited set of locations [35]. As such, spatial and spatio-temporal interpolation is a problem highly relevant to many fields, and a large body of literature is dedicated to it in statistical domains [18, 21, 25]. Data in spatial and spatio-temporal settings is particularly susceptible to missing values, due to, among other reasons, (i) limited and/or variable spatial and temporal resolutions, (ii) limited availability of measuring locations, (iii) measurements being acquired at different times and different locations, and (iv) the characteristics of the locations in question (e.g., cloud cover or inaccessible areas).
+Spatial and spatio-temporal interpolation methods, such as Kriging (also known as Gaussian processes) [6, 21], tend to be founded on an assumption of autocorrelation, meaning that values are more strongly correlated with one another the closer their spatial and/or temporal proximity is. Our method is no exception in this regard. However, existing methods can be categorised into local methods and distance-based methods. Local methods, such as spatial autoregressive models [1, 16] or convolutional neural networks [9, 34], rely on adding the information of a strictly defined local neighbourhood around a target cell to enhance their predictions. The downside of these methods is that potentially valuable information outside the predefined neighbourhood is disregarded. Moreover, if local information is not available, local methods may require imputation methods to perform their estimations. Distance-based methods, on the other hand, most notably including various Gaussian process-based approaches [6, 21], can use any measurement available, but rely on a distance-based weighting to use this information for their predictions. The downside of these methods is that, in most spatial settings, paths cannot be assumed to be homogeneous, and thus distance alone may not be sufficient to reliably predict values. For example, a mountain range or other natural barriers may have a large impact on the spatial autocorrelation of some target variable of interest. This problem is further exacerbated by the two-dimensionality of spatial problems, allowing for the existence of multiple paths between any two locations, some of which may be more important than others for the propagation of values (for example, a longer path around a mountain as opposed to a shorter path over it).
+In this work, we propose a method that incorporates a system-oriented perspective, illustrated in Figure 1. In this perspective, we use a local neighbourhood to perform estimations, but we rely on recursion to propagate known values
+
+Value propagation-based spatio-temporal interpolation
+
+3
+
+Fig. 1: Local (left), distance-based (middle) and system-oriented (right) perspectives. In local and distance-based perspectives, the predicted value of the green cell is determined by the yellow cells (equal weights if local, unequal weights if distancebased). In the system-oriented perspective (used by our proposed method), the green cell is predicted using the yellow neighbours, which were in turn affected by their own neighbours (blue, yellow and green cells).
+through direct neighbours over a network of (mostly indirectly) mutually interacting cells, iteratively updated until an equillibrium is reached. At every recursive call, a weight is applied to the values being propagated to represent spatial and temporal autocorrelation. This weight can furthermore be assigned dynamically using a data-driven manner, based on the features of the underlying spatial configuration, allowing for higher autocorrelation weights between, for example, two neighbouring blocks of a city, and lower weights between an industrious port and the open sea. The update rules for every cell were based on the Bellman equation for Markov reward processes [2], canonically used to estimate the value of a particular state (cell). With this perspective, we can address both the limitations of local methods and distance-based methods.
+Our main contributions in this work are as follows:
+­ We propose a novel method for spatial and spatio-temporal interpolation, incorporating a system-oriented perspective aimed at overcoming the limitations of existing local- or distance-based methods.
+­ We introduce two variants of our value propagation interpolation algorithm, both of which incorporate elements of Markov reward processes: SD-MRP, using a static discount throughout the grid and requiring no additional data, and WP-MRP, exploiting spatial features to predict neighbour-specific spatial weights.
+­ We provide a vectorised implementation of our methods allowing for high degrees of parallel processing to speed up the algorithm running time, which we make publicly available1.
+­ We empirically evaluate our methods on 2 synthetic (spatial and spatio-temporal) and 2 real-world datasets and compare their performance against that of popular baselines from the Kriging, machine learning and deep learning fields in terms of mean absolute error and running time.
+1 https://github.com/LaurensArp/VPInt
+
+4
+
+Laurens Arp et al.
+
+2 Related work
+
+To date, various spatial interpolation methods, both local and distance-based, have been proposed. We will discuss a number of popular methods in this section.
+Gaussian processes. Given its widespread use, the first set of methods of note are Gaussian processes (GP), also known as Kriging [24]. GPs [6, 33] are a set of interpolation techniques based on learning the covariance of target values over distance using variogram (kernel) functions fitted to the data. Popular variants of GPs are discussed in [21] and include ordinary Kriging (OK), universal Kriging (UK) and regression Kriging (Kriging after detrending). Contemporary contributions to GP methods include a scalable gradient-based surrogate function method [4] and a neural network-based method to overcome GPs' limitation of disregarding the characteristics of intermediate locations in paths between pairs of locations [31]. Although assumptions made differ per variant, all GP-based methods are limited by their reliance on pair-wise distance-based covariance models. Moreover, traditional GP methods tend to scale poorly to larger datasets (O(n4)). An overview of modern GP methods aimed at increasing the viability of GPs for large-scale datasets is given in [18], including local approximate GPs [15], stochastic partial differential equation approaches [30] and multi-resolution approximations [23].
+Gapfill. Gapfill [14] is a local method utilising no explanatory variables that, unlike GPs, does not build an explicit statistical model. Instead, as a local method, it relies on using subsets of the available data for its predictions. Although its local perspective and cell-specific independent predictions allow gapfill to be highly parallelised, its performance in terms of accuracy tends to fall short of GPs [18], and its dependency on the presense of sufficient amounts of non-missing values within its neighbourhood renders it infeasible for cases where missing values are clustered together.
+Spatial, temporal and spatio-temporal regression. Spatial autoregressive models [1] (SAR) have remained relatively consistent, but have been expanded in some recent work [37] [13]. Moving average (MA) models are often used in the context of time-series modelling [10], but can also be used for spatial regression problems using the "MA by AR" approach [16]. Highly related to SAR and MA models, autoregressive moving average (ARMA) models have seen a recent earlyaccess paper of particular relevance to the current COVID-19 pandemic, modelling a transmission network of influenza [29]. The spatial autoregressive regression models suffer from the limitations of a local perspective: their use of a pre-defined local neighbourhood dismisses information outside of the neighbourhood radius.
+Neural networks and deep learning. Deep learning techniques, and convolutional neural networks (CNN) in particular, have been used to great effect in many computer vision applications [9] [34]. These computer vision-based interpolation CNNs could also be applied to general spatial interpolation. Moreover, in their 2020 publication, Hashimoto and Suto formulated a CNN architecture for the specific purpose of spatial interpolation [17]. Apart from CNNs, graph neural networks (GNNs) have also been applied recently to spatio-temporal interpolation by Wu et al [36], utilising fully connected networks with distance-based weights determined using a random subgraph sampling strategy. Like autoregressive models, CNNs have a local perspective and therefore dismiss potentially meaningful information outside its neighbourhood. Conversely, similar to GPs, GNNs suffer
+
+Value propagation-based spatio-temporal interpolation
+
+5
+
+from the reliance on distance-based weights, dismissing potential non-homogenity of intermediate locations on paths between locations.
+By adopting a system-oriented perspective, the method we propose in this work aims to be situated between these two main categories of existing work (local and distance-based). Moreover, like Gapfill, it offers a computational alternative to existing methods with an emphasis on explicit statistical spatial modelling.
+
+3 Problem statement
+
+Let us define a spatial grid G as an (n × m) matrix, where n corresponds to
+the number of rows and m to the number of columns. At every cell c in G, where
+c = Gi,j, with i and j corresponding to row and column indices in G, respectively, there exists a true value yc that may be either known or unknown. If yc is known, we set the cell value yc = yc. If it is not known, we mark this location as unknown: yc = . The (n × m) matrix Y contains yc for all c in G.
+We further define a feature grid X as an (n × m × f ) tensor, where f denotes
+the number of features per cell. Thus xc in X is a feature vector corresponding to
+location c in G. We can now define a prediction model M(Y, X) that takes as input
+the available data in Y, along with the corresponding feature vectors per location in X, and returns a prediction matrix Y^ . The objective of spatial interpolation is to find a model M that minimises the mean absolute error (MAE) for all locations c in G, given the predictions in Y^ . Concretely:
+
+M  argmin
+
+|y^c - yc|
+
+(1)
+
+M cinG
+
+The problem definition for spatio-temporal interpolation follows the same prin-
+ciples as that of the spatial problem, except that it adds an additional dimension for time. Thus, G, Y and Y^ are all (n × m × d) tensors (where d is the number
+of time steps), X is a (n × m × d × f ) tensor and c corresponds to location Gr,c,t, where t is the time step of the cell.
+
+4 Methods
+In this section we will describe our proposed interpolation method in four steps. The general procedure and main philosophy will first be illustrated, after which we introduce some background for our update rules, and propose the two concrete variants of our method that we implemented. Finally, we will discuss our approach for ensuring efficient computation allowed by parallel matrix operations.
+
+4.1 General interpolation procedure
+The core of our proposed method relies on iterative element-wise updates to an estimation grid. We first instantiate Y^ , with missing values given by Y being set to arbitrary real values as initial predictions (0 in our experiments). Next, for every cell c  G, if Yc is known, we use it as a static prediction. If it is not known, we update its value using the estimated value of its neighbours {c } : c  N (c), where
+
+6
+
+Laurens Arp et al.
+
+N (c) denotes the set of neighbours to cell c. Thus, by iterating this procedure, our
+algorithm recursively propagates known values throughout chains of estimated values in Y^ , through all possible paths in the system, anchored by known values.
+
+4.2 Background: update rule
+
+Our update rule is based on Markov reward processes (MRPs). MRPs [2] are models of the form M = {S, T, R}, where S is a set of states {s1, s2, ..., s|S|}, T is an |S| × |S| matrix of transition probabilities T(s,s ) between all pairs of states s and s , and R is a set of rewards {r(s1,s1), r(s2,s2), ..., rs(|S|×|S|) } associated with being in a state s. MRPs extend Markov chains, which do not incorporate rewards R, and have been successfully used to model the behaviour of a single variable over time [3, 32]. In these temporal models, a state s represents a set of attribute values at a particular time t in a sample trajectory over time. At every t a state s can probabilistically transition from s to any of a set of successor states (given the current state) S |s = {s |s1, s |s2, ..., s |s|S|} based on transition probabilities given by T(s,s ), until an absorbing state is reached from which no further transitions are possible: |S |s| = 0. Since MRPs are Markovian, the transition probability to go from s to s are contingent solely on s, and are unaffected by the history of previous states in the trajectory. If a reward r(s) is associated with the state s, this gives information about the desirability of state s. However, aside from this immediate reward r(s), intuitively the expected future rewards E(s ) from all s  S |s should also be considered, as states leading to successor states with high future rewards would be more desirable. This leads to a notion of state values, where the rewards of all possible successor states s are used to recursively compute state values v(s) for all s  S. This is typically done by iterating the Bellman equation [2], where the immediate reward r(s,s ) is added to the discounted (using the discount parameter ) average expected values of successor states:
+
+1
+
+s : v(s) =
+
+·
+
+|S |s|
+
+r(s,s ) +  · E(s )
+
+(2)
+
+s S |s
+
+We opted to use this equation as our interpolation update rule. In the case of interpolation, a location c (at a certain time) can be seen as a state s, with the set of neighbours N (c) being analogous to the set of successor states S |s in MRPs. The state values v(s), then, would be the target variable y^c to be estimated, with immediate rewards given by known values and the discount  representing spatial autocorrelation. Using the Bellman equation as an update rule, we can define the set of spatial neighbours NS(c) as the cells c  G that share a border with c, such that our spatial interpolation algorithm takes the form of:
+
+y^c =
+
+yc,
+1
+
+|N (c)|
+
+if yc known c NS(c) y^c , otherwise
+
+(3)
+
+However, note that the spatio-temporal version of our algorithm cannot solely
+
+rely on Equation 3. Whereas the two spatial dimensions share the same scale, and
+
+can thus both use the same weight  as a spatial discount, the temporal dimen-
+
+sion may behave very differently. As a result, we need to introduce an additional
+
+parameter  for discounts representing temporal autocorrelation. This also leads
+
+Value propagation-based spatio-temporal interpolation
+
+7
+
+to the set of temporal neighbours NT (c), which represent the same location at different time steps. Thus, the spatio-temporal update rule becomes:
+
+Y^ c =
+
+Yc,
+1 |NS (c)|+|NT (c)|
+
+csNS (c) Y^ cs +
+
+if Ycknown ctNT (c)  Y^ ct , otherwise
+
+(4)
+
+4.3 Variants
+We propose two variants of our value propagation interpolation method. The first, SD-MRP (static discount-MRP), uses a single spatial weight parameter  (and temporal weight  , in the spatio-temporal case) for the entire dataset, which can be tuned using random search on subsampled data from known values. The second variant, WP-MRP (weight prediction-MRP) exploits spatial data as explanatory variables to inform its prediction of neighbour-specific weights. Unlike SD-MRP, WP-MRP would therefore not assume isotropy (the same spatial effects in all directions).
+4.3.1 Basic static discounts: SD-MRP
+The most basic variant of our proposed method stays closest to the canonical form of the Bellman equation in Equation 3. It uses a single discount parameter , ranging between 0 and 1, to represent spatial autocorrelation. This means that, for SD-MRP, values can only decrease over subsequent recursive calls, making known values reminiscent of a light source in the fog, radiating values around itself and merging with other light sources, but decaying over time. The advantage of this method is that it does not require additional features to be applied to a dataset, nor does it require a prediction model to be explicitly trained. Its main hyperparameter  does require tuning, which can be done automatically by subsampling known values and performing interpolation using randonly searched  settings. The disadvantage would be that estimated values will regress to 0 as the distance to known values increases, the spatial characteristics of the grid are not taken into account, and isotropy is assumed. SD-MRP has a time complexity of O(|Y| · k), if k is the number of times Equation 3 is iterated.
+4.3.2 WP-MRP
+In an ideal case, rather than using a single static weight , we would use a method allowing us to use location-specific weights c,c j. To this end, we created the weight prediction variant WP-MRP, in which we use the spatial feature vectors xc  X and xc  X as inputs to a weight prediction model Mw to predict an individual weight of the location pair (c, c ) as c,c = Mw(xc, xc ) from spatial data describing the locations (such as houses, shops and land use). To train this model, we define a training set of true location values Ytrain and location features Xtrain, after which we have two options for generating ground truth values: (i) optimisation and (ii) induced weights. The first option would be to run blackbox optimisation algorithms, such as evolutionary strategies, on Ytrain, using interpolation loss on a subsample of the training set as an objective function to
+
+8
+
+Laurens Arp et al.
+
+minimise, and to use the resulting approximated weight configuration  opt   
+
+as ground truth. Here   is the set of true weights (c,c ) for all (c, c ) pairs of
+
+neighbours. Every weight c,c could then be matched to the features xc  Xtrain
+
+and xc  Xtrain. The second option would be to induce the weights from the data
+
+directly. For all pairs of neighbours (c, c ) : c, c  Ytrain, we would compute the
+
+true weight using the fraction c,c
+
+=
+
+ycj yc
+
+,
+
+resulting
+
+in
+
+a
+
+ground
+
+truth
+
+vector
+
+ .
+
+While solving for weights is faster and more accurate, it may also be more prone
+
+to overfitting than optimisation. However, in both cases the directionality of the
+
+weights allows WP-MRP to be robust to anisotropy. The method for matching the elements of   to predictive features is a design
+
+choice: the location features xc and xc of every location pair (c, c ) would need to
+
+be combined, and this could be done in any manner the situation calls for, such as
+
+adding the vectors or computing a distance metric. In our experiments we opted
+
+to simply concatenate xc and xc . Thus, with   and xc, xc for all (c, c ) pairs, we can train a regression model
+Mw(x), such that, if YNtrain := {(c, c ) : (c, c  Ytrain)  (c  N (c))}:
+
+Mw
+
+
+
+argmin
+Mw
+
+1 | |
+
+·
+
+(c,c
+
+|Mw (xc
+)YN train
+
+, xc)
+
+-
+
+(c,c
+
+)|
+
+(5)
+
+Here we propose to train Mw(x) on   using any regression (machine learning) algorithm. The full pipeline of WP-MRP is outlined in Algorithm 1 (which assumes
+
+available functions for ground truth generation and model fitting; any option for
+
+either task can be used). Line 1 runs optimisation or solves for weights on a training
+
+set, and line 2 fits a weight prediction model to the optimal weights found by the
+
+supervision method of line 1. Lines 3-16 show the iterative updates of cells in Y, and lines 17-18 create and return the predictions in the form of a grid Y^ . The time
+
+complexity to run WP-MRP is the same as that of SD-MRP, but with the added
+
+cost of the model used for Mw: O(|Y| · k) + OMw , if OMw is the time complexity of making predictions with Mw.
+
+4.4 Vector-based update rule for parallel computation
+For the efficient processing the main iterative loop of lines of our algorithms as in lines 4-16 Algorithm 1, we reformulated our update function as a series of matrix operations, allowing updates to be carried out in a highly parallelised manner through vectorisation. We will illustrate the procedure on the simpler case (spatial MRP), but the approach can be generalised to spatio-temporal MRP as well. The main idea of this approach is to shuffle neighbouring values around in matrices and tensors Tyi , where the subscript y indicates this tensor contains values, and i indicates the stage of operations the data is currently in, with the accompanying neighbour weights in Ti , where  indicates this tensor contains weights. These operations are performed in order to compute weighted sums of neighbouring values for all cells in the grid as a matrix dot product in Equation 8.
+Concretely, let Y^ denote a matrix of size (n × m) containing predicted values y^c at every cell where the true value is not known, and yc otherwise. We first turn this matrix into a three-dimensional tensor Ty0 of size (n×m×d), where d denotes the maximum number of neighbours max(|N (c)|) for any cell c  G (in practice,
+
+Value propagation-based spatio-temporal interpolation
+
+9
+
+Algorithm 1: Full pipeline for WP-MRP
+
+Input: Training set matrices Xtrain and Ytrain, test set matrices Xtest and Ytest,
+
+maximum MRP iterations max iter Result: Interpolated matrix Y^
+
+1:   := supervision method(Ytrain); 2: Mw := f it model(Xtrain,  );
+3: iter := 0;
+
+4: while iter < max iter do 5: for all c  Ytest do
+
+6:
+
+if yc ==  then
+
+7:
+
+y^c := 0;
+
+8:
+
+for all c  N (c) do
+
+9:
+
+y^c := y^c + Mw(xtcest, xtcest) · y^c ;
+
+10:
+
+end for
+
+{//N (c) denotes neighbours of c}
+
+11:
+
+else
+
+12:
+
+y^c := yc;
+
+13:
+
+end if
+
+14: end for
+
+15: iter := iter + 1;
+
+16: end while 17: Y^ := y^c for c  Ytest; 18: return Y^ ;
+
+this will generally be 4 for the two-dimensional spatial case as a cell can share at most 4 edges in a grid). For all c, the entries along the d-axis of Ty0 will contain
+the values of the neighbours of c. Concretely:
+
+Tyc,0dj = y^c : c  NS (c)
+
+(6)
+
+If |N (c)| < d, the remaining values of the third dimension of Tyc0 are set to 0. We similarly construct a tensor T0 of size (h×w×d), of which the entries match those of Ty0 . However, the values of this tensor contain weights c ,c from neighbour c
+to cell c, rather than the values:
+
+Tc,0dj = c ,c : c  NS (c)
+
+(7)
+
+Next, we systematically stack all columns of Ty0 and T0 as additional rows, resulting in the new matrices Ty1 and T1 of size (h · w × d). Now every row
+represents a single location c in a single dimension, although the information on the original columns of Y is kept through the order of the rows. The columns of Ty1
+now show the values of the neighbouring values for a row's location's neighbours N (c), and the columns of T1 contain the corresponding weights. We now perform an MRP update by computing the dot product of Ty1 and the transpose of (T1 ), and placing its diagonal values into a new vector Ty2 of size (h · w):
+
+Ty2 = diag(Ty1 · (T1 ) )
+
+(8)
+
+Since this vector has the same order as the rows of Ty1 , we can reshape this vector into a matrix Ty3 of size (h × w), corresponding to the shape of Y^ . We now create another (h × w) matrix Tn, where Tnc = |N (c)|, allowing us to divide Ty3 /Tn element-wise, resulting in an updated prediction matrix Y^ :
+
+Y^
+
+=
+
+Ty3 Tn
+
+(9)
+
+10
+
+Laurens Arp et al.
+
+Finally, since this operation needlessly updated known values, we substitute original known values in Y^ : Y^ c = Yc for all c : Yc = .
+Using this vectorised approach, we found that the complexity of our algorithms
+in terms of wall-clock time improved by a factor between 10 and 100. In order to
+adapt this approach to spatio-temporal MRP interpolation, which adds an extra dimension for time, Y is of size (h × w × t), Ty0 and T0 are of size (h × w × t × d),
+and d becomes equal to 6, as any cell can now have up to 6 neighbours. Since
+all neighbours are already included in the fourth dimension, there is no reason to
+keep the spatial and temporal dimensions separate. Thus, we can still generate the 2D matrices Ty1 and T1 , as we simply add another dimension to the stacking
+operation (resulting in h · w · t rows instead of h · w). As a result, with these
+exceptions, the pipeline can remain the same as it was for the spatial case.
+
+5 Experiments
+In this section we will share the details of our experiments. We will first introduce the research questions we were interested in, after which we will list the baselines we compared our method to and the datasets used in our experiments.
+
+5.1 Research questions
+We were interested in answering the following research questions with our experiments:
+­ R1: How does our proposed value propagation interpolation method compare to baseline methods in terms of mean absolute error?
+­ R2: How does our method's running time and scalability compare to that of the baselines?
+­ R3: Can WP-MRP leverage spatial features to perform better than SD-MRP, given sufficiently informative features?
+In addition to these main research questions, we were also interested in whether the results would change depending on the amount of missing data, and whether different patterns of missing data would give different results.
+
+5.2 Baselines
+
+Our selection of baselines was aimed at including competitive interpolation and regression methods used for spatial and geo-spatial modelling in practice. The selection we made consists of:
+
+­ Ordinary Kriging (OK), using an implementation by the Python library PyKrige [26]. Like our proposed methods, ordinary Kriging predicts values using weighted sums:
+
+y^c =
+
+c ,c · yc
+
+(10)
+
+c NS (c)
+
+Here c ,c is the distance-based weight between known cell c and unknown cell c. However, OK uses yc instead of y^c , and weights are determined using a distance-based variogram model.
+
+Value propagation-based spatio-temporal interpolation
+
+11
+
+­ Universal Kriging (UK), also using PyKrige's implementation. UK is highly similar to OK, but it compensates for the possible existence of a trend in the data.
+­ Non-spatial regression, using auto-sklearn [12] 2 to select the best performing regression model (or ensemble) and hyperparameter settings out of a large collection of algorithms, including linear regression, support vector regression, gradient boosted methods and others. As such, the general form of the predictions from non-spatial regression is:
+
+y^c = F (xc)
+
+(11)
+
+, where F represents the regression algorithm used by auto-sklearn. We allowed auto-sklearn 150 seconds per run to find the best performing ensemble. Spatial autoregressive (SAR) models, using auto-sklearn to find the best performing regression model. Canonically, SAR is an ordinary least squares (OLS)-based spatial linear regression method with a spatial term based on a spatial weight matrix M and a known value vector y. However, since we use auto-sklearn, though this includes OLS linear regression, the general form of SAR is:
+
+y^c = F (xc, y)
+
+(12)
+
+­ Moving average (MA) models, using the "MA by AR" approach [16]. As in
+
+the case of SAR, this method canonically is of OLS form, using the prediction
+
+error vector instead of y:
+
+y^c = F (xc, )
+
+(13)
+
+Following the "MA by AR" approach, before we can use Equation 15, we first needed to determine using:
+
+c = yc - Fs(xc)
+
+(14)
+
+Here Fs represents a separate standard regression model, as in Equation 11, to compute prediction errors on all known values. These errors can then be used by Equation 15 by putting all c into a single vector . ­ Autoregressive moving average (ARMA) models, again using the "MA by AR" approach [16] for the MA component. As ARMA is a combination of SAR and MA, its general form is:
+
+y^c = F (xc, y, )
+
+(15)
+
+Here is obtained using Equation 14. ­ Convolutional neural networks (CNN), optimised using automated neural
+architecture search (NAS), used for regression predicting y^c from xc and xc for all c  NS(c), where NS(c) is determined by the convolutional filters of the network, similar to CNN approaches used in computer vision [9, 34]. We used NAS implemented by auto-keras [22] for all training sets (50 trials, 1000 epochs). Although the model architectures for CNNs can be quite complex, on an abstract level these networks are still regression models of the same form as Equation 11.
+2 auto-sklearn is an automated machine learning (AutoML) package that allows automatic algorithm selection and hyperparameter optimisation ensuring that a high-performing model is selected on given dataset
+
+12
+
+Laurens Arp et al.
+
+5.3 Datasets
+Our experiments involved two synthetic datasets (spatial and spatio-temporal), as well as two real-world datasets (GDP and COVID-19 trajectories). The implementation of our data generation algorithms used to create the experimental synthetic datasets is included in our public code repository; likewise, the real-world datasets are available for public use at their respective sources, allowing others to reproduce our results.
+
+5.3.1 Synthetic data
+
+Spatial targets. For this synthetic dataset, based on a parameterised mean µ
+
+and standard deviation , the interpolation grid Y of user-specified size (n × m) was generated, where each cell c was assigned a base value ycb by sampling from the normal distribution N (µ, ). Next, to assign true values y affected by spatial
+
+interaction, we updated every cell c as a weighted average (based on a spatial autocorrelation parameter as) of its own value and the mean of its neighbouring
+
+values:
+
+yc
+
+=
+
+(1
+
+-
+
+as)
+
+·
+
+ycb
+
++
+
+as
+
+·
+
+1 |NS (c)|
+
+·
+
+ycb
+cNS (c)
+
+(16)
+
+Spatio-temporal targets. To generate spatio-temporal synthetic data, we introduced additional parameters for the number of timesteps d and the temporal autocorrelation coefficient at. We then built a three dimensional tensor Y of size (n × m × d) by using Equations 16 and 18 at every time step. Using the temporal neighbourhood function NT (c), we can perform a final update on the cells of Y to ensure temporal interaction:
+
+yc
+
+=
+
+(1
+
+-
+
+at)
+
+·
+
+ycb
+
++
+
+at
+
+·
+
+1 |NT (c)|
+
+·
+
+ycb
+cNT (c)
+
+(17)
+
+Synthetic features. For our synthetic data, we created a feature vector x = (xbc1 , xbc2 , ..., xc|xb| ) for every location c  Ysynth. Every base feature xbci  xbc was generated using a uniform distribution U(min, max) with user-specified min and
+max values. These features were then updated in a similar manner to the cell
+values y, using a parameter called the feature correlation coefficient f :
+
+xck = (1 - f ) · xbck + f · yc
+
+(18)
+
+5.3.2 Real-world data
+
+Gross domestic product (GDP) targets. For GDP data, we used a gridded spatial dataset containing world-wide GDP estimates sourced from World Bank [8]. We specifically considered two target cities: Daegu in South Korea, and Taipei in Taiwan. As training data, we used either subsampled data from the same city, a city in the same country (Seoul for Daegu, Taichung for Taipei), or a city in a different country (Taichung for Daegu, Seoul for Taipei). A visualisation of this data can be found in Figures 2a and 2b.
+Aggregated COVID-19 trajectory targets. This dataset consisted of trajectories of confirmed COVID-19 patients prior to their diagnosis in South Korea
+
+Value propagation-based spatio-temporal interpolation
+
+13
+
+0 5 10 15 20 25
+
+0
+
+10
+
+20
+
+30
+
+40
+
+(a) GDP Taipei 0
+
+10
+
+20
+
+30
+
+40
+
+0 10 20 30 40 (c) COVID-19 Daegu
+
+1e6 1.0 0.8 0.6 0.4 0.2 0.0
+14 12 10 8 6 4 2 0
+
+0 5 10 15 20 25
+0
+0
+
+10
+
+20
+
+30
+
+40
+
+(b) GDP Seoul
+
+10
+
+20
+
+30
+
+40
+
+0 10 20 30 40 (d) COVID-19 Seoul
+
+1e6 1.0 0.8 0.6 0.4 0.2 0.0
+14 12 10 8 6 4 2 0
+
+Fig. 2: Visualisation of the GDP data in Taipei (a) and Seoul (b), and the COVID19 dataset in Daegu (c) and Seoul (d). Due to the heavily localised large infection clusters, for the visualisation in (c) and (d) we limited the data to a range of [0, 15] (all values > 15 were set to 15) for greater visibility (the experiments used the raw values instead).
+
+[7]. Although this data was spatio-temporal in principle, we opted to aggregate over time both due to the relative sparsity of the data (gathered at the start of the COVID-19 pandemic), and to alleviate potential privacy-related concerns in this relatively sensitive dataset. Thus, every c  G had a value corresponding to the total number of visits by people infected with COVID-19 over the entire time period. A visualisation of this data can be found in Figures 2c and 2d.
+Map-based features. To generate features for GDP and COVID-19 trajectories in South Korea and Taiwan, we aggregated a selection of vector and point map data sourced from OpenStreetMap [28]. For all c  G, every element in xc represented the count of all objects in the map data corresponding to a certain type, such as apartments, houses and shops. There are various design choices available for preprocessing this type of data, such as dealing with objects without annotated type (drop or replace), feature selection (none, manually created high-level taxonomy, or keeping the most frequent types) and feature normalisation (none, unit length scaling, mean normalisation or Z-score normalisation). In accordance with the design philosophy of programming by optimisation (PbO) [19], we did not commit to any of these choices, and instead used SMAC [20] (a commonly used Bayesian optimisation-based automated algorithm configurator), version 0.12.0 of SMAC3, to select the best possible feature construction pipeline per method (time budget 24 hours per algorithm per condition).
+
+14
+
+Laurens Arp et al.
+
+5.4 Experimental setup
+The following section will explain the procedures and experimental conditions necessary to carry out our experiments.
+
+5.4.1 Missing data procedures.
+
+In order to evaluate our methods, we required data that was fully available to compute error metrics, while also having access to grids with missing data. To this end, we introduced two methods for `hiding' known values, resulting in different patterns of missing data.
+Random missing values. This missing value approach was straightforward. Given a proportion of known values p, for all other cells there is a probability of being randomly obscured if a number z = U(0, 1) sampled from a uniform distribution between 0 and 1 is smaller than p. That is, for every cell c  G:
+
+yc =
+
+yc, ,
+
+if z < p otherwise
+
+(19)
+
+Spatially clustered hidden values. Much like the spatial data itself, the missing data points in a grid may not be independent, and instead subject to spatial autocorrelation themselves. For example, some locations may have missing data due to natural barriers making measurements difficult, or due to local phenomena such as clouds obscuring parts of the measurements. In this missing value approach, we were inspired by optical satellite data, where clouds are the biggest source of missing data in the field. This approach is also why algorithms like Gapfill could not be considered for our experiments, as it requires a part of the data in a neighbourhood to be available. Our method for creating clusters of missing data was based on random walks. Given a number of points k, a number of walks w and the number of steps per walk r, the algorithm creating artificial clusters is outlined in Algorithm 2.
+
+5.4.2 Experimental conditions and setup.
+The general form of our experiments was to run 9 algorithms (SD-MRP, WPMRP and 7 baselines) 15 times on each condition (44 in total, as detailed below), including both synthetic data and real-world datasets and addressing the research questions from Section 5.1.
+For spatial synthetic data we set the size of the grid to n = 100 and m = 100, and for spatio-temporal synthetic data we set the size to n = 50, m = 50 and the number of timesteps d = 5. Using different settings for f in Equation 18 allowed us to gauge the effectiveness of WP-MRP relative to SD-MRP as a function of the correlation between the features and true values of locations, and varying n and m allowed us to see how well all methods scaled to larger datasets. Thus, in addition to the general performance results, we used the synthetic data to gauge how different methods scaled to larger datasets, to compare SD-MRP and WP-MRP for different degrees of autocorrelation, as well as to explore the effects of spatially clustered missing data (using Algorithm 2) as opposed to randomly distributed missing data. For the scalability analysis we set n = m, with n ranging
+
+Value propagation-based spatio-temporal interpolation
+
+15
+
+Algorithm 2: Spatially clustered missing values
+
+Input: Location grid G, true grid Y = (n, m), number of points k, number of walks w,
+
+number of steps per walk r Result: Interpolation grid with missing values Y
+
+1: Y = zeros(n, m)
+
+2: num points = 0 3: while num points < k do 4: i = U (0, n) 5: j = U (0, m)
+
+6: c = Gi,j 7: num walks = 0
+
+8: while num walks < w do
+
+9:
+
+num steps = 0
+
+10:
+
+while num steps < r do
+
+11:
+
+Yc = 
+
+12:
+
+c = random selection(N (c))
+
+13:
+
+num steps = num steps + 1
+
+14:
+
+end while
+
+15:
+
+num walks = num walks + 1
+
+16: end while
+
+17: num points = num points + 1
+
+18: end while
+
+from 20 to 200 in steps of 20. The spatially clustered missing data was generated
+
+using
+
+k
+
+=5
+
+centre
+
+points,
+
+r
+
+=
+
+n+m 2
+
+steps
+
+per
+
+walk,
+
+and
+
+w
+
+=
+
+r 2
+
+walks.
+
+Conversely, we used the real-world datasets to gauge how effectively the inter-
+
+polation methods could be trained on one geographical region and then applied
+
+to another, as well as to see the effect of the proportion of hidden values p on the
+
+performance of different methods. For these real-world datasets, we used the GDP
+
+and COVID-19 datasets, using a p of 0.1, 0.3, 0.5, 0.7 and 0.9. We used Seoul and
+
+Taichung as target cities, with models trained on either the cities themselves, cities
+
+in the same country (Daegu for Seoul, Taipei for Taichung), or cities in another
+
+country (Taipei for Seoul, Daegu for Taichung). To see the effect of p, we summed
+
+the average errors for all settings of p, and computed the proportion each p setting
+
+contributed to this amount, allowing us to visualise the importance of p in Figure
+
+4.
+
+In total, this resulted in 4 synthetic and 6 real-world base conditions, with the real-world conditions further split into 40 total conditions when taking different p settings into account. At every condition, all algorithms were run 15 times, and used automated algorithm configuration (for the feature preprocessing pipeline explained in Section 5.3.2), automated machine learning (methods using auto-sklearn, automating the selection of machine learning algorithms and their hyperparameters, as explained in Section 5.2), NAS (in the case of CNN, automating the neural network architecture explained in Section 5.2) and random search (in the case of SD-MRP's , explained in Section 4.3.1). We also ran additional experiments on the synthetic data runs for an analysis of scalability and to compare SD-MRP and WP-MRP in more detail.
+
+All experiments were run on a computing cluster consisting of 26 homogeneous nodes containing 94 MBs of memory and using Intel Xeon E5-2683 v4 CPUs running at 2.10GHz.
+
+16
+
+Laurens Arp et al.
+
+(a) Ground truth
+
+(b) Random
+
+(c) Spatially clustered
+
+(d) SD-MRP random
+
+(e) SD-MRP clustered
+
+(f) WP-MRP random
+
+(g) WP-MRP clustered
+
+(h) OK random
+
+(i) OK clustered
+
+(j) Non-spatial random
+
+(k) Non-spatial clustered
+
+(l) ARMA random
+
+(m) ARMA clustered
+
+(n) CNN random
+
+(o) CNN clustered
+
+Fig. 3: Example of synthetically generated spatial data (a), with random (b) and spatially clustered (c) missing data, where white pixels represent missing values in the data. Reconstructed images by SD-MRP (d,e), WP-MRP (f,g), ordinary Kriging (h,i), non-spatial regression (j,k), ARMA (l,m) and CNN (n,o) are shown in the middle and bottom rows of the figure. The results for universal Kriging and SAR and MA were highly similar to those of ordinary Kriging and ARMA, respectively, and are not shown here.
+
+Value propagation-based spatio-temporal interpolation
+
+17
+
+Algorithm
+
+ARMA Basic regression
+CNN MA Ordinary Kriging SAR SD-MRP Universal Kriging WP-MRP
+0.0
+
+Loss per proportion of hidden values
+
+0.1 0.3 0.5 0.7 0.9
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+Fig. 4: Fraction of the total error for all proportions of hidden values p on realworld data, per algorithm, aggregated for all real-world conditions. If one setting of p has a higher MSE than the others for an algorithm, its respective bar segment would be larger than the others; if MSE is the same for all p, all bar segments would have a length of 0.2.
+
+6 Results
+A visual example of hidden synthetic data (n = m = 50) is shown in Figure 3, with a visual comparison between its reconstruction by the different methods. The reconstructed images caution against relying too much on mean absolute error, as all methods (apart from CNN) were able to reach a similar mean absolute error as WP-MRP (around 1.8 for random, 1.0 for clustered). However, our methods (and WP-MRP in particular) appear to capture the spatial characteristics of the original image better than OK (which seemingly simply predicts the average value), non-spatial regression (which is noisy), and ARMA (which blurs quickly). The images for CNN also showcase a pattern from the other results, where occasional runs would have far higher errors than all other methods (the errors for CNNs in this particular run were 528 and 14859, orders of magnitude higher than other methods). This implies that there may be a large risk of overfitting for the neural networks, or that the models may be too complex for the limited amount of data available.
+Additionally, as shown in Figure 4 we saw no big effect from the proportion of hidden values p on the real-world datasets, implying that results for a specific p would likely carry over to other settings as well. Therefore, there is no need to study each setting separately in our other experiments, allowing us to keep p at a fixed level. The effects of the type of missing data were likewise unsubstantial, although our methods appeared to be more sensitive to it than the baselines (see Figure 3). This may also be caused by baseline methods simply predicting average or noisy values, regardless of how many known values are available, whereas our methods capture more of the spatial structure.
+
+18
+Critical difference - real-world data
+CD 123456789
+
+Laurens Arp et al.
+Critical difference - synthetic data
+CD 123456789
+
+SD-MRP WP-MRP
+CNN Ordinary Kriging Non-spatial regression
+
+MA ARMA SAR Universal Kriging
+
+ARMA SAR MA
+Non-spatial regression Ordinary Kriging
+
+SD-MRP CNN Universal Kriging WP-MRP
+
+(a) Real-world datasets
+Critical difference - all conditions
+CD
+123456789
+
+(b) Synthetic datasets
+
+SD-MRP WP-MRP Ordinary Kriging
+CNN Non-spatial regression
+
+MA ARMA Universal Kriging SAR
+
+(c) All datasets
+Fig. 5: Critical difference diagrams for the ranking of methods on 40 real-world data conditions (a), 4 synthetic data conditions (b), and all 44 conditions (c). The average ranking of the algorithms is shown on the numbered line (where lower rank shows higher performance), and a thick bar indicates that the performance differences are not statistically significant ( = 0.05) based on Nemenyi two-tailed testing [27].
+
+6.1 How does our proposed value propagation interpolation method compare to baseline methods in terms of mean absolute error?
+The overall ranking of the algorithms, aggregated over the 4 synthetic, the 40 realworld, or all 44 total conditions, can be found in the critical difference diagram in Figure 5 to address R1. Since our results cover multiple datasets, the mean absolute errors cannot be compared directly. A critical difference diagram allows us to work with, and compactly show, the average ranks of algorithms instead, and establishes statistical significance using a post-hoc Nemenyi test [27]. As Figure 5c shows, although SD-MRP and WP-MRP rank higher than other methods overall, the difference is not sufficient to be statistically significant compared to ordinary Kriging and CNNs. However, as we will show in Section 6.2, both methods scale better than GPs and CNNs, and Figure 5a shows that the higher ranking is statistically significant for the real-world datasets, whereas almost no statistical significance can be established for the synthetic data in Figure 5b.
+To answer R1, these results show that, in terms of mean absolute error, our methods perform well compared to baselines on real-world datasets, but the results
+
+Value propagation-based spatio-temporal interpolation
+
+19
+
+Runtime in seconds (log scale) Runtime in seconds (log scale)
+
+104 103 102 101 100 10 1
+0
+
+Runtime on spatial synthetic data, random
+Ordinary Kriging Universal Kriging Non-spatial regression SAR MA ARMA CNN SD-MRP WP-MRP
+5000 10000 15000 20000 25000 30000 35000 40000 Grid size (n*m)
+
+(a) Random missing data
+
+105 Runtime on spatial synthetic data, spatially clustered
+
+104
+
+103
+
+102 101 100
+0
+
+Ordinary Kriging Universal Kriging Non-spatial regression SAR MA ARMA CNN SD-MRP WP-MRP
+5000 10000 15000 20000 25000 30000 35000 40000 Grid size (n*m)
+
+(b) Spatially clustered missing data
+
+Fig. 6: running time in seconds of different methods as a function of grid size on synthetic spatial data. The results for ordinary- and universal Kriging were cut off for missing blobs due to prohibitively long running times for UK (over 13 hours for grids of 120 × 120, after which the algorithm failed to complete a run), and out-of-memory issues on large datasets for OK (crashed runs at a memory usage of over 20GB).
+
+on synthetic data are inconclusive. As a result, the overall results likewise have a high degree of uncertainty.
+
+6.2 How does our method's running time and scalability compare to that of the baselines?
+Addressing R2, we ran a scalability analysis by running every algorithm once on synthetic data for grid sizes ranging from 20 to 200 (height and width) in steps of 20. The results of these experiments, based on the total running time of methods (including training, if any, but excluding NAS, SMAC and other algorithm configuration as they are optional) can be seen in Figures 6a (random) and 6b (spatially clustered). The figures show that SD-MRP, while faster than CNNs, does not scale well to larger datasets, and that WP-MRP scales similarly in comparison with non-spatial regression, SAR, MA and ARMA. This tells us that the iterative MRP-derived update rule likely does not account for a large portion of the running time; instead, it appears that the auto-sklearn training procedure, much like in the case of non-spatial regression and SAR, MA and ARMA is the main bottleneck for WP-MRP. The reason, then, for SD-MRP to scale poorly, would be the random search-based subsampling procedure used to find an optimal static discount  explained in Section 5.4.2.
+We can also see in both figures that universal Kriging scales very poorly to larger datasets; in fact, its running times were prohibitively long (exceeding 13 hours on the largest sized successful run of 120 × 120), leading to us treating those large-sized runs as time-outs. Similarly, while ordinary Kriging had the best running time out of all methods in Figure 6a, it scales nearly exponentially, and would likely overtake other methods for grid sizes larger than 200 × 200. For spatially clustered missing values, this crossover point is already reached at 100 × 100. Moreover, this experiment showed another weakness of GPs, namely their
+
+20
+
+Laurens Arp et al.
+
+MAE
+
+8
+
+WP-MRP performance per correlation coefficient
+SD-MRP
+
+7
+
+WP-MRP
+
+6
+
+5
+
+4
+
+3
+
+2
+
+1
+
+0 0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+Correlation between features and true values
+
+Fig. 7: SD-MRP and WP-MRP performance on synthetic data for various settings of f . All datapoints were computed using the median and standard deviation of 30 runs per setting (SD-MRP is unaffected by features, and therefore constant). The extreme error bars at f = 0.55 and f = 0.95 also show the effect of non-converging prediction model training for WP-MRP.
+
+high memory usage. Figure 6b is missing a number of runs for ordinary Kriging due to out-of-memory issues, terminating its runs after exceeding a RAM usage of over 20GB. Newer GP methods, like local approximation GPs [15], may scale better in terms of running time and memory usage by using local approximations, although this may come at the expense of a decreased ability to capture global information.
+In conclusion for R2, our methods scale better than ordinary Kriging to larger datasets, on par with non-spatial regression, SAR, MA, and ARMA. While ordinary Kriging has a lower running time for small datasets than our methods, it has a large memory requirement that does not allow it to scale to larger datasets. Generally, our methods use substantially less memory than ordinary Kriging and universal Kriging.
+
+6.3 Can WP-MRP leverage spatial features to perform better than SD-MRP, given sufficiently informative features?
+To address R3, we ran an additional experiment on synthetic data with settings of the feature correlation coefficient f in Equation 18 ranging between 0.05 and 1.0 in steps of 0.05. Figure 7 compares the performance of the two methods based on MAE as a function of feature correlations. The figure shows the error distribution acquired from 30 number of runs. As expected, Figure 7 shows that WP-MRP performs better than SD-MRP for high values of f , and conversely SD-MRP appears more successful for low feature-target correlations. However, there appear to be diminishing returns for higher f after 0.4, and already at a correlation of 0.1 WP-MRP performed better than SD-MRP on the synthetic data.
+
+Value propagation-based spatio-temporal interpolation
+
+21
+
+In conclusion for R3, this experiment shows that WP-MRP leverages spatial features to perform better than SD-MRP in situations where the features are sufficiently informative.
+
+7 Conclusion and discussion
+In this work we have proposed a value propagation-based method for spatial and spatio-temporal interpolation, with the aim of establishing a system-oriented perspective. To this end, we introduced two variants of our interpolation method (SD-MRP and WP-MRP), the latter of which exploits spatial features describing the characteristics of the grid. In our experiments, our new approach was found to perform significantly better than baseline methods averaged over 40 conditions of real-world datasets. On synthetic data our methods did not significantly improve on baseline methods in terms of mean absolute error. However, a visual inspection of the interpolation results shows that baseline methods such as ordinary Kriging and ARMA acquire a lower error only by predicting an average value on all cells. Our method, however, can retain some of the spatial auto-correlations that resemble that of the actual image. Potentially, this could be the reason that in more realistic scenarios based on real data our method performs better than these baselines.
+In future work, it would be interesting to focus on exploring the performance of our methods on other datasets, particularly when using other sets of features not derived from OSM and real-world spatio-temporal target data. Moreover, a comparison with modern GP-based interpolation methods could be considered, which could alleviate the scalability issues of GPs, but may come at the cost of lower accuracy. Finally, the temporal aspect of spatio-temporal interpolation could be studied further, in particular with regard to data fusion approaches.
+
+8 Declarations
+Funding: Not applicable. Conflicts of interest/Competing interests: The authors declare that they have no conflict of interest. Availability of data and material: All real-world data used is publicly available, and the synthetic data generation code is included in the project's code repository. Code availability: The code used for the experiments is publicly available at https://github.com/LaurensArp/VPInt.
+
+References
+1. Anselin L (1988) Spatial econometrics: methods and models (vol. 4). Studies in Operational Regional Science Dordrecht: Springer Netherlands
+2. Bellman R (1957) A markovian decision process. Journal of mathematics and mechanics pp 679­684
+
+22
+
+Laurens Arp et al.
+
+3. Bianchi F, Presti FL (2016) A markov reward model based greedy heuristic for the virtual network embedding problem. In: 2016 IEEE 24th International Symposium on Modeling, Analysis and Simulation of Computer and Telecommunication Systems (MASCOTS), IEEE, pp 373­378
+4. Bouhlel MA, Martins JR (2019) Gradient-enhanced kriging for highdimensional problems. Engineering with Computers 35(1):157­173
+5. Carrasco L, O'Neil AW, Morton RD, Rowland CS (2019) Evaluating combinations of temporally aggregated sentinel-1, sentinel-2 and landsat 8 for land cover mapping with google earth engine. Remote Sensing 11(3):288
+6. Cressie N (2015) Statistics for spatial data. John Wiley & Sons 7. DACON (2020) Corona Data Visualization AI Contest. https://www.dacon.
+io/competitions/official/235590/data/, accessed: 02-05-2021 8. DECRG WB (2010) GIS processing. https://datacatalog.
+worldbank.org/dataset/gross-domestic-product-2010/resource/ addfd173-a15f-4cee-8f07-0ad76ae389b0, accessed: 02-05-2021 9. Dong C, Loy CC, He K, Tang X (2015) Image super-resolution using deep convolutional networks. IEEE transactions on pattern analysis and machine intelligence 38(2):295­307 10. Durbin J (1959) Efficient estimation of parameters in moving-average models. Biometrika 46(3/4):306­316 11. Fang H, Baret F, Plummer S, Schaepman-Strub G (2019) An overview of global leaf area index (lai): Methods, products, validation, and applications. Reviews of Geophysics 57(3):739­799 12. Feurer M, Klein A, Eggensperger K, Springenberg JT, Blum M, Hutter F (2019) Auto-sklearn: efficient and robust automated machine learning. In: Automated Machine Learning, Springer, Cham, pp 113­134 13. Fix MJ, Cooley DS, Thibaud E (2021) Simultaneous autoregressive models for spatial extremes. Environmetrics 32(2):e2656 14. Gerber F, de Jong R, Schaepman ME, Schaepman-Strub G, Furrer R (2018) Predicting missing values in spatio-temporal remote sensing data. IEEE Transactions on Geoscience and Remote Sensing 56(5):2841­2853 15. Gramacy RB, Apley DW (2015) Local gaussian process approximation for large computer experiments. Journal of Computational and Graphical Statistics 24(2):561­578 16. Haining R (1978) The moving average model for spatial interaction. Transactions of the Institute of British Geographers pp 202­225 17. Hashimoto R, Suto K (2020) Sicnn: Spatial interpolation with convolutional neural networks for radio environment mapping. In: 2020 International Conference on Artificial Intelligence in Information and Communication (ICAIIC), IEEE, pp 167­170 18. Heaton MJ, Datta A, Finley AO, Furrer R, Guinness J, Guhaniyogi R, Gerber F, Gramacy RB, Hammerling D, Katzfuss M, et al. (2019) A case study competition among methods for analyzing large spatial data. Journal of Agricultural, Biological and Environmental Statistics 24(3):398­425 19. Hoos HH (2012) Programming by optimization. Communications of the ACM 55(2):70­80 20. Hutter F, Hoos HH, Leyton-Brown K (2011) Sequential model-based optimization for general algorithm configuration. In: International conference on learning and intelligent optimization, Springer, pp 507­523
+
+Value propagation-based spatio-temporal interpolation
+
+23
+
+21. Jiang Z (2018) A survey on spatial prediction methods. IEEE Transactions on Knowledge and Data Engineering 31(9):1645­1664
+22. Jin H, Song Q, Hu X (2019) Auto-keras: An efficient neural architecture search system. In: Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pp 1946­1956
+23. Katzfuss M (2017) A multi-resolution approximation for massive spatial datasets. Journal of the American Statistical Association 112(517):201­214
+24. Krige DG (1951) A statistical approach to some basic mine valuation problems on the witwatersrand. Journal of the Southern African Institute of Mining and Metallurgy 52(6):119­139
+25. Montero JM, Ferna´ndez-Avil´es G, Mateu J (2015) Spatial and spatio-temporal geostatistical modeling and kriging. John Wiley & Sons
+26. Murphy BS (2020) pykrige. https://pypi.org/project/PyKrige/, accessed: 31-09-2020
+27. Nemenyi P (1963) Distribution-free Multiple Comparisons 28. OpenStreetMap (2019) OpenStreetMap. https://www.openstreetmap.org/,
+accessed: 27-12-2019 29. Qiu J, Wang H, Zhang T, Yang C (2020) Spatial transmission network con-
+struction of influenza-like illness using dynamic bayesian network and vectorautoregressive moving average model 30. Rue H, Riebler A, Sørbye SH, Illian JB, Simpson DP, Lindgren FK (2017) Bayesian computing with inla: a review. Annual Review of Statistics and Its Application 4:395­421 31. Sato K, Inage K, Fujii T (2019) On the performance of neural network residual kriging in radio environment mapping. IEEE Access 7:94557­94568 32. Sato N, Trivedi KS (2007) Accurate and efficient stochastic reliability analysis of composite services using their compact markov reward model representations. In: IEEE International Conference on Services Computing (SCC 2007), IEEE, pp 114­121 33. Schabenberger O, Gotway CA (2017) Statistical methods for spatial data analysis. CRC press 34. Shi W, Caballero J, Husza´r F, Totz J, Aitken AP, Bishop R, Rueckert D, Wang Z (2016) Real-time single image and video super-resolution using an efficient sub-pixel convolutional neural network. In: Proceedings of the IEEE conference on computer vision and pattern recognition, pp 1874­1883 35. Tabios III GQ, Salas JD (1985) A comparative analysis of techniques for spatial interpolation of precipitation 1. JAWRA Journal of the American Water Resources Association 21(3):365­380 36. Wu Y, Zhuang D, Labbe A, Sun L (2020) Inductive graph neural networks for spatiotemporal kriging. arXiv preprint arXiv:200607527 37. Yang K, Lee Lf (2017) Identification and qml estimation of multivariate and simultaneous equations spatial autoregressive models. Journal of Econometrics 196(1):196­214
+
+

@@ -1,0 +1,1693 @@
+Large-Scale Wasserstein Gradient Flows
+
+arXiv:2106.00736v1 [cs.LG] 1 Jun 2021
+
+Petr Mokrov Skolkovo Institute of Science and Technology Moscow Institute of Physics and Technology
+Moscow, Russia petr.mokrov@skoltech.ru
+
+Alexander Korotin* Skolkovo Institute of Science and Technology
+Moscow, Russia a.korotin@skoltech.ru
+
+Lingxiao Li Massachusetts Institute of Technology
+Cambridge, Massachusetts, USA lingxiao@mit.edu
+
+Aude Genevay Massachusetts Institute of Technology
+Cambridge, Massachusetts, USA aude.genevay@gmail.com
+
+Justin Solomon Massachusetts Institute of Technology
+Cambridge, Massachusetts, USA jsolomon@mit.edu
+
+Evgeny Burnaev Skolkovo Institute of Science and Technology
+Moscow, Russia e.burnaev@skoltech.ru
+
+Abstract
+Wasserstein gradient flows provide a powerful means of understanding and solving many diffusion equations. Specifically, Fokker-Planck equations, which model the diffusion of probability measures, can be understood as gradient descent over entropy functionals in Wasserstein space. This equivalence, introduced by Jordan, Kinderlehrer and Otto, inspired the so-called JKO scheme to approximate these diffusion processes via an implicit discretization of the gradient flow in Wasserstein space. Solving the optimization problem associated to each JKO step, however, presents serious computational challenges. We introduce a scalable method to approximate Wasserstein gradient flows, targeted to machine learning applications. Our approach relies on input-convex neural networks (ICNNs) to discretize the JKO steps, which can be optimized by stochastic gradient descent. Unlike previous work, our method does not require domain discretization or particle simulation. As a result, we can sample from the measure at each time step of the diffusion and compute its probability density. We demonstrate our algorithm's performance by computing diffusions following the Fokker-Planck equation and apply it to unnormalized density sampling as well as nonlinear filtering.
+1 Introduction
+Stochastic differential equations (SDEs) are used to model the evolution of random diffusion processes across time, with applications in physics [58], finance [19, 48], and population dynamics [31]. In machine learning, diffusion processes also arise in applications filtering [30, 18] and unnormalized posterior sampling via a discretization of the Langevin diffusion [65].
+The time-evolving probability density t of these diffusion processes is governed by the FokkerPlanck equation. Jordan, Kinderlehrer, and Otto [28] showed that the Fokker-Planck equation is equivalent to following the gradient flow of an entropy functional in Wasserstein space, i.e., the space
+Equal contribution.
+Preprint.
+
+of probability measures with finite second order moment endowed with the Wasserstein distance. This inspired a simple minimization scheme called JKO scheme, which consists an implicit Euler discretization of the Wasserstein gradient flow. However, each step of the JKO scheme is costly as it requires solving a minimization problem involving the Wasserstein distance.
+
+One way to compute the diffusion is to use a fixed discretization of the domain and apply standard numerical integration methods [15, 45, 13, 14, 36] to get t. For example, [46] proposes a method to approximate the diffusion based on JKO stepping and entropy-regularized optimal transport. However, these methods are limited to small dimensions since the discretization of space grows exponentially.
+
+An alternative to domain discretization is particle simulation. It involves drawing random samples (particles) from the initial distribution and simulating their evolution via standard methods such as Euler-Maruyama scheme [32, 9.2]. After convergence, the particles are approximately distributed according to the stationary distribution, but no density estimate is readily available.
+
+Another way to avoid discretization is to parameterize the density of t. Most methods approximate only the first and second moments t, e.g., via Gaussian approximation. Kalman filtering approaches can then compute the dynamics [30, 35, 29, 56]. More advanced Gaussian mixture approximations [60, 1] or more general parametric families have also been studied [59, 64]. In [44], variational methods are used to minimize the divergence between the predictive and the true density.
+
+Recently, [21] introduced a parametric method to compute JKO steps via entropy-regularized optimal transport. The authors regularize the Wasserstein distance in the JKO step to ensure strict convexity and solve the unconstrained dual problem via stochastic program on a finite linear subset of basis functions. The method yields unnormalized probability density without direct sample access.
+
+Recent works propose scalable continuous optimal transport solvers, parametrizing the solutions by
+reproducing kernels [9], fully-connected neural networks [57], or Input Convex Neural Networks
+(ICNNs) [33, 40, 34]. In particular, ICNNs gained attention for Wasserstein-2 transport since their gradients  : RD  RD can represent OT maps for the quadratic cost. These continuous solvers scale better to high dimension without discretizing the input measures, but they are too
+computationally expensive to be applied directly to JKO steps.
+
+Contributions. We propose a scalable parametric method to approximate Wasserstein gradient
+
+flows via JKO stepping using input-convex neural networks (ICNNs) [5]. Specifically, we leverage
+
+Brenier's theorem to bypass the costly computation of the Wasserstein distance, and parametrize the
+
+optimal transport map as the gradient of an ICNN. Given sample access to the initial measure 0,
+
+we use stochastic gradient descent (SGD) to sequentially learn time-discretized JKO dynamics of t.
+
+The
+
+trained
+
+model
+
+can
+
+sample
+
+from
+
+a
+
+continuous
+
+approximation
+
+of
+
+t
+
+and
+
+compute
+
+its
+
+density
+
+dt dx
+
+(x).
+
+We compute gradient flows for the Fokker-Planck free energy functional FFP given by (5), but our
+
+method generalizes to other cases. We demonstrate performance by computing diffusion following
+
+the Fokker-Planck equation and applying it to unnormalized density sampling as well as nonlinear
+
+filtering.
+
+Notation. P2(RD) denotes the set of Borel probability measures on RD with finite second moment.
+
+P2,ac(RD) denotes its subset of probability measures absolutely continuous with respect to Lebesgue
+
+measure.
+
+For
+
+
+
+
+
+P2,ac (RD ),
+
+we
+
+denote
+
+by
+
+d dx
+
+(x)
+
+its
+
+density
+
+with
+
+respect
+
+to
+
+the
+
+Lebesgue
+
+measure.
+
+(µ, ) denotes the set of probability measures on RD × RD with marginals µ and . For measurable
+
+T : RD  RD, we denote by T the associated push-forward operator between measures.
+
+2 Background on Wasserstein Gradient Flows
+
+We consider gradient flows in Wasserstein space (P2(RD), W2), the space of probability measures with finite second moment on RD endowed with the Wasserstein-2 metric W2.
+
+Wasserstein-2 distance. The (squared) Wasserstein-2 metric W2 between µ,   P2(RD) is
+
+W22(µ, ) d=ef min
+
+x-y
+
+2 2
+
+d(x,
+
+y),
+
+(1)
+
+(µ,) RD ×RD
+
+where the minimum is over measures  on RD × RD with marginals µ and  respectively [63].
+
+For µ  P2,ac(RD), there exists a µ-unique map  : RD  RD that is the gradient of a convex function  : RD  R {} satisfying  µ =  [42]. From Brenier's theorem [12], it follows
+
+2
+
+that  = [idRD , ] µ is the unique minimizer of (1), i.e.,
+
+W22(µ, ) =
+
+x - (x)
+
+2 2
+
+dµ(x).
+
+RD
+
+Wasserstein Gradient Flows. In the Euclidean case, gradient flows along a function f : R  R
+
+follow the steepest descent direction and are defined through the ODE
+
+dxt dt
+
+=
+
+-f (xt).
+
+Discretiza-
+
+tion of this flow leads to the gradient descent minimization algorithm. When functionals are defined
+
+over the space of measures equipped with the Wasserstein-2 metric, the equivalent flow is called the
+
+Wasserstein gradient flow. The idea is similar: the flow follows the steepest descent direction, but this
+
+time the notion of gradient is more complex. We refer the reader to [3] for exposition of gradient
+
+flows in metric spaces, or [54, Chapter 8] for an accessible introduction.
+
+A curve of measures {t}tR+ following the Wasserstein gradient flow of a functional F solves the continuity equation
+
+t t
+
+=
+
+div(txF
+
+(t)),
+
+s.t. 0 = 0,
+
+(2)
+
+where F (·) is the first variation of F [3, Theorem 8.3.1]. The term on the right can be understood as the gradient of F in Wasserstein space, a vector field perturbatively rearranging the mass in t to yield the steepest possible local change of F.
+
+Wasserstein gradient flows are used in various applied tasks. For example, gradient flows are applied in training [7, 39, 22] or refinement [6] of implicit generative models. In reinforcement learning, gradient flows facilitate policy optimization [50, 67]. Other tasks include crowd motion modelling [41, 53, 46], dataset optimization [2], and in-between animation [23].
+
+Many applications come from the connection between Wasserstein gradient flows and SDEs. Consider an RD-valued stochastic process {Xt}tR+ governed by the following Itô SDE:
+
+dXt = -(Xt)dt + 2-1dWt, s.t. X0  0
+
+(3)
+
+where  : RD  R is the potential function, Wt is the standard Wiener process, and  > 0 is the magnitude. The solution of (3) is called an advection-diffusion process. The marginal measure t of Xt at each time satisfies the Fokker-Planck equation with fixed diffusion coefficient:
+
+t t
+
+=
+
+div((x)t) + -1t,
+
+s.t. 0 = 0.
+
+(4)
+
+Equation (4) is the Wasserstein gradient flow (2) for F given by the Fokker-Planck free energy
+
+functional [28]
+
+FFP() = U () - -1E(),
+
+(5)
+
+where U() =
+
+RD (x)d(x) is the potential energy and E()
+
+=-
+
+RD
+
+log
+
+d dx
+
+(x)d(x)
+
+is
+
+the
+
+entropy. As the result, to solve the SDE (3), one may compute the Wasserstein gradient flow of the
+
+Fokker-Planck equation with the free-energy functional FFP given by (5).
+
+JKO Scheme. Computing Wasserstein gradient flows is challenging. The closed form solution is typically unknown, necessitating numerical approximation techniques. Jordan, Kinderlehrer, and Otto proposed a method--later abbreviated as JKO integration--to approximate the dynamics of t in (2) [28]. It consists of a time-discretization update of the continuous flow given by:
+
+(k)  arg min
+P2 (Rn )
+
+F ()
+
++
+
+1 2h
+
+W22
+
+((k-1)
+
+,
+
+)
+
+(6)
+
+where (0) = 0 is the initial condition and h > 0 is the time-discretization step size. The discrete time gradient flow converges to the continuous one as h  0, i.e., (k)  kh. The method was further developed in [3, 55], but performing JKO iterations remains challenging thanks to the minimization with respect to W2.
+A common approach to perform JKO steps is to discretize the spatial domain. For support size 106, (6) can be solved by standard optimal transport algorithms [47]. In dimensions D  3, discrete supports can hardly approximate continuous distributions and hence the dynamics of gradient flows. To tackle this issue, [21] propose a stochastic parametric method to approximate the density of t. Their method uses entropy-regularized optimal transport (OT), which is biased.
+
+3
+
+3 Computing Wasserstein Gradient Flows with ICNNs
+
+We now describe our approach to compute Wasserstein gradient flows via JKO stepping with ICNNs.
+
+3.1 JKO Reformulation via Optimal Push-forwards Maps
+
+Our key idea is to replace the optimization (6) over probability measures by an optimization over
+convex functions, an idea inspired by [10]. Thanks to Brenier's theorem, for any   P2,ac there exists a unique (k-1)-measurable gradient  : RD  RD of a convex function  satisfying  =  (k-1). We set  =  (k-1) and rewrite (6) as an optimization over convex :
+
+(k)  arg min
+Convex 
+
+F (
+
+(k-1))
+
++
+
+1 2h
+
+W22
+
+((k-1)
+
+,
+
+
+
+(k-1))
+
+.
+
+(7)
+
+To proceed to the next step of JKO scheme, we define (k) d=ef (k) (k-1).
+
+Since  is the pushforward of (k-1) by the gradient of a convex function , the W22 term in (7) can be evaluated explicitly, simplifying the Wasserstein-2 distance term in (7):
+
+(k)  arg min
+Convex 
+
+F ( (k-1)) + 1 2h
+
+RD
+
+x - (x)
+
+2 2
+
+d(k-1)(x)
+
+.
+
+(8)
+
+This formulation avoids the difficulty of computing Wasserstein-2 distances. An additional advantage
+
+is that we can sample from (k). Since (k) = [(k)  · · ·  (1)] 0, one may sample x0  (0),
+
+and then (k)  · · ·  (1)(x0) gives a sample from (k). Moreover, if functions (·) are strictly
+
+convex,
+
+then
+
+gradients
+
+(·)
+
+are
+
+invertible.
+
+In
+
+this
+
+case,
+
+the
+
+density
+
+d(k) dx
+
+of
+
+(k)
+
+=
+
+(k)
+
+···
+
+(1) 0 is computable by the change of variables formula (assuming (·) are twice differentiable)
+
+d(k) dx
+
+(xk )
+
+=
+
+[det
+
+2(k)(xk-1)]-1
+
+·
+
+·
+
+· [det
+
+2(1)(x0)]-1
+
+·
+
+d(0) dx (x0),
+
+(9)
+
+where
+
+xi
+
+=
+
+(i)(xi-1)
+
+for
+
+i
+
+=
+
+1, . . . , k
+
+and
+
+d(0) dx
+
+is
+
+the
+
+density
+
+of
+
+(0).
+
+3.2 Stochastic Optimization for JKO via ICNNs
+
+In general, the solution (k) of (8) is intractable since it requires optimization over all convex functions. To tackle this issue, [10] discretizes the space of convex function. The approach also requires discretization of measures (k) limiting this method to small dimensions.
+
+We propose to parametrize the search space using input convex neural networks (ICNNs) [5] satisfying
+a universal approximation property among convex functions [17]. ICNNs are parametric models of the form  : RD  R with  convex w.r.t. the input. ICNNs are constructed from neural network layers, with restrictions on the weights and activation functions to preserve the input-convexity, see
+[5, 3.1] or [33, B.2]. The parameters are optimized via deep learning optimization techniques such
+as SGD.
+
+The JKO step then becomes finding the optimal parameters  for :
+
+  arg min
+
+
+F (
+
+(k-1)) +
+
+1 2h
+
+RD
+
+x - (x) 22d(k-1)(x) .
+
+(10)
+
+If the functional F can be estimated stochastically using random batches from (k-1), then SGD can
+
+be used to optimize . FFP given by (5) is an example of such a functional:
+
+Theorem 1 (Estimator of FFP). Let   P2,ac(RD) and T : RD  RD be a diffeomorphism. For a
+
+random batch x1, . . . , xN  , the expression [UT (x1, . . . , xN ) - -1ET (x1, . . . , xN )], where
+
+UT (x1, . . . , xN )
+
+d=ef
+
+1 N
+
+N
+
+ T (xn)
+
+and
+
+n=1
+
+ET (x1, . . . , xN )
+
+d=ef
+
+1 N
+
+N
+
+log | det T (xn)|,
+
+n=1
+
+is an estimator of FFP(T ) up to constant (w.r.t. T ) shift given by -1E().
+
+4
+
+Proof. UT is a straightforward unbiased estimator for U (T ). Let p and pT be the densities of  and T . Since T is a diffeomorphism, we have pT (y) = p(x) · | det T (x)|-1 where x = T -1(y). Using the change of variables formula, we write
+
+E(T ) = - pT (y) log pT (y)dy
+RD
+= - p(x) · | det T (x)|-1 log p(x) · | det T (x)|-1 · | det T (x)|dx
+RD
+
+= - p(x) log p(x)dx + p(x) log | det T (x)|dx
+
+RD
+
+RD
+
+= E() + p(x) log | det T (x)|dx,
+RD
+= ET () d=ef E(T ) - E() = log | det T (x)|d(x)
+RD
+which explains that ET is an unbiased estimator of ET (). As the result, UT - -1ET is an estimator for FFP(T ) = U (T ) - -1E(T ) up to a shift of -1E().
+
+To apply Theorem 1 to our case, we take T   and   (k-1) to obtain a stochastic estimator for FFP( (k-1)) in (10). Here, -1E((k-1)) is -independent and constant since (k-1) is fixed, so the offset of the estimator plays no role in the optimization w.r.t. .
+Algorithm 1 details our stochastic JKO method for FFP. The training is done solely based on random samples from the initial measure 0: its density is not needed.
+
+Algorithm 1: Fokker-Planck JKO via ICNNs
+
+Input :Initial measure 0 accessible by samples; JKO discretization step h > 0, number of JKO steps K > 0; target potential (x), diffusion process temperature -1; batch size N ;
+Output :trained ICNN models {(k)}Kk=1 representing JKO steps for k = 1, 2, . . . , K do
+  basic ICNN model; for i = 1, 2, . . . do
+Sample batch Z  0 of size N;
+X  (k-1)  · · ·  (1)(Z);
+
+W22
+
+
+
+1 N
+
+(x) - x 22;
+
+xX
+
+U
+
+
+
+1 N
+
+ (x) ;
+
+xX
+
+E
+
+
+
+1 N
+
+log det 2(x);
+
+xX
+
+L
+
+
+
+1 2h
+
+W22
+
++U
+
+- -1E;
+
+Perform
+
+a
+
+gradient
+
+step
+
+over
+
+
+
+by
+
+using
+
+L 
+
+;
+
+(k)  
+
+This algorithm assumes F is the Fokker-Planck diffusion energy functional. However, our method admits straightforward generalization to any F that can be stochastically estimated; studying such functionals is a promising avenue for future work.
+
+3.3 Computing the Density of the Diffusion Process
+
+Our algorithm provides a computable density for (k). As discussed in 3.1, it is possible to sample
+
+from (k) while simultaneously computing the density of the samples. However, this approach does
+
+not
+
+provide
+
+a
+
+direct
+
+way
+
+to
+
+evaluate
+
+d(k) dx
+
+(xk
+
+)
+
+for
+
+arbitrary
+
+xk
+
+
+
+RD .
+
+We
+
+resolve
+
+this
+
+issue
+
+below.
+
+5
+
+If a convex function is strongly convex, then its gradient is bijective on RD. By the change of
+
+variables
+
+formula
+
+for
+
+xk
+
+
+
+RD ,
+
+it
+
+holds
+
+d(k) dx
+
+(xk
+
+)
+
+=
+
+d(k-1) dx
+
+(xk-1)
+
+·
+
+[det
+
+2(k)(xk-1)]-1
+
+where
+
+xk = (k)(xk-1). To compute xk-1, one needs to solve the convex optimization problem:
+
+xk = (k)(xk-1)
+
+
+
+xk-1 = arg min x, xk - (k)(x) .
+
+(11)
+
+xRD
+
+If we know the density of 0, to compute the density of (k) at xk we solve k convex problems
+
+xk-1 = arg min x, xk - (k)(x)
+xRD
+
+. . . x0 = arg min x, x1 - (1)(x)
+xRD
+
+to obtain xk-1, . . . , x0 and then evaluate the density as
+
+dk dx
+
+(xk
+
+)
+
+=
+
+d0 dx (x0)
+
+·
+
+k
+det 2(i)(xi-1) -1.
+
+i=1
+
+Note the steps above provide a general method for tracing back the position of a particle along the flow, and density computation is simply a byproduct.
+
+4 Experiments
+
+In this section, we evaluate our method on toy and real-world applications. Our code is written in PyTorch. The experiments are conducted on a GTX 1080Ti. In most cases, we performed several random restarts to obtain mean and variation of the considered metric. As the result, experiments require about 100-150 hours of computation. The details are given in Appendix A.
+
+Neural network architectures. In all experiments, we use the DenseICNN [33, Appendix B.2] architecture for  in Algorithm 1 with SoftPlus activations. The network  is twice differentiable w.r.t. the input x and has bijective gradient  : RD  RD with positive semi-definite Hessian 2(x) 0 at each x. We use automatic differentiation to compute  and 2.
+Metric. To qualitatively compare measures, we use the symmetric Kullback-Leibler divergence
+
+SymKL(1, 2) d=ef KL(1 2) + KL(2 1),
+
+(12)
+
+where KL(1 2) d=ef
+
+RD
+
+log
+
+d1 d2
+
+(x)d1(x)
+
+is
+
+the
+
+Kullback-Leibler
+
+divergence.
+
+For
+
+particle-based
+
+methods, we obtain an approximation of the distribution by kernel density estimation.
+
+4.1 Convergence to Stationary Solution
+
+Starting from an arbitrary initial measure 0, an advection-diffusion process (4) converges to the unique stationary solution  [51] with density
+
+d (x) = Z-1 exp(-(x)),
+
+(13)
+
+dx
+
+where Z = RD exp(-(x))dx is the normalization constant. This property makes it possible to compute the symmetric KL between the distribution to which our method converges and the ground truth, provided Z is known.
+
+We use N (0, 16ID) as the initial measure 0 and a
+
+1.0
+
+random Gaussian mixture as the stationary measure
+
+0.5
+
+log10SymKL
+
+. In our method, we perform K = 40 JKO steps
+
+0.0
+
+with step size h = 0.1. We compare with a parti- 0.5
+
+cle simulation method (with 103, 104, 105 particles)
+
+1.0
+
+[EM] 1K [EM] 10K
+
+based on the Euler-Maruyama EM approximation [32, 9.2]. We repeat the experiment 5 times and report the averaged results in Figure 1.
+
+1.5 2
+
+[EM] 50K Ours
+
+4
+
+D6, dimensio8n 10
+
+12
+
+In Figure 2, we present qualitative results of our Figure 1: SymKL between the computed and method converging to the ground truth in D = 13, 32. the stationary measure in D = 2, 4, . . . 12
+
+6
+
+Stationary measure
+
+10
+
+5
+
+0
+
+5
+
+10
+
+10
+
+0
+
+10
+
+Fitted measure (ours)
+
+10
+
+5
+
+0
+
+5
+
+10
+
+10
+
+0
+
+10
+
+Stationary measure 10
+
+5
+
+0
+
+5
+
+10 10 5 0
+
+5 10
+
+Fitted measure (ours) 10
+
+5
+
+0
+
+5
+
+10 10 5 0
+
+5 10
+
+(a) Dimension D = 13
+
+(b) Dimension D = 32
+
+Figure 2: Projections to 2 first PCA components of the true stationary measure and the measure approximated by our method in dimensions D = 13 (on the left) and D = 32 (on the right).
+
+4.2 Modeling Ornstein-Uhlenbeck Processes
+
+Ornstein-Uhlenbeck
+
+processes
+
+are
+
+advection-diffusion
+
+processes
+
+(4)
+
+with
+
+(x)
+
+=
+
+1 2
+
+(x
+
+-
+
+b)T
+
+A(x
+
+-
+
+b)
+
+for symmetric positive definite A  RD×D and b  RD. They are among the few examples where
+
+we know t for any t  R+ in closed form, when the initial measure 0 is Gaussian [62]. This allows
+
+to quantitatively evaluate the computed dynamics of the process, not just the stationary measure.
+
+We choose A, b at random and set 0 to be the standard Gaussian measure N (0, ID). We approximate the dynamics of the process by our method with JKO step h = 0.05 and compute SymKL between
+the true t and the approximate one at time t = 0.5 and t = 0.9. We repeat the experiment 15 times in dimensions D = 1, 2 . . . , 12 and report the performance at in Figure 3. The baselines are EM with 103, 104, 5 × 104 particles and the parametric dual inference method [21] for JKO steps Dual
+JKO .
+
+0
+
+0
+
+log10SymKL log10SymKL
+
+1
+
+1
+
+2 3
+2
+
+4 D, d6imension8
+
+[Dual JKO] [EM] 1K [EM] 10K [EM] 50K Ours
+
+10
+
+12
+
+2 3
+2
+
+4 D, d6imension8
+
+[Dual JKO] [EM] 1K [EM] 10K [EM] 50K Ours
+
+10
+
+12
+
+(a) Time t = 0.5
+
+(b) Time t = 0.9
+
+Figure 3: SymKL values between the computed measure and the true measure t at t = 0.5 (on the left) and t = 0.9 (on the right) in dimensions D = 1, 2, . . . , 12. Best viewed in color.
+
+4.3 Unnormalized Posterior Sampling in Bayesian Logistic Regression
+
+An important task in Bayesian machine learning to which our algorithm can be applied is sampling
+
+from an unnormalized posterior distribution. Given the model parameters x  RD with the prior
+
+distribution p0(x) as well as the conditional density p(S|x) =
+
+M m=1
+
+p(sm
+
+|x)
+
+of
+
+the
+
+data S
+
+=
+
+{s1, . . . , sM }, the posterior distribution is given by
+
+p(x|S )
+
+=
+
+p(S |x)p0 (x) p(S )
+
+
+
+p(S |x)p0 (x)
+
+=
+
+p0(x)
+
+·
+
+M
+
+p(sm|x).
+
+m=1
+
+Computing the normalization constant p(S) is in general intractable, underscoring the need for estimation methods that sample from p(S|x) given the density only up to a normalizing constant.
+
+7
+
+In our context, sampling from p(x|S) can be solved similarly to the task in 4.1. From
+
+Dataset
+
+Accuracy Ours SVGD
+
+Log-Likelihood Ours SVGD
+
+(13), it follows that the advection-diffusion pro- covtype 0.75 0.75 -0.515 -0.515
+
+cess with temperature  > 0 and (x) = german 0.67 0.65
+
+-0.6
+
+-0.6
+
+-
+
+1 
+
+log
+
+p0(x) · p(S|x)
+
+has
+
+d dx
+
+(x)
+
+=
+
+p(x|S )
+
+diabetis 0.775 twonorm 0.98
+
+0.78 0.98
+
+-0.45 -0.46 -0.059 -0.062
+
+as the stationary distribution. Thus, we can use ringnorm 0.74 0.74
+
+-0.5
+
+-0.5
+
+our method to approximate the diffusion process banana 0.55 0.54 -0.69 -0.69
+
+and obtain a sampler for p(x|S) as a result.
+
+splice 0.845 0.85 -0.36 -0.355
+
+The potential energy U () = RD (x)d(x)
+
+waveform image
+
+0.78 0.82
+
+can be estimated efficiently by using a trick sim-
+
+0.765 -0.485 -0.465 0.815 -0.43 -0.44
+
+ilar to the ones in stochastic gradient Langevin Table 1: Comparison of our method with SVGD
+
+dynamics [65], which consists in resampling [38] for Bayesian logistic regression.
+
+samples in S uniformly. For evaluation, we
+
+consider the Bayesian linear regression setup
+
+of [38]. We use the 8 datasets from [43]. The number of features ranges from 2 to 60 and the
+
+dataset size from 700 to 7400 data points. We also use the Covertype dataset2 with 500K data points and 54 features. The prior on regression weights w is given by p0(w|) = N (w|0, -1) with p0() = Gamma(|1, 0.01), so the prior on parameters x = [w, ] of the model is given by p0(x) = p0(w, ) = p0(w|) · p0(). We randomly split each dataset into train Strain and test Stest ones with ratio 4:1 and apply the inference on the posterior p(x|Strain). In Table 1, we report accuracy and log-likelihood of the predictive distribution on Stest. As the baseline, we use particle-
+based Stein Variational Gradient Descent [38]. We use the author's implementation with the default
+
+hyper-parameters.
+
+4.4 Nonlinear Filtering
+
+We demonstrate the application of our method to filtering a nonlinear diffusion. In this task, we
+consider a diffusion process Xt governed by the Fokker-Planck equation (4). At times t1 < t2 < · · · < tK we obtain noisy observations of the process Yk = Xtk + vk with vk  N (0, ). The goal is to compute the predictive distribution pt,X (x|Y1:K ) for t  tK given observations Y1:K .
+
+For each k and t  tk predictive distribution pt,X (x|Y1:k) follows the diffusion process on time interval [tk, t] with initial distribution ptk,X (x|Y1:k). If tk = t then
+
+ptk,X (x|Y1:k)  p(Yk|Xtk = x) · ptk,X (x|Y1:k-1).
+
+(14)
+
+For k = 1, . . . , K, we sequentially obtain the predictive distribution ptk,X (x|Y1:k) by using the previous predictive distribution ptk-1,X (x|Y1:k-1). First, given access to ptk-1,X (x|Y1:k-1), we approximate the diffusion on interval [tk-1, tk] with initial distribution ptk-1,X (x|Y1:k-1) by our Algorithm 1 to get access to ptk,X (x|Y1:k-1). Next, we use (14) to get unnormalized density and Metropolis-Hastings algorithm [52] to sample from ptk,X (x|Y1:k). We give details in Appendix B.
+
+For evaluation, we consider the experimental setup of [21, 6.3]. We assume that the 1-dimensional
+
+diffusion process Xt
+
+has
+
+potential
+
+function (x)
+
+=
+
+1 
+
+sin(2x) +
+
+1 4
+
+x2
+
+which
+
+makes the
+
+process
+
+highly nonlinear. We simulate nonlinear filtering on the time interval tstart = 0 sec., tfin = 5 sec. and
+
+take the noise observations each 0.5 sec. The noise variance is 2 = 1 and p(X0) = N (X0|0, 1).
+
+We predict the conditional density ptfinal,X (x|Y1:9) and compare the prediction with ground truth obtained with numerical integration method by Chang and Cooper [16], who use a fine discrete grid.
+As the baselines, we use Dual JKO [21] as well as the Bayesian Bootstrap filter BBF [24], which
+combines particle simulation with bootstrap resampling at observation times.
+
+We repeat the experiment 15 times. In Figure 4a, we report the SymKL between predicted density and true p(Xtfin |Y1:9). We visually compare the fitted and true conditional distributions in Figure 4b.
+
+5 Discussion
+
+Complexity of training and sampling. Let T be the number of operations required to evaluate ICNN (x), and assume that the evaluation of (x) in the potential energy U takes O(1) time.
+2https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary.html
+
+8
+
+log10SymKL pt, X(x|Y1 : K)
+
+Discrepancy comparision at t = 5 sec.
+
+0.5
+
+0.5 0.4
+
+1.0
+
+0.3
+
+1.5
+
+0.2
+
+2.0
+
+0.1
+
+2.5 Ours [Dual JKO] [B1B0F0] [B1BKF] [B1B0FK] [B5B0FK]
+
+0.0
+
+Diffusion pdfs comparison at t = 5 sec.
+Ours [Dual JKO] [BBF] 50000 ground truth
+
+4
+
+2
+
+0
+
+2
+
+4
+
+(a) SymKL values.
+
+(b) Visualized probability density functions.
+
+Figure 4: Comparison of the predicted conditional density and true p(Xtfin |Y1:9).
+
+Recall that computing the gradient is a
+small constant factor harder than comput-
+ing the function itself [37]. Thus, evaluation of (x) : RD  RD requires O(T ) operations and evaluating the Hessian 2(x) : RD  RD×D takes O(DT ) time. To compute log det 2(x), we need O(D3) extra operations. Sampling from (k-1) = (k-1)  · · ·  (1) 0 involves pushing x0  0 forward by a sequence of ICNNs (·) of length k - 1, requiring O (k - 1)T
+operations. The forward pass to evaluate the
+
+Operation
+
+Eval. ,,2 Eval. log det 2
+Sample x  (k)
+
+Eval. L on x  (k)
+
+Eval.
+
+L 
+
+on
+
+x
+
+
+
+(k)
+
+Sample x  (k) and
+
+Eval.
+
+d(k) dx
+
+(x)
+
+Time Complexity
+T , O(T ), O(DT ) O(DT +D3) O (k-1)T O(DT + D3) O(DT +D3)
+O (k-1)(T D+D3)
+
+Table 2: Complexity of operations in our method
+
+JKO step objective L in Algorithm 1 requires for computing JKO steps via ICNNs.
+
+O(DT
+
++
+
+D3)
+
+operations,
+
+as
+
+does
+
+the
+
+backward
+
+pass
+
+to
+
+compute
+
+the
+
+gradient
+
+L 
+
+w.r.t.
+
+.
+
+The memory complexity is more difficult to characterize, since it depends on the autodiff implementation. It does not exceed the time complexity and is linear in the number of JKO steps k.
+
+Wall-clock times. All particle-based methods considered in 4 and Dual JKO require from several seconds to several minutes CPU computation time. Our method requires from several minutes to few hours on GPU, the time is explained by the necessity to train a new network at each step.
+
+Advantages. Due to using continuous approximation, our method scales well to high dimensions,
+
+as we show in 4.1 and 4.2. After training, we can produce infinitely many samples xk  (k),
+
+together with their trajectories xk-1, xk-2, . . . , x0 along the gradient flow. Moreover, the densities
+
+of
+
+samples
+
+in
+
+the
+
+flow
+
+d(k) dx
+
+(xk
+
+),
+
+d(k-1) dx
+
+(xk-1
+
+),
+
+.
+
+.
+
+.
+
+,
+
+d(0) dx
+
+(x0
+
+)
+
+can
+
+be
+
+evaluated
+
+immediately.
+
+In contrast, particle-based and domain discretization methods do not scale well with the dimension (Figure 3) and provide no density. Interestingly, despite its parametric approximation, Dual JKO
+
+performs comparably to particle simulation and worse than ours (see additionally [21, Figure 3]).
+
+Limitations. To train k JKO steps, our method requires time proportional to k2 due to the increased
+complexity of sampling x  (k). This may be disadvantageous for training long diffusions. In addition, for very high dimensions D, exact evaluation of log det 2(x) is time-consuming.
+
+Future work. To reduce the computational complexity of sampling from (k), at step k one may regress an invertible network H : RD  RD [8, 27] to satisfy H(x0)  (k)  · · ·  (1)(x0) and use H 0  (k) to simplify sampling. An alternative is to use variational inference [11, 49, 66] to approximate (k). To mitigate the computational complexity of computing log det (x), fast approximation can be used [61, 25]. More broadly, developing ICNNs with easily-computable exact
+Hessians is a critical avenue for further research as ICNNs continue to gain attention in machine
+learning [40, 33, 34, 26, 20, 4].
+
+Potential impact. Diffusion processes appear in numerous scientific and industrial applications, including machine learning, finances, physics, and population dynamics. Our method will improve models in these areas, providing better scalability. Performance, however, might depend on the expressiveness of the ICNNs, pointing to theoretical convergence analysis as a key topic for future study to reinforce confidence in our model.
+
+9
+
+References
+[1] Juha Ala-Luhtala, Simo Särkkä, and Robert Piché. Gaussian filtering and variational approximations for Bayesian smoothing in continuous-discrete stochastic dynamic systems. Signal Processing, 111:124­136, 2015.
+[2] David Alvarez-Melis and Nicolò Fusi. Gradient flows in dataset space. arXiv preprint arXiv:2010.12760, 2020.
+[3] Luigi Ambrosio, Nicola Gigli, and Giuseppe Savaré. Gradient flows: in metric spaces and in the space of probability measures. Springer Science & Business Media, 2008.
+[4] Brandon Amos and J Zico Kolter. Optnet: Differentiable optimization as a layer in neural networks. In International Conference on Machine Learning, pages 136­145. PMLR, 2017.
+[5] Brandon Amos, Lei Xu, and J Zico Kolter. Input convex neural networks. In International Conference on Machine Learning, pages 146­155. PMLR, 2017.
+[6] Abdul Fatir Ansari, Ming Liang Ang, and Harold Soh. Refining deep generative models via Wasserstein gradient flows. arXiv preprint arXiv:2012.00780, 2020.
+[7] Michael Arbel, Anna Korba, Adil Salim, and Arthur Gretton. Maximum mean discrepancy gradient flow. arXiv preprint arXiv:1906.04370, 2019.
+[8] Lynton Ardizzone, Jakob Kruse, Sebastian Wirkert, Daniel Rahner, Eric W Pellegrini, Ralf S Klessen, Lena Maier-Hein, Carsten Rother, and Ullrich Köthe. Analyzing inverse problems with invertible neural networks. arXiv preprint arXiv:1808.04730, 2018.
+[9] Genevay Aude, Marco Cuturi, Gabriel Peyré, and Francis Bach. Stochastic optimization for large-scale optimal transport. arXiv preprint arXiv:1605.08527, 2016.
+[10] Jean-David Benamou, Guillaume Carlier, Quentin Mérigot, and Edouard Oudet. Discretization of functionals involving the Monge­Ampère operator. Numerische mathematik, 134(3):611­636, 2016.
+[11] David M Blei, Alp Kucukelbir, and Jon D McAuliffe. Variational inference: A review for statisticians. Journal of the American statistical Association, 112(518):859­877, 2017.
+[12] Yann Brenier. Polar factorization and monotone rearrangement of vector-valued functions. Communications on pure and applied mathematics, 44(4):375­417, 1991.
+[13] Martin Burger, José A Carrillo, and Marie-Therese Wolfram. A mixed finite element method for nonlinear diffusion equations. Kinetic & Related Models, 3(1):59, 2010.
+[14] José A Carrillo, Alina Chertock, and Yanghong Huang. A finite-volume method for nonlinear nonlocal equations with a gradient flow structure. Communications in Computational Physics, 17(1):233­258, 2015.
+[15] JS Chang and G Cooper. A practical difference scheme for fokker-planck equations. Journal of Computational Physics, 6(1):1­16, 1970.
+[16] J.S Chang and G Cooper. A practical difference scheme for fokker-planck equations. Journal of Computational Physics, 6(1):1­16, 1970.
+[17] Yize Chen, Yuanyuan Shi, and Baosen Zhang. Optimal control via neural networks: A convex approach. arXiv preprint arXiv:1805.11835, 2018.
+[18] Arnaud Doucet and Adam M Johansen. A tutorial on particle filtering and smoothing: Fifteen years later. Handbook of nonlinear filtering, 12(656-704):3, 2009.
+[19] Nicole El Karoui, Shige Peng, and Marie Claire Quenez. Backward stochastic differential equations in finance. Mathematical finance, 7(1):1­71, 1997.
+[20] Jiaojiao Fan, Amirhossein Taghvaei, and Yongxin Chen. Scalable computations of wasserstein barycenter via input convex neural networks. arXiv preprint arXiv:2007.04462, 2020.
+[21] Charlie Frogner and Tomaso Poggio. Approximate inference with Wasserstein gradient flows. In International Conference on Artificial Intelligence and Statistics, pages 2581­2590. PMLR, 2020.
+[22] Yuan Gao, Yuling Jiao, Yang Wang, Yao Wang, Can Yang, and Shunkang Zhang. Deep generative learning via variational gradient flow. In International Conference on Machine Learning, pages 2093­2101. PMLR, 2019.
+10
+
+[23] Yuan Gao, Guangzhen Jin, and Jian-Guo Liu. Inbetweening auto-animation via fokker-planck dynamics and thresholding. arXiv preprint arXiv:2005.08858, 2020.
+[24] N. Gordon, D. Salmond, and A. Smith. Novel approach to nonlinear/non-Gaussian Bayesian state estimation. 1993.
+[25] Insu Han, Dmitry Malioutov, and Jinwoo Shin. Large-scale log-determinant computation through stochastic chebyshev expansions. In International Conference on Machine Learning, pages 908­917. PMLR, 2015.
+[26] Chin-Wei Huang, Ricky TQ Chen, Christos Tsirigotis, and Aaron Courville. Convex potential flows: Universal probability distributions with optimal transport and convex optimization. arXiv preprint arXiv:2012.05942, 2020.
+[27] Jörn-Henrik Jacobsen, Arnold Smeulders, and Edouard Oyallon. i-revnet: Deep invertible networks. arXiv preprint arXiv:1802.07088, 2018.
+[28] Richard Jordan, David Kinderlehrer, and Felix Otto. The variational formulation of the fokker­ planck equation. SIAM journal on mathematical analysis, 29(1):1­17, 1998.
+[29] Simon J Julier, Jeffrey K Uhlmann, and Hugh F Durrant-Whyte. A new approach for filtering nonlinear systems. In Proceedings of 1995 American Control Conference-ACC'95, volume 3, pages 1628­1632. IEEE, 1995.
+[30] Rudolph E Kalman and Richard S Bucy. New results in linear filtering and prediction theory. 1961.
+[31] Søren Klim, Stig Bousgaard Mortensen, Niels Rode Kristensen, Rune Viig Overgaard, and Henrik Madsen. Population stochastic modelling (psm)--an r package for mixed-effects models based on stochastic differential equations. Computer methods and programs in biomedicine, 94(3):279­289, 2009.
+[32] Peter E. Kloeden. Numerical solution of stochastic differential equations / Peter E. Kloeden, Eckhard Platen. Applications of mathematics; v. 23. Springer, Berlin, 1992.
+[33] Alexander Korotin, Vage Egiazarian, Arip Asadulaev, Alexander Safin, and Evgeny Burnaev. Wasserstein-2 generative networks. In International Conference on Learning Representations, 2021.
+[34] Alexander Korotin, Lingxiao Li, Justin Solomon, and Evgeny Burnaev. Continuous wasserstein2 barycenter estimation without minimax optimization. In International Conference on Learning Representations, 2021.
+[35] Harold Kushner. Approximations to optimal nonlinear filters. IEEE Transactions on Automatic Control, 12(5):546­556, 1967.
+[36] Hugo Lavenant, Sebastian Claici, Edward Chien, and Justin Solomon. Dynamical optimal transport on discrete surfaces. ACM Transactions on Graphics (TOG), 37(6):1­16, 2018.
+[37] Seppo Linnainmaa. The representation of the cumulative rounding error of an algorithm as a taylor expansion of the local rounding errors. Master's Thesis (in Finnish), Univ. Helsinki, pages 6­7, 1970.
+[38] Qiang Liu and Dilin Wang. Stein variational gradient descent: A general purpose Bayesian inference algorithm. arXiv preprint arXiv:1608.04471, 2016.
+[39] Antoine Liutkus, Umut Simsekli, Szymon Majewski, Alain Durmus, and Fabian-Robert Stöter. Sliced-Wasserstein flows: Nonparametric generative modeling via optimal transport and diffusions. In International Conference on Machine Learning, pages 4104­4113. PMLR, 2019.
+[40] Ashok Makkuva, Amirhossein Taghvaei, Sewoong Oh, and Jason Lee. Optimal transport mapping via input convex neural networks. In International Conference on Machine Learning, pages 6672­6681. PMLR, 2020.
+[41] Bertrand Maury, Aude Roudneff-Chupin, and Filippo Santambrogio. A macroscopic crowd motion model of gradient flow type. Mathematical Models and Methods in Applied Sciences, 20(10):1787­1821, 2010.
+[42] Robert J McCann et al. Existence and uniqueness of monotone measure-preserving maps. Duke Mathematical Journal, 80(2):309­324, 1995.
+11
+
+[43] Sebastian Mika, Gunnar Ratsch, Jason Weston, Bernhard Scholkopf, and Klaus-Robert Mullers. Fisher discriminant analysis with kernels. In Neural networks for signal processing IX: Proceedings of the 1999 IEEE signal processing society workshop (cat. no. 98th8468), pages 41­48. Ieee, 1999.
+[44] Manfred Opper. Variational inference for stochastic differential equations. Annalen der Physik, 531(3):1800233, 2019.
+[45] Lorenzo Pareschi and Mattia Zanella. Structure preserving schemes for nonlinear fokker­planck equations and applications. Journal of Scientific Computing, 74(3):1575­1600, 2018.
+[46] Gabriel Peyré. Entropic approximation of Wasserstein gradient flows. SIAM Journal on Imaging Sciences, 8(4):2323­2351, 2015.
+[47] Gabriel Peyré, Marco Cuturi, et al. Computational optimal transport: With applications to data science. Foundations and Trends® in Machine Learning, 11(5-6):355­607, 2019.
+[48] Eckhard Platen and Nicola Bruti-Liberati. Numerical solution of stochastic differential equations with jumps in finance, volume 64. Springer Science & Business Media, 2010.
+[49] Danilo Rezende and Shakir Mohamed. Variational inference with normalizing flows. In International Conference on Machine Learning, pages 1530­1538. PMLR, 2015.
+[50] Pierre H Richemond and Brendan Maginnis. On Wasserstein reinforcement learning and the Fokker-Planck equation. arXiv preprint arXiv:1712.07185, 2017.
+[51] Hannes. Risken. The Fokker-Planck Equation: Methods of Solution and Applications (Springer Series in Synergetics). Springer,, 1996.
+[52] Christian P Robert and George Casella. The Metropolis--Hastings algorithm. In Monte Carlo Statistical Methods, pages 231­283. Springer, 1999.
+[53] Filippo Santambrogio. Gradient flows in Wasserstein spaces and applications to crowd movement. Séminaire Équations aux dérivées partielles (Polytechnique), pages 1­16, 2010.
+[54] Filippo Santambrogio. Optimal transport for applied mathematicians. Birkäuser, NY, 55(5863):94, 2015.
+[55] Filippo Santambrogio. Euclidean, Metric, and Wasserstein gradient flows: an overview, 2016.
+[56] Simo Sarkka. On unscented kalman filtering for state estimation of continuous-time nonlinear systems. IEEE Transactions on automatic control, 52(9):1631­1641, 2007.
+[57] Vivien Seguy, Bharath Bhushan Damodaran, Rémi Flamary, Nicolas Courty, Antoine Rolet, and Mathieu Blondel. Large-scale optimal transport and mapping estimation. arXiv preprint arXiv:1711.02283, 2017.
+[58] Kazimierz Sobczyk. Stochastic differential equations: with applications to physics and engineering, volume 40. Springer Science & Business Media, 2013.
+[59] Tobias Sutter, Arnab Ganguly, and Heinz Koeppl. A variational approach to path estimation and parameter inference of hidden diffusion processes. The Journal of Machine Learning Research, 17(1):6544­6580, 2016.
+[60] Gabriel Terejanu, Puneet Singla, Tarunraj Singh, and Peter D Scott. A novel gaussian sum filter method for accurate solution to the nonlinear filtering problem. In 2008 11th International Conference on Information Fusion, pages 1­8. IEEE, 2008.
+[61] Shashanka Ubaru, Jie Chen, and Yousef Saad. Fast estimation of tr(f(a)) via stochastic lanczos quadrature. SIAM Journal on Matrix Analysis and Applications, 38(4):1075­1099, 2017.
+[62] P Vatiwutipong and N Phewchean. Alternative way to derive the distribution of the multivariate ornstein­uhlenbeck process. Advances in Difference Equations, 2019(1):1­7, 2019.
+[63] Cédric Villani. Optimal transport: old and new, volume 338. Springer Science & Business Media, 2008.
+[64] Michail D Vrettas, Manfred Opper, and Dan Cornford. Variational mean-field algorithm for efficient inference in large systems of stochastic differential equations. Physical Review E, 91(1):012148, 2015.
+[65] Max Welling and Yee W Teh. Bayesian learning via stochastic gradient langevin dynamics. In Proceedings of the 28th international conference on machine learning (ICML-11), pages 681­688. Citeseer, 2011.
+12
+
+[66] Cheng Zhang, Judith Bütepage, Hedvig Kjellström, and Stephan Mandt. Advances in variational inference. IEEE transactions on pattern analysis and machine intelligence, 41(8):2008­2026, 2018.
+[67] Ruiyi Zhang, Changyou Chen, Chunyuan Li, and Lawrence Carin. Policy optimization as Wasserstein gradient flows. In International Conference on Machine Learning, pages 5737­ 5746. PMLR, 2018.
+13
+
+A Experimental Details
+General details. We use DenseICNN architecture [33, Appendix B.2] for  with 2 hidden layers and vary the width of the model depending on the task. We use Adam optimizer with learning rate decreasing with the number of JKO steps. We initialize the ICNN models either via pretraining to satisfy (x)  x or by using parameters  obtained from the previous JKO step. For Dual JKO , we used the implementation provided by the authors with default hyper-parameters. For SVGD , we used the official implementation available at
+https://github.com/dilinwang820/Stein-Variational-Gradient-Descent
+In other particle-based simulations EM , BBF , we used particle propagation timestep dt = 10-3. We estimate the SymKL (12) using Monte Carlo (MC) on 104 samples. In our method, MC estimate is straightforward since the method permits both sampling and computing the density. In particle-based methods, we use kernel density estimator to approximate the density utilizing scipy implementation of gaussian_kde with bandwidth chosen by Scott's rule. In Dual JKO , we employ importance sampling procedure and normalization constant estimation as detailed in [21].
+We set  to be equal to 1 throughout our experiments.
+
+A.1 Converging to Stationary Distribution
+
+As the stationary measure  we consider random Gaussian mixture D M l w
+
+1 Np
+
+M m=1
+
+N
+
+(µm,
+
+ID
+
+),
+
+where
+
+µ1, . . . , µM
+
+
+
+Uniform
+
+[-
+
+l 2
+
+,
+
+l 2
+
+]D
+
+.
+
+2
+
+5
+
+10 256
+
+We set the width w of used ICNNs  depending on dimension D. 4 6 10 384
+
+The parameters are summarized in the Table 3.
+
+6 7 10 512
+
+Each JKO step uses 1000 gradient descent iterations of Algorithm 1. For
+dimensions D = 2, 4, . . . , 12 the first 20 JKO transitions are optimized with lr = 5 · 10-3 and the remaining steps use lr = 2 · 10-3. For
+
+8 8 10 512 10 9 10 512 12 10 10 1024 13 10 10 512
+
+qualitative experiments in D = 13, 32 we perform 50 and 70 JKO 32 10 6 1024
+
+steps with step size h = 0.1. The learning rate setup in these cases is
+
+similar to quantitative experiment setting but has additional stage with Table 3: Hyper-parameters
+
+lr = 5 · 10-4 on the final JKO steps. The batch size is N = 512.
+
+in the convergence exp.
+
+A.2 Modeling Ornshtein-Uhlenbeck Processes
+Matrices A  RD×D are randomly generated using sklearn.datasets.make_spd_matrix. Vectors b  RD are sampled from standard Gaussian measure. All ICNNs  have w = 64 and we train each of them for 500 iterations per JKO step with lr = 5 · 10-3 and batch size N = 1024.
+
+A.3 Unnormalized Posterior Sampling
+
+Dataset w lr
+
+iter batch K
+
+To remove positiveness constraint on  we consider [x, log()] as the regression model parameters instead of [x, ]. To learn the posterior distribution p(x|Strain) we use JKO step size h = 0.1. Let iter denote the number of gradient steps over  per each JKO step. The used hyper-parameters for each dataset are summarized in Table 4.
+
+covtype 512 2 · 10-5 105 1024 6
+
+german 512 2 · 10-4 5000 512 5
+
+diabetis 128 5 · 10-5 6000 1024 16
+
+twonorm 512 5 · 10-5 5000 1024 7
+
+ringnorm 512 5 · 10-5 5000 1024 7
+
+banana
+
+128 2 · 10-4 5000 1024 5
+
+splice
+
+512 2 · 10-3 2000 512 5
+
+waveform 512 5 · 10-5 5000 512 5
+
+image
+
+512 5 · 10-5 5000 512 5
+
+To estimate the log-likelihood and accuracy
+
+of the predictive distribution on Stest based on p(x|Strain), we use straightforward MC
+
+Table 4: Hyper-parameters we use in Bayesian logistic regression experiment.
+
+estimate on 212 random parameter samples.
+
+14
+
+B Nonlinear Filtering Details
+
+For k = 1, 2, . . . we progressively obtain access to samples (and their un-normalized density) from predictive distribution ptk,X (x|Y1:k) for step k given k observations Y1, . . . , Yk.
+
+First, at each step k, we access ptk,X (x|Y1:k) through ptk-1,X (x|Y1:k-1). To do this, we use our
+
+Algorithm 1 to model a diffusion on [tk-1, tk] with initial distribution ptk-1,X (x|Y1:k-1). We perform
+
+nk
+
+JKO
+
+steps
+
+of
+
+size
+
+hk
+
+=
+
+tk -tk-1 nk
+
+and
+
+obtain
+
+ICNNs
+
+1(k), . . . , n(kk)
+
+(approximately)
+
+satisfying
+
+µptk,X (x|Y1:k-1) = [n(kk)  · · ·  1(k)] µptk-1,X (x|Y1:k-1)
+
+(15)
+
+Here µp(·) is the measure with density p(·). We define Bk d=ef n(kk)  · · ·  1(k).
+
+Let xk  RD and sequentially define xi-1 = Bi-1(xi) for i = k, . . . , 1. We derive
+
+ptk,X (xk|Y1:k)
+
+(14)
+
+
+p(Yk|Xtk = xk) · ptk,X (xk|Y1:k-1) =
+
+p(Yk |Xtk
+
+=
+
+xk )
+
+·
+
+[det Bk(xk-1)]-1
+
+· ptk-1,X (xk-1|Y1:k-1)
+
+(14)
+
+
+...
+
+k
+
+k
+
+p(Yi|Xti = xi) · [ det Bi(xi-1)]-1 · pt0,X (x0)
+
+(16)
+
+i=1
+
+i=1
+
+where we substitute (14) sequentially for k, k - 1, . . . , 1. As the result, from (16) we obtain the
+unnormalized density of predictive distribution ptk,X (xk|Y1:k). To sample from the predictive distribution (to train the next step k + 1) we employ Metropolis-Hastings algorithm [52]. For completeness, we recall the algorithm 2 below. The algorithm builds a chain x(1), x(2), . . . converging
+to the distribution given by unnormalized density (·). As input, the algorithm also takes a family of proposal distributions qx(·) for x  RD. The value (·, ·) is called the acceptance probability.
+
+Algorithm 2: Metropolis-Hastings algorithm
+
+Input :Unnormalized density (·); family of proposal distributions qx(·) (x  RD Output :Sequence x(1), x(2), x(3), . . . of samples from 
+
+Select x(0)  RD
+
+for j = 1, 2, . . . do
+
+Sample y  q ; x(j-1)
+
+Compute (x(j-1), y) = min
+
+1, (y)qy (x(j-1))
+(x(j-1))qx(j-1) (y)
+
+With probability (x(j-1), y) set x(j)  y; otherwise set x(j)  x(j-1)
+
+To sample from ptk,X (xk|Y1:k) we use Algorithm 2 with  equal to unnormalized density (16). We note that computing (xk) for xk  RD is not easy since it requires computing pre-images
+xk-1, . . . , x0 by inverting Bk, Bk-1, . . . , B1. As the consequence, this makes computation of
+acceptance probability (·, ·) hard. To resolve this issue,we choose special x-independent proposals
+
+q = qx d=ef (Bk  Bk-1  · · ·  B1) µp0,X .
+
+(17)
+
+In this case, all det terms in (x, y) vanish simplifying the computation (we write x = xk, y = yk):
+
+(y)qy(x) = (y)q(x) = (x)qx(y) (x)q(y)
+
+k
+
+k
+
+k
+
+p0,X (y0) pti,Y (Yi|Xti = yi) det Bi(xi-1) · p0,X (x0) det Bi(yi-1)
+
+i=1
+
+i=1
+
+k
+
+k
+
+i=1
+
+=
+
+k
+
+p0,X (x0) pti,Y (Yi|Xti = xi) det Bi(yi-1) · p0,X (y0) det Bi(xi-1)
+
+i=1
+
+i=1
+
+i=1
+
+15
+
+k
+pti,Y (Yi|Xti = yi)
+i=1
+k
+pti,Y (Yi|Xti = xi)
+i=1
+
+(18)
+
+To compute (18) one needs to know preimages xk-1, . . . , x0 and yk-1, . . . , y0 of points y = yk and x = xk respectively. They can be straightforwardly computed when sampling from q happens (17).
+Experimental details. To obtain the noise observations Yk = Xtk + vk from the process, we simulate a particle X0 randomly sampled from the initial measure N (0, 1) by using Euler-Maruyama method to obtain the trajectory Xt. At observation times t1 = 0.5, . . . , t9 = 4.5 we add random noise vk  N (0, 1) to obtain observations Y1, . . . , Y9.
+We utilize Chang and Cooper [16] numerical integration method to compute true p(Xtfin |Y1:9). We construct regular fine grid on the segment [-5, 5] with 2000 points and numerically solve the SDE with timestep dt = 10-3. At observation times tk, k  1, . . . 9 we multiply the obtained probability density function ptk,X (x|Y1:k-1) by the density of the normal distribution p(Yk|Xtk = x) estimated at the grid which results in unnormalized ptk,X (x|Y1:k). After normalization on the grid, ptk,X (x|Y1:k) can be used in the new diffusion round on time interval [tk, tk+1]. At final time tfin we estimate SymKL between the true distribution and ones obtained via other competitive methods by numerically integrating (12) on the grid.
+
+We implement BBF following the original article [24]. Particle propagation performed via EulerMaruyama method with timestep dt = 10-3. The final distribution p(Xtfin |Y1:9) is estimated using
+kernel density estimator as described in Appendix A.
+
+For Dual JKO we use the code provided by the authors with the default hyper-parameters.
+
+In our method, we use JKO step size h = 0.1 and model it by ICNN with width w = 256. Each JKO step takes 700 optimization iterations with lr = 5 · 10-3 and batch size N = 1024. At observation
+times tk, k  1, 2, . . . 9 we use the Metropolis-Hastings algorithm 2 with acceptance probability  calculated by (18). Starting from the randomly sampled x(1) we skip the first 1000 values of the
+Markov Chain generated by the algorithm which allows the series to converge to the distribution
+of interest ptk,X (x|Y1:k). We take each second element from the chain in order to decorrelate the samples. To simultaneously sample the batch of size N , we run N chains in parallel. To compute
+SymKL, we normalize the resulting distribution p(Xtfin |Y1:9) on the Chang-Cooper support grid.
+
+16
+
+

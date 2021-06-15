@@ -1,0 +1,612 @@
+Incorporating Visual Layout Structures for Scientific Text Classification
+Zejiang Shen1 Kyle Lo1 Lucy Lu Wang1 Bailey Kuehl1 Daniel S. Weld1,2 Doug Downey1
+1Allen Institute for AI 2University of Washington
+{shannons, kylel, lucyw, baileyk, danw, dougd}@allenai.org
+
+arXiv:2106.00676v1 [cs.CL] 1 Jun 2021
+
+Abstract
+Classifying the core textual components of a scientific paper--title, author, body text, etc.-- is a critical first step in automated scientific document understanding. Previous work has shown how using elementary layout information, i.e., each token's 2D position on the page, leads to more accurate classification. We introduce new methods for incorporating VIsual LAyout structures (VILA), e.g., the grouping of page texts into text lines or text blocks, into language models to further improve performance. We show that the I-VILA approach, which simply adds special tokens denoting boundaries between layout structures into model inputs, can lead to +14.5 F1 Score improvements in token classification tasks. Moreover, we design a hierarchical model H-VILA that encodes these layout structures and record a up-to 70% efficiency boost without hurting prediction accuracy. The experiments are conducted on a newly curated evaluation suite, S2-VLUE, with a novel metric measuring VILA awareness and a new dataset covering 19 scientific disciplines with gold annotations. Pre-trained weights, benchmark datasets, and source code will be available at https://github.com/allenai/VILA.
+1 Introduction
+Scientific papers are usually stored in the Portable Document Format (PDF) without extensive semantic markups. It is critical to generate highly structured document representations from these PDF files for many downstream NLP tasks (Beltagy et al., 2019; Wang et al., 2020) and improve their accessibility (Wang et al., 2021). Different from other real-world documents like receipts (SRO, 2019; Park et al., 2019) or legal documents (Gralin´ski et al., 2020), scholarly documents are usually typeset with rectilinear templates of intricate layout structures with interleaving textual and image objects. While the rich layout information can signal the semantic structures, existing methods (Beltagy
+
+et al., 2019) resort to analyzing the flattened text obtained by PDF-to-text convertors, without considering the style and layout information stored in the original file, as shown in Figure 1 (b).
+Recent methods demonstrate that token-level layout information, i.e., tokens' 2D spatial location on the page, could be incorporated to improve language models (Xu et al., 2020) and scientific document parsing (Li et al., 2020). However, when reading these documents, humans also capture highlevel layout structures like the grouping of text blocks1 and lines (Todorovic, 2008) and infer the contents accordingly. Without explicitly modeling the visual layout structures, we observe three major drawbacks of existing models: 1) without structureawareness, the token-level predictions could be inconsistent within a group (Li et al., 2020); 2) they are less efficient, as redundant predictions need to be generated for each token within a group; and 3) the models tend to capture document template patterns rather than use layout features to enrich the text representation (Finegan-Dollak and Verma, 2020).
+In this paper, we investigate to what extent such VIsual LAyout (VILA) structures can be used to improve NLP models for parsing scholarly documents. Following Zhong et al. (2019) and Tkaczyk et al. (2015)'s work, our key assumption is the group uniformity assumption: a document page can be segmented into visual groups of tokens with the same semantic category, as shown in Figure 1 (a). We firstly show VILA can be used as an additional information source to improve existing BERT-based language models (Devlin et al., 2019). By injecting special layout indicator tokens into existing textual inputs, the I-VILA models are informed of the document structure, and yield token predictions of better accuracy and consistency.
+1In this paper, the notion of text block is different from paragraphs as section headers, lists, equation regions, etc. are valid instances of text blocks.
+
+Figure 1: Examples of different language model inputs with and without layout information.
+
+Moreover, VILA can also be used as a strong prior that guides the modeling. The group uniformity assumption indicates the semantic category prediction can be performed at the group level rather than token level. We therefore introduce a hierarchical model H-VILA designed to leverage these hierarchical layout structures to optimize the endprediction task while minimizing computational cost.
+The proposed methods are carefully evaluated on a newly designed benchmark suite, Semantic Scholar Visual Layout-enhanced Scientific Text Understanding Evaluation or S2-VLUE. It consists of two datasets built on existing resources (Tkaczyk et al., 2015; Li et al., 2020) and a newly curated dataset S2-VL. With high-quality human annotations for papers from 19 disciplines, S2-VL complements missing features in prior work, which only contains silver labels for papers from certain domains. Besides typical measurements of prediction accuracy, we also introduce a novel metric, group category entropy, that measures the consistency of the token classes within a group, indicating how much the model accords with the VILA structures.
+This study is well-aligned with recent efforts for incorporating structural information into language models (Lee et al., 2020; Bai et al., 2020; Yang et al., 2020; Zhang et al., 2019). However, one key difference is that we obtain the structure from layout rather than language structures like sentences or paragraphs. Evaluated on the benchmark datasets, we show that when available, VILA structures lead to better prediction accuracy compared to using
+
+language structures. Our main contributions are fourfold:
+1. We find that visual layout (VILA) structures can be used to improve scientific document parsing tasks and that they provide improvements over using language structures like sentences.
+2. We propose two models that incorporate VILA features in different ways. The I-VILA model injects special layout indicator tokens into the text inputs and leads to strong accuracy improvements(+15 F1 scores). The HVILA model performs group-level predictions and significantly reduces the inference time by 70% while maintaining a similar level of accuracy.
+3. We create a novel dataset S2-VL with gold annotations for token categories and VILA structures of papers from 19 different disciplines.
+4. We develop and release a benchmark suite S2VLUE incorporating several VILA-enhanced datasets, along with the novel S2-VL dataset, and metrics for evaluating performance on scientific document text classification tasks.
+As suggested by improvements on our comprehensive benchmark, our methods also have the potential to benefit PDF parsing and analysis in the general domain. Benchmark datasets, modeling code, and trained weights will be available at https://github.com/allenai/VILA.
+
+2 Related Work
+The complex organization of scientific paper elements poses a challenge for identifying the key textual components and converting them to a structured format. Previous work tackles this challenge by utilizing visual or textual features from the documents.
+Vision-based Approaches (Zhong et al., 2019; He et al., 2017; Siegel et al., 2018) treat this task as an image object detection problem: given a screenshot of a document page, the models are required to predict a series of rectangular bounding boxes to segment the page into individual components with different categories. These models excel at capturing complex visual layout structures like figures or tables, but cannot accurately generate fine-grained semantic categories like title, author, or abstract, which are of central importance for parsing these documents.
+Text-based Methods, on the other hand, formulate this task as a text classification problem. Methods like ScienceParse (Ammar et al., 2018), GROBID (GRO, 2008­2021) or Corpus Conversion Service (Staar et al., 2018) firstly convert the source PDF documents to a sequence of tokens via PDF-to-text Parsing engines like CERMINE (Tkaczyk et al., 2015). Machine learning models like RNN (Hochreiter and Schmidhuber, 1997), CRF (Lafferty et al., 2001), or Random Forest (Breiman, 2001) trained to model the input texts are then used to classify the token categories. However, without considering document visual structures, these trained models fall short in prediction accuracy or generalize poorly for out-of-domain documents.
+Recently, Joint Approaches have been explored that combine visual and textual features to boost model performance. For DocBank (Li et al., 2020), the authors used LayoutLM (Xu et al., 2020), a model that combines token textual and 2D position information, and recorded a 6% F1 improvement over the baseline BERT model (Devlin et al., 2019). Livathinos et al. (2021) built a seq2seq model (Sutskever et al., 2014) with both layout and text features that significantly improves model robustness on an evaluation set of diverse paper layouts.
+The training and evaluation datasets of these models are often automatically generated using papers from PubMed Central (Ammar et al., 2018; GRO, 2008­2021; Zhong et al., 2019) or arXiv (Li
+
+et al., 2020). Despite their large sample sizes, each of these datasets does not contain significant layout variation, leading to poor generalization to papers from other disciplines with distinct layouts; and due to the heuristic nature in which the datasets are constructed, they can contain systematic classification errors that also affect downstream modeling performance. Livathinos et al. (2021) and Staar et al. (2018) curated a large dataset with manual annotations on papers from other science domains, but the dataset is not available to the public.
+3 Method
+3.1 Problem Formulation
+Following the previous literature (Tkaczyk et al., 2015; Li et al., 2020), our objective is to find a mapping for each token ti in a input to a semantic category ci like title, body text, or reference. For simplicity, we consider only a page of a paper in the input document, and different pages are separately modeled. The input tokens are extracted via PDF-to-text tools, which contains both the word wi and its 2D position, i.e, the rectangular bounding box ai = (x0, y0, x1, y1) denoting the left, top, right, and bottom position of the word boundary. Formally, the input sequence is T = (t1, . . . , tn) where ti = ( wi, ai ) and the output sequence is (c1, . . . , cn). It's worth noticing that the ordering of the tokens in the sequence T might not reflect the actual reading order of text due to incorrect PDF-totext conversion, which challenges language models pre-trained on regular texts.
+Besides the token sequence T , additional visual structures G could also be retrieved from the source document. Scientific documents usually organize tokens into groups like text lines or blocks, which are composed of consecutive pieces of text and can be segmented from other pieces based on spatial gaps. However, such information is not explicitly stored and can be extracted via visual layout detection models (Zhong et al., 2019; He et al., 2017) or PDF parsing (Tkaczyk et al., 2015).
+Formally, given a input page, the system will detect a series of m rectangle boxes for each group region B = {b1, . . . , bm}. It further allocates the page tokens to the group region and generates the visual groups gi = (bi, ti), where ti = {tj | aj bi, tj  T } is all tokens in the i-th group, and aj bi denotes token tj's bounding box aj is inside the group box bi.2 The token order in each group
+2When two group regions overlaps and cover some com-
+
+maintains the same as the original order. We refer to text blocks groups as G(b) and text line groups as G(l). In the following sections, we show how language models can benefit from these different types of document structures.
+3.2 I-VILA: Injecting Visual Layout Indicators
+According to the group token category uniformity assumption, token categories are homogeneous within a group, and categorical changes should happen at group breaks. It suggests the layout information should be incorporated in a way that informs token category consistency intra-group and signals possible token category changes inter-groups.
+We choose to supply VILA structures via inserting a special layout indicator token at the group boundary in the input text, which we refer as the H-VILA method. Compared to the previous model (Xu et al., 2020), our method provides explicit document structure signals. As shown in Figure 1 (c), the inserted tokens highlight the individual text segments, resulting in a more structured input for the language models that hints at possible category changes. Additionally, in H-VILA, the special token is seen at all layers of the model, providing the VILA signal at different stage of modeling, rather than just inserting the positional information at the initial embedding layers (Xu et al., 2020). We empirically show that BERTbased models can learn to leverage such special tokens to improve both the accuracy and the consistency of category predictions, even without an additional loss penalizing inconsistent predictions.
+In practice, given G, we linearize tokens ti from each group and flatten them into a 1D sequence TG. To avoid capturing confounding information in existing pre-training tasks, we insert a new special token [BLK] in-between ti texts. The resulting input sequence looks like {[CLS], t1,1, . . . , ti,ni, [BLK], ti+1,1, . . . , tm,nm, [SEP]}, where ti,j and ni indicate the jth token and the total number of tokens respectively in the i-th group, and [CLS] and [SEP] are the special tokens used in the BERT model and inserted to preserve a similar input structure. The input is subsequently sent to BERT-based models, and they are fine-tuned over the token classification objective with a cross entropy loss. Token-level position can also be injected in a similar way like
+mon tokens, the system will only assign the token to one of the groups.
+
+the LayoutLM model (Xu et al., 2020), and in this case, the corresponding coordinates for the newly injected [BLK] tokens are the group bounding box bi.
+
+3.3 H-VILA: Visual Layout-guided Hierarchical Model
+The uniformity of group token categories also suggests the possibility of building a group-level classifier. Inspired by recent advances in modeling long documents, hierarchical structures (Yang et al., 2020; Zhang et al., 2019) provides an ideal architecture for the end task while optimizing the computational cost. Two transformer-based models are used for encoding each group in terms of its words and modeling the whole document in terms of the groups respectively, and we provide the modeling details as follows.
+The Group Encoder is a l1-layer transformer that converts each group gi into a hidden vector hi. Following the typical transformer model setting (Vaswani et al., 2017), the model maps each group token tj  Tg(i) into a dense vector ej of dimension d. Subsequently, a group vector aggregation function f : Rni×d  Rd is applied that projects the token representation {e1, . . . , eni} to a single vector h~i that represents the group's textual information. We also consider the group's 2D spatial information, and inject them at the group level to enforce the model to capture the overall layout structure. The 2D spatial information is incorporated in the form of positional embeddings, and the final group representation hi can be calculated as:
+
+hi = h~i + p(bi).
+
+(1)
+
+p is the 2D positional embedding similar to the one used in LayoutLM:
+
+p(b) =Ex(x0) + Ex(x1) + Ew(x1 - x0)+ (2) Ey(y0) + Ey(y1) + Eh(y1 - y0),
+
+where Ex, Ex, Ew, Eh are the embedding matrices for x, y coordinates and width and height. In practice, we find that injecting the positional information using the first token's bounding box leads to better results.
+The Page Encoder is another l2-layer transformer model that operates on the group representation hi generated by the group encoder. The model learns the layout-contextualized group representations and generates the final group representation
+
+si for each group. A MLP-based linear classifier
+
+is attached after si, and is trained to generate the
+
+group-level category probability pic.
+
+Different from previous work (Yang et al., 2020),
+
+we restrict the variation in l1 and l2 such that we can
+
+directly load pre-trained weights from LayoutLM
+
+or similar models. Therefore, no additional pre-
+
+training is required, and we could directly fine-tune
+
+the H-VILA model for the downstream classifica-
+
+tion task. Specifically, we set l1 = 1 and initialize
+
+the group encoder from first transformer layer's
+
+weights of LayoutLM. The group model is config-
+
+ured as either a one layer transformer or a 12 layer
+
+transformer that resembles a full LayoutLM model.
+
+The weights are also initialized from the first or the
+
+full LayoutLM model.
+
+Group Token Truncation As suggested in
+
+Yang et al. (2020)'s work, when a input docu-
+
+ment of length N is evenly split into segments
+
+of Ls, the memory footprint of the hierarchical is
+
+O(l1N
+
+Ls
+
++
+
+l2(
+
+N Ls
+
+)2),
+
+and
+
+for
+
+long
+
+documents
+
+with
+
+N Ld, it approximates O(N 2/L2s). However,
+
+in our case, it is infeasible to adopt the Greedy
+
+Sentence Filling technique (Yang et al., 2020) as it
+
+will mingle signals from different groups and ob-
+
+fuscate the group structures. It's also less desirable
+
+to simply use the maximum token count per group
+
+max1im ni to batch the contents due to the high
+
+variance of the group length. Instead, we calculate
+
+the group token truncation count n~ based on key
+
+stats of the group token length distribution such
+
+that N  n~m, and use the first n~ to aggregate the
+
+group hidden vector hi for all groups. Therefore, H-
+
+VILA models can achieve similar efficiency gains
+
+seen in the previous methods.
+
+4 Benchmark Suite
+
+To systematically evaluate the proposed methods, we develop the the Semantic Scholar Visual Layout-enhanced Scientific Text Understanding Evaluation (S2-VLUE) benchmark suite. It consists of three datasets that are created differently, including a newly curated dataset, S2-VL, and a set of evaluation metrics that measures the prediction quality.
+
+4.1 Datasets
+The key stats of the datasets in S2-VLUE are listed in Table 1. Noticeably, the three datasets are differed in these perspectives: 1) annotation method, 2) VILA generation method, and 3) paper domain
+
+coverage. We provide the details as follows.
+GROTOAP2 The GROTOAP2 dataset (Tkaczyk et al., 2014) is created in a semi-automatic fashion: it detects visual groupings via the CERMINE PDF parsing tool (Tkaczyk et al., 2015), and obtains the token category by analyzing the metadata from PubMed Central, with a small-subset selected for human inspection and correction. As it is originally designed for the scientific document fragment classification task, it enforces the tokens within a detected group to share the same semantic category, even when groupings are incorrectly identified. Though the dataset has perfect group uniformity, the annotation schema is naturally biased towards the VILA-based method. Additionally, all the samples are extracted from the PMC Open Access Subset3 with only life sciences publications.
+DocBank The DocBank dataset (Li et al., 2020) is annotated automatically by paring the source TEX files available from arXiv. However, the dataset provides neither the VILA structures nor the paper PDF file.4 Hence, we develop a CNNbased vision layout detection model based on a collection of existing resources (Zhong et al., 2019; MFD; He et al., 2017; Shen et al., 2021) , and augment the dataset with VILA structures. Since VILA is generated independent of the token annotations, this dataset simulates a more practical scenario and is less biased towards the VILA setting. Yet the covered papers are limited to domains like Computer Science, Physics, and Mathematics, and the automatic generation process restricts the layout variation and the number of semantic categories labeled.
+S2-VL Moreover, we build a novel dataset S2VL that complements the missing features in the existing two datasets. The dataset is manually annotated by undergrad or graduate students who frequently read scientific papers. It is curated by the PAWLS annotation tool (Neumann et al., 2021), where both VILA and token categories are manually labeled: annotators are asked to draw rectangular boxes to indicate the visual layout structures, and all the containing tokens will be assigned with the same semantic category. Right now, it contains 1337 pages from 87 papers covering 19 different
+3https://www.ncbi.nlm.nih.gov/pmc/tools/openftlist/ 4The dataset generation method requires to re-render the source TEX files and results in document layouts different from those from the publicly available versions on arXiv. Only document page screenshots are provided.
+
+GROTOAP
+
+DocBank
+
+S2-VL
+
+Train / Dev / Test Pages Annotation Method Paper Domain VILA Structure
+
+834k / 18k / 18k Semi-Automatic Life Science PDF parsing
+
+398k / 50k / 50k Automatic Math / Physics / CS Vision model
+
+1.3k1 Human Annotation 19 Domains Gold Label / Detection methods
+
+# Tokens Per Page # Tokens Per Text Block # Tokens Per Text Line # Text Lines Per Page # Text Blocks Per Page
+
+1203 / 591 / 23072 838 / 503/ 1553
+
+90 / 184 / 431
+
+57 / 138 / 210
+
+17 / 12 / 38
+
+16 / 43 / 38
+
+90 / 51 / 171
+
+60 / 34 / 125
+
+12 / 16 / 37
+
+15 / 8 / 30
+
+790 / 453 / 1591 48 / 121 / 249 14 / 10 / 30 64 / 54 / 154 22 / 36 / 68
+
+1 This is the total number of pages in the S2-VL dataset; we use 5-fold cross-validation for training and testing. 2 For this and all following cells, we report the average / standard deviation / 95-th percentile value for this item.
+
+Table 1: Distinct features for the three datasets in the S2-VLUE benchmark.
+
+scientific disciplines, including philosophy and sociology that are not present in existing work. A 0.95 inter-annotator agreement score is recorded with respect to token annotation accuracy on a 12 paper subset. S2-VL also comes with the original PDF document, which provides the flexibility of generating VILA structures in other methods for benchmarking purposes.
+Overall, the datasets in S2-VLUE cover a wide range of scientific disciplines with different layouts. VILA structures are curated differently in these datasets, and can be used to assess the generalizability of the VILA-based methods.
+4.2 Metrics
+Prediction Accuracy The token label distribution are heavily skewed towards a background category (e.g., the "BODY_CONTENT" category in GROTOAP2 or the "paragraph" category in S2-VL and DocBank). Therefore, we choose to use the F1 Macro score as the main evaluation metric for prediction accuracy.
+Group Token Category Entropy We also develop a metric that calculates the uniformity of the token categories within a group. Hypothetically, tokens in Tg(i) share the same category c, and naturally the group inherits the semantic label c. However, due to incorrect token category prediction or group bounding boxes, the assumption might not hold true. We use the group token category entropy to measure the inconsistency of the (predicted) token categories within a group:
+
+H(g) = - pc log2 pc,
+
+(3)
+
+c
+
+where pc denotes the probability of a token in the
+
+group g being classified as category c. When all
+
+tokens in a group have the same category, the group
+
+token category entropy is zero. And H(g) reaches
+
+the maximum when pc is a uniform distribution
+
+across all possible categories. The impurity for
+
+grouped page document G is the arithmetic average
+
+for
+
+all
+
+groups
+
+in
+
+G:
+
+H(G)
+
+=
+
+1 m
+
+m i
+
+H(gi).
+
+It
+
+acts
+
+as an auxiliary metric for evaluating the prediction
+
+quality with respect the given VILA structures.
+
+5 Experiments
+5.1 Experimental Setup
+Implementation Details Our models are implemented based on PyTorch (Paszke et al., 2019) and the transformers library (Wolf et al., 2020). A series of baseline and VILA models are fine-tuned on 4-card RTX8000 or A100 machines. The AdamW optimizer (Kingma and Ba, 2014; Loshchilov and Hutter, 2019) is adopted with a learning rate of 5 × 10-55 and (1, 2) = (0.9, 0.999). The learning rate is linearly warmed up over the 5% steps then linearly decayed. For different datasets, unless otherwise specified, we selected the best finetuning batch size (40, 40 and 12) and training epochs (24, 6, and 10) for all the models.6 As for the S2-VL dataset, given its small size, we use 5-fold cross validation and report averaged scores. Though papers may have variable page numbers, we split the dataset based on papers rather than pages to avoid exposing paper templates of test samples in the training data. Mixed precision training (Micikevicius et al., 2018) is used to speed up
+52 × 10-5 when training the S2-VL dataset 6We trained 20 epochs for hierarchical models on the S2VL dataset till converge.
+
+GROTOAP2
+
+F1-macro H(G)
+
+Baseline
+
+LayoutLM
+
+92.34
+
+0.78
+
+I-VILA
+
+Sentence Text Line G(l) Text Block G(b)
+
+91.83
+
+0.78
+
+92.37
+
+0.73
+
+93.38
+
+0.53
+
+H-VILA
+
+Naïve Text Line G(l) Text Block G(b)
+
+92.65
+
+0.00
+
+91.65
+
+0.32
+
+92.37
+
+0.00
+
+DocBank
+
+F1-macro H(G)
+
+91.06
+
+3.04
+
+91.44
+
+3.03
+
+92.79
+
+2.59
+
+92.00
+
+2.51
+
+87.01
+
+0.00
+
+91.27
+
+1.07
+
+87.78
+
+0.00
+
+S2-VL
+
+F1-macro
+
+H(G)
+
+81.65(5.05) 3.56(0.62)
+
+82.03(4.20) 3.50(0.38) 82.40(4.58) 3.38(0.77) 86.09(4.76) 1.90(0.46)
+
+82.34(4.80) 0.68(0.30) 78.88(3.89) 2.52(0.62) 79.32(3.65) 0.45(0.28)
+
+Inference Time (ms)
+52.56(0.25)
+54.09(0.37) 56.31(0.40) 53.27(0.13)
+82.57(0.30) 28.07(0.37) 16.37(0.15)
+
+Table 2: Model Performance on the Three Benchmark Datasets. Models with layout indicator achieves better accuracy, while hierarchical models achieves significant efficiency gain compared to the baseline methods.
+
+the training process. For I-VILA models, we fine-tune several BERT-
+variants with text inputs based on text block and text line groupings, with models initialized from pre-trained weights available in the transformers library. The H-VILA models are initialized as mentioned in Section 3.3, and by default positional information is injected for each group.
+Competing Methods We consider three different approaches that competes with the proposed methods from different perspectives: 1) The LayoutLM (Xu et al., 2020) model is used as the baseline method, which achieves the previous SOTA performance on the Scientific PDF task (Li et al., 2020). 2) As for indicator-based methods, besides using the VILA-based indicators, we also consider a model with indicators for sentence breaks detected by PySBD (Sadvilkar and Neumann, 2020). 3) For the hierarchical models, we also consider a naïve approach where the group texts are separately fed in a LayoutLM model for classifying the group category. However, despite the group texts are relatively shorter, it causes extra computational overhead as the full LayoutLM model needs to be run a total of m 3 times for all the groups. As such, we only consider text block level grouping in this case or otherwise it's too inefficient, and the models are only trained for () epochs for the three datasets.
+Measuring Efficiency We use the actual inference time per sample to measure the efficiency of the models. In this case, all the models are tested on an isolated machine with a single V100 GPU. We select 1,000 pages from the GROTOAP2 test set, and report the averaged model runtime for 3 runs on this subset.
+
+Base Model I-VILA F1-marco H(G)
+
+DistilBERT
+
+None Text Line Text Block
+
+90.52
+
+1.95
+
+91.14
+
+1.33
+
+92.12
+
+0.73
+
+BERT
+
+None Text Line Text Block
+
+90.78
+
+1.58
+
+91.65
+
+1.13
+
+92.31
+
+0.63
+
+LayoutLM
+
+None Text Line Text Block
+
+92.34
+
+0.78
+
+92.37
+
+0.73
+
+93.38
+
+0.53
+
+Table 3: Inserting VILA indicator tokens leads to consistent improvements on different BERT-based models.
+
+5.2 Evaluation Results
+Summarized in Table 2, VILA-based approaches achieve better accuracy or efficiency under different scenarios. As mentioned before, macro-F1 is reported to quantify classification accuracy. We also report the group token entropy for text block groups G(b) in the dataset.
+I-VILA models lead to consistent improvements when layout information is injected. Compared to the baseline LayoutLM model, which uses regular textual input, inserting layout indicators into the inputs results in +1  4.5 F1 score improvements across the three benchmark datasets. I-VILA models also achieves better token prediction consistency, whereas the averaged text block token category H(G(b)) is reduced by 17­47% compared to the baseline. Moreover, VILA information is also more helpful than language structures: I-VILA models based on text blocks and lines outperform the sentence boundary-based method.
+
+Text Line
+
+l2 Use 2D Position F1-macro H(G) Inference Time
+
+ 1
+
+
+89.77 1.73 91.30 1.17
+
+24.23(0.06) 24.47(0.45)
+
+ 12
+
+
+91.07 0.63 91.65 0.32
+
+27.60(0.11) 28.07(0.37)
+
+Text Block
+
+F1 macro Impurity Inference Time
+
+91.93 91.89
+
+0.00 15.90(0.19) 0.00 16.05(0.28)
+
+92.14 92.37
+
+0.00 16.65(0.09) 0.00 16.37(0.15)
+
+Table 4: Model performances for different H-VILA architectures.
+
+H-VILA models, on the other hand, lead to significant efficiency improvements. In Table 2, we report the results for H-VILA models with l1 = 1 and l2 = 12, and the group vector aggregation function f is the average of all tokens representations. As block-level models perform prediction directly at the text block level, the token category entropy is naturally zero. Compared to the baseline LayoutLM model or the naïve approach, it achieves a similar level of accuracy, yet brings up-to 80% reduction in the inference time.
+However, in H-VILA models, the inductive bias for the group uniformity assumption is a doubleedged sword: the models are often less accurate than I-VILA counterparts, and performing block level classification may lead to worse results (-3.49 F1 in DocBank). Shown in Figure 5, when faced with confounding samples, or when the block detection is incorrect, the H-VILA method lacks the flexibility to assign different token categories within a group, which potentially leads to worse accuracy. Yet text line typically contains shorter sequence, and the empirical risk of error predictions are lower. Detailed analysis is provided in Section 6.
+5.3 I-VILA on different BERT variants
+We also test I-VILA on different BERT variants on the GROTOAP2 dataset, and show it leads to consistent improvements for all base models in Table 3. In the BERT and DistilBERT model, when layout indicator tokens are injected, their 2D coordinates are never used. Yet it records even better improvements (+1.6 and +1.53 F1) against the baseline than that in the LayoutLM model (+1.04 F1). In addition, using I-VILA in BERT inputs leads to almost identical performance as the baseline LayoutLM model. Combined together, they show layout information can be inserted to language models in a novel fashion, and suggest input structures are critical for BERT-based models.
+
+5.4 Ablating the Optimal Configurations for H-VILA
+Next we analyze different architectures of the HVILA models using the GROTOAP2 dataset. By varying the transformer layers l2 in the group models, we aim to find the best configurations with an optimal balance between accuracy and efficiency. We also investigate the importance of 2D group positions by experimenting with only using the textual representation h~i in the group models. The results are presented in Table 4.
+As mentioned previously, we experiment with l2  {1, 12} in order to take advantage of the existing pre-trained BERT weights. Interestingly, even with only a two layer structure (when l2 = 1), the model can capture sufficient semantic information, and generate predictions with satisfactory accuracy. It brings considerable efficiency improvements, with the best model (marked with in the table) beating the baseline LayoutLM by 68%, let alone the naïve baseline (80%). This model also beats the baseline DistilBERT model with 90.52 Macro F1 score and 26.48 ms Inference Time.
+We do see consistent improvements when 2D positional information is injected into the group representations. When groups are generated using text lines, modeling using hi also leads to lower token category impurity within a block. In this case, the models learn to capture the spatial bias and more consistent predictions are generated.
+5.5 Few-shot Experiments on the S2-VL Dataset
+Finally, we show the I-VILA methods can help the model training and improve sample efficiency. We conduct few-shot learning experiments on the S2VL dataset, training models using samples from 5, 10, 15, 25, and 45 papers. Similar to previous settings, 5-fold cross validation is applied to each few-shot experiment, and train-test splits are
+
+*7GSVI
+
+       
+
+
+
+
+
+
+
+
+
+
+2YQFIVSJ8VEMRMRK4ETIVW
+
+0E]SYX01 -:-0%blk -:-0%row ,:-0%blk ,:-0%row
+
+
+Figure 2: Few-shot learning experiments on the S2-VL dataset
+
+sition7 are considered as a text line. But text blocks are less well-defined and the concept might vary in different context. For example, section headers and the proceeding paragraphs are labeled in separate text blocks in some cases (Zhong et al., 2019)), while they could be merged as in a single text chunk due to their proximity (Tkaczyk et al., 2015). If the block detection is inconsistent with the token semantic schema (e.g., when the model is required to differentiate section headers and paragraph texts yet they are included in the same text block), the block signal might be less helpful or even hurt VILA-based model.
+
+held constant when varying training sample size. Equipped with text block indicators, the I-VILA models trained on a 15-paper subset can beat the baseline LayoutLM model trained on a full dataset of 70 papers. However, the text line based I-VILA models lead to relatively less improvements compared to the text block based counterpart. This difference could be explained by the distinct text block and line count per page (Table 1). With 50% more text lines on a page, the special token is injected into the inputs more frequently. It causes a more different text structure than what the models are pre-trained on, and the frequent appearance of such tokens diminish their relative importance.
+6 Discussion
+Though we treat text line and blocks (almost) interchangeably in the previous sections, using G(b) and G(l) may lead to different modeling outcomes. In this section, we try to answer questions on 1) which grouping level is preferred and 2) what is the best way to obtain these groupings. We start with a careful analysis of the definition of the text "blocks" and "lines", and identify possible issues in text blocks that might violate the group token uniformity assumption. Additional experiments are implemented where we compare different text block detection methods on the S2-VL dataset, and draw conclusions that might be helpful for practical uses.
+6.1 Text Blocks vs. Text Line
+Text lines are well-studied in layout analysis, partly because of the relatively unambiguous definition: consecutive texts appearing at the same vertical po-
+
+6.2 S2-VL with Different Group Detectors
+To verify the idea, we change the G(b) via PDF parsing (Tkaczyk et al., 2015) or vision model detection (He et al., 2017) for the S2-VL dataset, train and evaluate the models on the new datasets, and report the performance in Table 5. As shown in Figure 5, the PDF parsing engine's block detection is inconsistent with our token labeling schema, where a block usually contain tokens different categories. I-VILA models record less accuracy improves, and H-VILA methods are penalized heavily as they are enforced to generate the same prediction.
+We also vary the text line detection methods, retrain the models, and report their performance in Table 6. Similarly, the vision model yields better line detection results, and thus leads to better performance in the VILA-based models.
+We conclude with some practical suggestions for using VILA-based methods. 1) When consistent text blocks are available, G(b) is preferred as it can lead to better accuracy and efficiency gains. Equivalently, when creating new datasets, it is ideal to design the token labeling schema to align with the block detection method. 2) Otherwise, using G(l) or I-VILA is a viable option that can lead to consistent modeling improvements. 3) Despite being more computationally expensive, using a vision detection model can lead to more robust accuracy improvements.
+7 Visualizing Group Representations
+We also explore the learned group representation from the hierarchical models, and demonstrate it can facilitate other forms of scientific document analysis. In Figure 4, we show a visualization of the latent vectors for text blocks from the DocBank
+7or horizontal position when the text are written vertically.
+
+Figure 3: Visualization of the token level prediction results on the original page. From left to right, we present the ground-truth token category and text block bounding boxes (highlighted in red rectangles), and model predictions from the baseline, I-VILA, and H-VILA model. We use G(b) for VILA-based methods. When VILA is injected, the model achieves more consistent predictions as indicated by arrow (a) and (b) in the figure.
+
+G(b) Source
+
+I-VILA
+
+F1-macro
+
+H(G)
+
+Ground-Truth 86.09(4.76) 1.90(0.46) PDF Parsing 81.88(5.18) 3.67(0.87) Vision Model 82.65(4.90) 2.51(0.44)
+
+H-VILA
+
+F1-macro
+
+H(G)
+
+79.32(3.65) 0.45(0.28) 75.17(4.10) 0.02(0.01) 76.06(4.66) 0.38(0.22)
+
+Table 5: Model performances when using different G(b) for training and evaluation on the S2-VL dataset.
+
+dataset; these are extracted from the last layer of the H-VILA model. As classification is skewed towards the paragraph category, we select 5k groups for each of the 12 categories in the test set, and use UMAP (McInnes et al., 2018; McInnes et al., 2018) to project them onto a 2D plane. Each point represents a single block, colored according to the group category. We observe certain clusters for categories like title, section (header), captions, figure (token), etc, which shows the model can successfully differentiate the text structures. Some spatial-sensitive categories like footer also form their own clusters, indicating the model might be able to capture layout-contextualized representations. Compared to existing methods (Cohan et al., 2020), the group-level representation provides another level of granularity for analyzing scientific papers, and may shed light on other scientific NLP tasks such as identifying granular citation intent, scientific claim-evidence identification, or abstractive summarization of scientific papers.
+8 Conclusion
+In this paper, we introduce two new ways to integrate Visual Layout (VILA) structures into the
+
+Figure 4: UMAP projection of the learned layout contextualized representation for text blocks in H-VILA models
+NLP pipeline for analyzing scientific documents. We show that inserting special indicator tokens based on VILA (I-VILA) can lead to robust improvements in token classification accuracy (up to +4.5 F1) and consistency. In addition, we design a hierarchical transformer model based on VILA (H-VILA), which achieves an up to 68% inference time reduction with a similar level of accuracy compared to previous SOTA methods. We release a benchmark suite, along with a newly curated dataset S2-VL, to systematically evaluate the proposed methods. We ablate the influence of different visual layout detectors on VILA-based models, and provide suggestions for practical use. Our
+
+Figure 5: Different from Figure 3, here we show models trained and evaluated with "inconsistent" text block detections. The blocks are created by the CERMINE PDF parsing program (Tkaczyk et al., 2015), which (a) fails to capture the correct table structure and (b) does not separate body text contents into different blocks. Though VILA-based models utilize the group structure to increase the block uniformity, overall prediction accuracy is hurt due to the inconsistent block signal.
+
+G(b) Source
+
+I-VILA
+
+F1-macro
+
+H(G)
+
+PDF Parsing 82.40(4.58) 3.38(0.77) Vision Model 82.87(3.95) 3.22(0.53)
+
+H-VILA
+
+F1-macro
+
+H(G)
+
+78.88(3.89) 2.52(0.62) 80.47(2.03) 2.62(0.70)
+
+Table 6: Model performances when using different G(l) for training and evaluation on the S2-VL dataset.
+
+study is well-aligned with the recent exploration of injecting structure into language models, and provides new perspectives on how to incorporate visual structures.
+
+References
+Icdar2021 competition on mathematical formula detection. http://transcriptorium.eu/ ~htrcontest/MathsICDAR2021/. Accessed: 2021-04-30.
+2008­2021. Grobid. https://github.com/ kermitt2/grobid.
+2019. ICDAR: Competition on scanned receipts ocr and information extraction.
+Waleed Ammar, Dirk Groeneveld, Chandra Bhagavatula, Iz Beltagy, Miles Crawford, Doug Downey, Jason Dunkelberger, Ahmed Elgohary, Sergey Feldman, Vu Ha, Rodney Kinney, Sebastian Kohlmeier, Kyle Lo, Tyler Murray, Hsu-Han Ooi, Matthew Peters, Joanna Power, Sam Skjonsberg, Lucy Wang, Chris Wilhelm, Zheng Yuan, Madeleine van Zuylen, and Oren Etzioni. 2018. Construction of the literature graph in semantic scholar. In Proceedings of
+
+the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 3 (Industry Papers), pages 84­91, New Orleans - Louisiana. Association for Computational Linguistics.
+He Bai, Peng Shi, Jimmy Lin, Yuqing Xie, Luchen Tan, Kun Xiong, Wen Gao, and Ming Li. 2020. Segatron: Segment-aware transformer for language modeling and understanding. arXiv preprint arXiv:2004.14996.
+Iz Beltagy, Kyle Lo, and Arman Cohan. 2019. SciBERT: A pretrained language model for scientific text. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP), pages 3615­ 3620, Hong Kong, China. Association for Computational Linguistics.
+Leo Breiman. 2001. Random forests. Machine learning, 45(1):5­32.
+Arman Cohan, Sergey Feldman, Iz Beltagy, Doug Downey, and Daniel Weld. 2020. SPECTER: Document-level representation learning using citation-informed transformers. In Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics, pages 2270­2282, Online. Association for Computational Linguistics.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2019. BERT: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers), pages 4171­4186, Minneapolis, Minnesota. Association for Computational Linguistics.
+
+Catherine Finegan-Dollak and Ashish Verma. 2020. Layout-aware text representations harm clustering documents by type. In Proceedings of the First Workshop on Insights from Negative Results in NLP, pages 60­65.
+Filip Gralin´ski, Tomasz Stanislawek, Anna Wróblewska, Dawid Lipin´ski, Agnieszka Kaliska, Paulina Rosalska, Bartosz Topolski, and Przemyslaw Biecek. 2020. Kleister: A novel task for information extraction involving long documents with complex layout. arXiv preprint arXiv:2003.02356.
+Kaiming He, Georgia Gkioxari, Piotr Dollár, and Ross Girshick. 2017. Mask r-cnn. In Proceedings of the IEEE international conference on computer vision, pages 2961­2969.
+Sepp Hochreiter and Jürgen Schmidhuber. 1997. Long short-term memory. Neural computation, 9(8):1735­1780.
+Diederik P Kingma and Jimmy Ba. 2014. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980.
+John Lafferty, Andrew McCallum, and Fernando CN Pereira. 2001. Conditional random fields: Probabilistic models for segmenting and labeling sequence data.
+Haejun Lee, Drew A. Hudson, Kangwook Lee, and Christopher D. Manning. 2020. SLM: Learning a discourse language representation with sentence unshuffling. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP), pages 1551­1562, Online. Association for Computational Linguistics.
+Minghao Li, Yiheng Xu, Lei Cui, Shaohan Huang, Furu Wei, Zhoujun Li, and Ming Zhou. 2020. Docbank: A benchmark dataset for document layout analysis.
+Nikolaos Livathinos, Cesar Berrospi, Maksym Lysak, Viktor Kuropiatnyk, Ahmed Nassar, Andre Carvalho, Michele Dolfi, Christoph Auer, Kasper Dinkla, and Peter Staar. 2021. Robust pdf document conversion using recurrent neural networks. arXiv preprint arXiv:2102.09395.
+I. Loshchilov and F. Hutter. 2019. Decoupled weight decay regularization. In ICLR.
+L. McInnes, J. Healy, and J. Melville. 2018. UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction. ArXiv e-prints.
+Leland McInnes, John Healy, Nathaniel Saul, and Lukas Grossberger. 2018. Umap: Uniform manifold approximation and projection. The Journal of Open Source Software, 3(29):861.
+
+P. Micikevicius, Sharan Narang, Jonah Alben, G. Diamos, Erich Elsen, David García, Boris Ginsburg, Michael Houston, O. Kuchaiev, Ganesh Venkatesh, and H. Wu. 2018. Mixed precision training. ArXiv, abs/1710.03740.
+Mark Neumann, Zejiang Shen, and Sam Skjonsberg. 2021. Pawls: Pdf annotation with labels and structure. arXiv preprint arXiv:2101.10281.
+Seunghyun Park, Seung Shin, Bado Lee, Junyeop Lee, Jaeheung Surh, Minjoon Seo, and Hwalsuk Lee. 2019. Cord: A consolidated receipt dataset for postocr parsing. In Workshop on Document Intelligence at NeurIPS 2019.
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. 2019. Pytorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems, volume 32. Curran Associates, Inc.
+Nipun Sadvilkar and Mark Neumann. 2020. PySBD: Pragmatic sentence boundary disambiguation. In Proceedings of Second Workshop for NLP Open Source Software (NLP-OSS), pages 110­114, Online. Association for Computational Linguistics.
+Zejiang Shen, Ruochen Zhang, Melissa Dell, Benjamin Charles Germain Lee, Jacob Carlson, and Weining Li. 2021. Layoutparser: A unified toolkit for deep learning based document image analysis. arXiv preprint arXiv:2103.15348.
+Noah Siegel, Nicholas Lourie, Russell Power, and Waleed Ammar. 2018. Extracting scientific figures with distantly supervised neural networks. In Proceedings of the 18th ACM/IEEE on joint conference on digital libraries, pages 223­232.
+Peter WJ Staar, Michele Dolfi, Christoph Auer, and Costas Bekas. 2018. Corpus conversion service: A machine learning platform to ingest documents at scale. In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pages 774­782.
+Ilya Sutskever, Oriol Vinyals, and Quoc V Le. 2014. Sequence to sequence learning with neural networks. In Advances in Neural Information Processing Systems, volume 27. Curran Associates, Inc.
+Dominika Tkaczyk, Pawel Szostek, and Lukasz Bolikowski. 2014. Grotoap2--the methodology of creating a large ground truth dataset of scientific articles. D-Lib Magazine, 20(11/12).
+Dominika Tkaczyk, Pawel Szostek, Mateusz Fedoryszak, Piotr Jan Dendek, and Lukasz Bolikowski. 2015. Cermine: automatic extraction of structured metadata from scientific literature. International
+
+Journal on Document Analysis and Recognition (IJDAR), 18(4):317­335.
+Dejan Todorovic. 2008. Gestalt principles. Scholarpedia, 3(12):5345.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, L ukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. In Advances in Neural Information Processing Systems, volume 30. Curran Associates, Inc.
+Lucy Lu Wang, Isabel Cachola, Jonathan Bragg, Evie Yu-Yen Cheng, Chelsea Haupt, Matt Latzke, Bailey Kuehl, Madeleine van Zuylen, Linda Wagner, and Daniel S Weld. 2021. Improving the accessibility of scientific documents: Current state, user needs, and a system solution to enhance scientific pdf accessibility for blind and low vision users. arXiv e-prints, pages arXiv­2105.
+Lucy Lu Wang, Kyle Lo, Yoganand Chandrasekhar, Russell Reas, Jiangjiang Yang, Darrin Eide, Kathryn Funk, Rodney Kinney, Ziyang Liu, William Merrill, et al. 2020. Cord-19: The covid-19 open research dataset. ArXiv.
+Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexander Rush. 2020. Transformers: State-of-the-art natural language processing. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing: System Demonstrations, pages 38­45, Online. Association for Computational Linguistics.
+Yiheng Xu, Minghao Li, Lei Cui, Shaohan Huang, Furu Wei, and Ming Zhou. 2020. Layoutlm: Pretraining of text and layout for document image understanding. In Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pages 1192­1200.
+Liu Yang, Mingyang Zhang, Cheng Li, Michael Bendersky, and Marc Najork. 2020. Beyond 512 tokens: Siamese multi-depth transformer-based hierarchical encoder for long-form document matching. In Proceedings of the 29th ACM International Conference on Information & Knowledge Management, pages 1725­1734.
+Xingxing Zhang, Furu Wei, and Ming Zhou. 2019. HIBERT: Document level pre-training of hierarchical bidirectional transformers for document summarization. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics, pages 5059­5069, Florence, Italy. Association for Computational Linguistics.
+Xu Zhong, Jianbin Tang, and Antonio Jimeno Yepes. 2019. Publaynet: largest dataset ever for document
+
+layout analysis. In 2019 International Conference on Document Analysis and Recognition (ICDAR), pages 1015­1022. IEEE.
+
+

@@ -1,0 +1,1524 @@
+arXiv:2106.01579v1 [physics.comp-ph] 3 Jun 2021
+
+High-order flux reconstruction method for the hyperbolic formulation of the incompressible Navier-Stokes equations on unstructured grids
+Mohamed M. Kamraa, Jabir Al-Salamib, Changhong Hua
+aResearch Institute for Applied Mechanics, Kyushu University, 6-1 Kasuga-koen, Kasuga City, Fukuoka, Japan, 816-0855
+bInterdisciplinary Graduate School of Engineering Sciences, Kyushu University, 6-1 Kasuga-koen, Kasuga City, Fukuoka, Japan, 816-0855
+
+Abstract
+A high-order Flux reconstruction implementation of the hyperbolic formulation for the incompressible Navier-Stokes equation is presented. The governing equations employ Chorin's classical artificial compressibility (AC) formulation cast in hyperbolic form. Instead of splitting the second-order conservation law into two equations, one for the solution and another for the gradient, the Navier-Stokes equation is cast into a first-order hyperbolic system of equations. Including the gradients in the AC iterative process results in a significant improvement in accuracy for the pressure, velocity, and its gradients. Furthermore, this treatment allows for taking larger time-steps since the hyperbolic formulation eliminates the restriction due to diffusion. Tests using the method of manufactured solutions show that solving the conventional form of the Navier-Stokes equation lowers the order of accuracy for gradients, while the hyperbolic method is shown to provide equal orders of
+Email address: mohamed.kamra@riam.kyushu-u.ac.jp (Mohamed M. Kamra)
+
+Preprint submitted to Journal Name
+
+June 4, 2021
+
+accuracy for both the velocity and its gradients which may be beneficial in several applications. Two- and three-dimensional benchmark tests demonstrate the superior accuracy and computational efficiency of the developed solver in comparison to the conventional method and other published works. This study shows that the developed high-order hyperbolic solver for incompressible flows is attractive due to its accuracy, stability and efficiency in solving diffusion dominated problems. Keywords: Hyperbolic method, Flux reconstruction, Unstructured grid, Incompressible Navier-Stokes equations, Artificial compressibility method
+1. Introduction
+The Finite Volume method (FVM) is the most widely used method in industrial computational fluid dynamics due to its robustness and ability to handle complicated geometries using unstructured grids. These attractive features motivated a large body of research that aimed to increase its spatial accuracy beyond the standard second order while maintaining its geometric flexibility.
+Extensions of FVM to higher orders of accuracy are often achieved through reconstruction of the state variables at the cell faces based on values at neighboring cell centers[1, 2]. Reconstruction strategies commonly include polynomial reconstruction[1, 3], moving Least-Squares[4­6], the Moving Kriging(MK)method [7] and interpolation by means of Radial basis functions (RBF) [8, 9].
+Most notable among high-order FVM strategies are extensions of the popular essentially non-oscillatory (ENO) of Harten et al. [10] and the weighted
+2
+
+ENO (WENO) schemes of Liu et al. [11] to unstructured grids [12­16]. An issue that is common among such methods is their reliance on large computational stencils. This limits their use for practical and large-scale applications due to the computational cost incurred by the increased memory access and large partitioning halo during parallel computations [17­19].
+In contrast to the aforementioned approaches, high order methods, such as the discontinuous Galerkin (DG) and spectral difference (SD) methods, can achieve high order spatial accuracy on complicated geometries using compact stencils that only involve immediate face neighbors. When combined with high-order curved elements, such methods can deliver simulations of flows in complicated geometries that are more accurate than low-order methods while using fewer degrees of freedom. Nevertheless, industrial adoption of such methods remains restricted due to their large memory footprint when implicit time stepping is used. Additionally, the lack of robustness when generating higher order curved elements for regular engineering applications remains a concern.
+The flux reconstruction method (FR) was proposed by Huynh[20] to unify the nodal DG and SD methods under a single framework. In this method, the partial differential equations are solved in their differential form, similar to the finite difference (FD) method. FR schemes maintain a compact computational stencil when explicit time-stepping is used thus making it ideal for modern General Purpose Graphical Processing Units (GPGPUs) [21­25]. An excellent example of such implementation is the PyFR open-source code. PyFR is a cross-platform framework for solving advection-diffusion equations using the FR approach on mixed unstructured grids. This framework allows
+3
+
+the generation of platform portable code using a single implementation via Python and MAKO templates. PyFR supports backends for C/OpenMP, CUDA, OpenCL and most recently HIP. Therefore it is suitable for running on CPUs as well as GPUs. For more details on the PyFR open-source software, the reader is referred to the following works[25­28]. Vermeire et al. found that high-order methods offer better accuracy vs. cost benefits relative to standard industry tools on similar hardware[29]. An FR implementation of the incompressible Naiver-Stokes equations via the AC formulation was presented by Cox et al.[30] and Loppi et al.[27] who later introduced adaptive local pseudo-time stepping to improve the performance of the method while maintaining accuracy[28].
+Lately, Nishikawa suggested a hyperbolic method for solving steady diffusion problems[31] and steady advection-diffusion problems [32] to reconcile the inconsistency between advection and diffusion fluxes. The idea, first proposed by Cattaneo[33] and Vernotte[34], replaces the gradients of field variables that appear in the diffusive flux with additional variables that are coupled to the original system in pseudo-time. In the approach, an advectiondiffusion equation (i.e. a hyperbolic-parabolic equation) is transformed in to a system of first order hyperbolic equations with a relaxation parameter that is independent of the solution or the mesh resolution.
+The method was developed in the finite-volume framework for diffusion equation[31, 35­38], advection-diffusion equation[39, 40] Navier-Stokes equations [41­44] , and incompressible Navier-Stokes equations[42, 45].
+Furthermore, the method was adapted to the high-order DG method by Mazaheri and Nishikawa[46] and Lou et al.[47] for advection-diffusion
+4
+
+equation on unstructured Grids. The method was also applied to the reconstructed discontinuous Galerkin (rDG) by Lou et al.[48] for linear advection­diffusion equations and Li et al.[49] for compressible Navier-Stokes equations.
+Lou et al. recently developed a hyperbolic method for advection-diffusion problems in the FR framework[50] and proved its convergence, stability and consistency features for linear advection-diffusion problems for arbitrary orders of accuracy.
+An issue that arises when attempting to numerically solve the conventional Navier-Stokes equation using an explicit scheme is the severe time-step restriction in diffusion dominated problems. Even in advection dominated problems (i.e., high Reynolds number flows), localized high diffusion areas, either due to turbulence eddy viscosity or artificially introduced viscosity for stabilization purposes, can have a significant effect on global stability especially if they overlap with locally refined mesh areas. Additionally, turbulence models may significantly benefit from an increase in the accuracy and order of accuracy of the velocity gradients, which are usually lower than the primitive variables in the traditional formulation. In this article, the artificially compressible variant of the incompressible Navier-Stokes equations are cast in a hyperbolic form and solved using the high-order flux reconstruction method. The developed hyperbolic incompressible flow solver, hereafter referred to as HINS-FR, is implemented in the framework of PyFR.
+The paper is organized as follows. In Section 2, a brief overview of the flux reconstruction approach is given followed by a description of hyperbolic formulation of the incompressible NS equations. Key differences are highlighted
+5
+
+between the hyperbolic and the conventional method of solving the AC-NS equations in the context of the FR approach, hereafter denoted INS-FR. In Section 3, a series of test cases are used to study the error convergence of the developed solver and results are compared with other relevant numerical and experimental studies. Test cases include the method of manufactured solutions, Taylor-Couette flow and the lid driven cavity problem. Finally, a 3D test case is presented for the flow past a sphere for which the hyperbolic method was compared to results of the high-order DG method as well as a hyperbolic FV method. The substantial improvement in parallel performance that results from using the developed HINS-FR solver is demonstrated through a scalability study. Finally, conclusions and future work are discussed in Section 4.
+
+2. Numerical Method
+
+2.1. Flux Reconstruction Consider the following conservation-law
+
+u t
+
++
+
+
+
+·
+
+f
+
+=
+
+S
+
+(1)
+
+where u = u(x, t) is the conservative field variables, f = f(u, u) is the corresponding flux and S denotes the source term. The subscript  denotes a field variable, where 0   < Nv and Nv is the number of field variables. The solution domain is divided into a set of N non-overlapping conforming elements of suitable types such that
+
+N -1
+
+ = n
+
+(2)
+
+n=0
+
+6
+
+where n is the element index in the element set . Calculations are carried out in transformed space by mapping each el-
+ement into its respective canonical element according to its type. This is achieved by means of the iso-parametric mapping
+
+x~ = M-en1(x)
+
+(3)
+
+x = Men(x~)
+
+(4)
+
+where the subscript e denotes element type. The Jacobian matrices and determinants associated with the mapping are
+
+J-en1
+
+=
+
+Je-n1ij
+
+=
+
+ M-en1i xj
+
+Jen
+
+=
+
+Jenij
+
+=
+
+Meni x~j
+
+(5)
+
+Ie-n1
+
+=
+
+det
+
+J-en1
+
+=
+
+1 Ien
+
+Ien = detJen.
+
+(6)
+
+The mapped flux and gradients of the solution can be expressed as
+
+~f (x~, t) = Ie-n1(x~)J-en1(Men(x~))fen(Men(x~), t)
+
+(7)
+
+~ uen(x~, t) = JTen(x~)uen(Men(x~), t)
+
+(8)
+
+where ~ = /x~i. Equation (1) can then be conveniently rewritten in terms of the divergence of the transformed flux as
+
+uen t
+
++
+
+Ie-n1~
+
+· ~fen
+
+=
+
+S
+
+(9)
+
+A set of solution points, x~ueq, where 0  q < Neq, are distributed within n using an appropriate distribution. In this work, points in quads are the
+
+7
+
+Gauss-Legendre points and Williams-Shunn[51] points in triangles. In threedimensions, points in hexahedral are the Gauss-Legendre points, ShunnHam[52] points in tetrahedra, and Gauss-Legendre-Williams-Shunn for prisms.
+Next, a nodal basis set leq(x~) is constructed using (x~)eq, which is a basis set that spans a polynomial space of order m such that
+
+leq(x~er) = Ve-q1rer(x~er)
+
+(10)
+
+where Veqr are the elements of the Vandermonde matrix. The nodal basis are required to satisfy the property lei(x~ej) = ij.
+In addition to solution points, a set of flux points , x~feq where 0  q < Nf , are defined on element boundaries such that they share the same physical coordinates with the flux points of face-neighbors.
+Solving Equation (9) using the flux reconstruction procedure can be broken-down into the following steps:
+
+Step 1-a The solution at an element's flux points is found by interpolating from the solution at its solution points
+
+ufein = uueqn leq(x~fei)
+
+q  [0, Neq[ .
+
+(11)
+
+This results in an approximation of the solution that is discontinuous across element boundaries.
+
+Step 1-b The previously obtained values are then used to find a common solution at coinciding flux points from neighboring elements
+
+Cufeqn = Cufe q n  = C(ufeqn, ufe q n ) 8
+
+q  [0, Ne[
+
+(12)
+
+where C here is a scalar function, commonly simple upwinding as in the local
+
+Discontinuous Galerkin (LDG) approach, that takes the left, ufeqn, and right,
+
+ufe
+
+q
+
+n
+
+,
+
+
+solutions
+
+and
+
+returns
+
+a
+
+common
+
+value.
+
+Step 1-c The gradient of the solution that appears in the flux, f = f(u, u), is computed by reconstructing a continuous solution using a vector correction function gefq(x~) that satisfies
+
+n^~r · gefq(x~fer) = qr.
+
+(13)
+
+The transformed gradient of the continuous solution at solution points is
+
+then computed as follows
+
+~ uueqn = (n^~ei~ ) · gei(x~ueq) C(ufein) - ufein + uuejn~ leuj(x~ueq).
+
+(14)
+
+Gradients are transformed to physical space using
+
+uueqn = J-eqTn(~ u)ueqn
+
+(15)
+
+where J-eqTn = J-enT (x~eq). Gradients are also interpolated at the flux points in a manner similar to
+
+step 1-a:
+
+ufen = uuen leq(x~feq)
+
+q  [0, Ne[ .
+
+(16)
+
+Step 2-a Using the results from the steps above, the transformed flux at the solution points is evaluated according to
+
+~feuqn = IeqnJ-eq1nf (uueqn, uueqn).
+
+(17)
+
+The normal, transformed flux at flux points is then computed using
+
+f~efqn = lei(x~feq)n^~eq · ~feuin
+
+(18)
+
+9
+
+Step 2-b Common normal inviscid fluxes are found using a suitable Riemann solver.
+
+Fefefqn
+
+=
+
+-Fefef
+
+ q
+
+n
+
+
+
+=
+
+Fe(ufeqn, ufe
+
+q
+
+n
+
+, n^feqn)
+
+(19)
+
+In all simulations carried out in this work, local Lax-Friedrichs fluxes were used.
+
+Step 2-c Similarly, a scalar function Fv, eg. the LDG approach, is used to find the common viscous flux
+
+Fv fefqn
+
+=
+
+-Fv
+
+fef
+
+ q
+
+n
+
+
+
+=
+
+Fv(ufeqn, ufe
+
+q
+
+n
+
+, ueqn, ue
+
+q
+
+n
+
+,
+
+n^feqn)
+
+(20)
+
+Step 3 Finally, the total normal common flux F = Fe - Fv is transformed to standard element space
+
+F f~efqn = IefqnnfeqnF fefqn
+
+(21)
+
+and the divergence of the continuous flux is found using a procedure that is analogous to Equation (14)
+
+(~ · ~f )ueqn = ~ · gei(x~ueq) F fefin - fefin + ~feujn~ leuj(x~ueq)
+
+(22)
+
+This constitutes the divergence term that appears in Equation (9) to be solved via a suitable time-marching scheme.
+
+10
+
+2.2. Hyperbolic Incompressible Navier-Stokes Equations
+In the artificial compressibility formulation[53], the steady, incompressible Navier-Stokes equations are :
+
+p 
+
++
+
+
+
+·
+
+( v)
+
+=
+
+0
+
+v 
+
++
+
+
+
+·
+
+(v
+
+
+
+v
+
++
+
+p
+
+-
+
+v)
+
+=
+
+0
+
+(23)
+
+where v is the velocity vector, p is the pressure,  is the kinematic viscosity, 
+
+is the the artificial compressibility relaxation factor and  is the pseudo-time
+
+used to drive the solution to steady state.
+
+The hyperbolic formulation of the equation is obtained by inserting g =
+
+v in eq. (23) and introducing an additional equation for g
+
+p 
+
++
+
+
+
+·
+
+( v)
+
+=
+
+0
+
+v 
+
++
+
+
+
+·
+
+(v
+
+
+
+v
+
++
+
+pI
+
+-
+
+g)
+
+=
+
+0
+
+(24)
+
+g 
+
+=
+
+1 Tr
+
+(v
+
+-
+
+g)
+
+where Tr is the relaxation time, given by
+
+Tr = L2/.
+
+(25)
+
+The length scale L is defined as L = 1/2. At steady-state g = v and the incompressible Navier-Stokes equations are recovered.
+In three dimensions, the conservative variables for the hyperbolic incompressible Navier-Stokes (HINS) equations are
+
+T
+u = p, vx, vy, vz, gxx, gxy, gxz, gyx, gyy, gyz, gzx, gzy, gzz
+
+(26)
+
+11
+
+where vx, vy, vz are the velocity components, gij is the gradient of the ith velocity component in the jth direction . The fluxes are given as
+
+
+
+
+
+fxe
+
+-
+
+fxv
+
+  
+
+
+
+
+
+f = fye - fyv
+
+(27)
+
+
+
+
+
+fze
+
+-
+
+fzv
+
+  
+
+where
+
+fex = fey = fez =
+
+T
+
+ vx ,
+
+vx2
+
++
+
+p,
+
+vx vy ,
+
+vx vz ,
+
+-
+
+1 Tr
+
+vx,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vy ,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vz ,
+
+0,
+
+0,
+
+,
+
+T
+
+ vy ,
+
+vy vx ,
+
+vy2
+
++
+
+p,
+
+vz vx ,
+
+0,
+
+-
+
+1 Tr
+
+vx,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vy ,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vz ,
+
+0,
+
+,
+
+T
+
+ vz ,
+
+vz vx ,
+
+vz vy ,
+
+vz2
+
++
+
+p,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vx,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vy ,
+
+0,
+
+0,
+
+-
+
+1 Tr
+
+vz ,
+
+(28)
+
+fvx =
+
+T
+0, gxx, gyx, gzx, 0, 0, 0, 0, 0, 0, 0, 0, 0, ,
+
+fvy =
+
+T
+0, gxy, gyy, gzy, 0, 0, 0, 0, 0, 0, 0, 0, 0, ,
+
+(29)
+
+fvz =
+
+T
+0, gxz, gyz, gzz, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+
+It should be noted that the flux, f in Equations (1) and (17), is no longer directly dependent on u but it is simply f(u). Consequently, steps 1b, 1-c and 2-c in the flux reconstruction procedure which are used to treat viscous fluxes are no longer necessary.
+The source term is defined by
+
+S
+
+=
+
+1 Tr
+
+0, 0, 0, 0, -gxx, -gxy, -gxz, -gyx, -gyy, -gyz, -gzx, -gzy, -gzz, (30)
+
+For 2D problems, Nishikawa[42] reported that the normal flux Jacobian
+
+12
+
+of the hyperbolic system has the following eigenvalues;
+
+ = vn ±
+
+c2a + c2v,
+
+1 2
+
+(vn
+
+±
+
+vn2 + c2v), 0, 0, 0
+
+(31)
+
+where vn = vxnx + vyny, ca = vn2 +  and cv = /Tr. As the Reynolds
+
+Number increases, the flow becomes dominated by advection, thus the con-
+
+tribution of cv vanishes and the original eigenvalue structure is recovered. The Riemann solver is modified to include the additional wave-speed cv introduced by the hyperbolic formulation.
+
+Unlike the INS-FR solver (ac-navier-stokes in PyFR), only one ghost
+
+state is needed per boundary condition since LDG related boundary condi-
+
+tions are no longer present. A summary of the boundary conditions currently
+
+implemented in the HINS-FR solver and the corresponding ghost states is
+
+presented in Table 1.
+
+Table 1: Summary of ghost states for the boundary conditions implemented in HINS-FR solver in PyFR. The superscript b and subscript L denote the desired boundary value and left state respectively
+Boundary Condition Type
+
+State No Slip Wall Velocity Inlet Pressure Outlet Variable
+
+p
+
+pL
+
+pL
+
+pb
+
+vx
+
+2vxb - vxL
+
+vxb
+
+vxL
+
+vy
+
+2vyb - vyL
+
+vyb
+
+vyL
+
+vz
+
+2vzb - vzL
+
+vzb
+
+vzL
+
+gij
+
+gijL
+
+0
+
+0
+
+13
+
+3. Results
+This article focusses on the evaluation of the spatial accuracy and convergence of the hyperbolic method for incompressible flows using the FR approach. Only steady test cases are considered in this manuscript. While the implementation of the developed solver in PyFR allows for unsteady simulations via dual-time stepping, we choose to omit the implicit unsteady term to simplify the analysis and ensure that the results are not affected by the error term of the unsteady scheme. This is done by excluding the physical stepper source term. Consequently, the discussion is restricted to laminar flows, which also serves to highlight the effect of the hyperbolic method in handling diffusion dominated flows where the conventional AC formulation struggles.
+For all test cases considered in this work, the P-multigrid technique with Vermeire's Runge-Kutta smoother[54] is used to accelerate the convergence of pseudo-time marching.
+The accuracy and efficiency of the current implementation are demonstrated using a series of test cases, namely the method of manufactured solutions, the Taylor-Couette flow, the driven cavity problem and the threedimensional flow past sphere. The method of manufactured solutions and the Taylor-Couette problem are used to evaluate the order of accuracy for the solution variables and velocity gradients since the exact solution is provided. Since exact solutions are not available for the rest of the problems, results are compared to the corresponding data found in literature that is obtained either numerically or experimentally.
+14
+
+3.1. Method of Manufactured Solutions Case
+
+In this section, we apply the method of manufactured solutions (MMS)
+
+to the incompressible Navier-Stokes equations. The method is applied to
+
+both the conventional and hyperbolic formulations of the equations. We use
+
+the MMS procedure outlined by Salari and Knupp [55]. The manufactured
+
+solutions for the velocity and pressure for steady incompressible laminar flow
+
+are given as follows;
+
+u(x, y) = u0sin(x)sin(y)
+
+(32)
+
+v(x, y) = v0sin(2x)sin(2y)
+
+(33)
+
+p(x, y) = P0cos(x)cos(y)
+
+(34)
+
+where the constants are set as u0 = P0 = 1 and v0 = -1. This solution was chosen because it provides challenging field features for polynomial based reconstruction. Figure 1 shows the distribution of the manufactured solution
+
+Figure 1: Manufactured solutions of the velocity components vx, vy and pressure p for the incompressible Navier-Stokes equations.
+of the velocity and pressure. The source terms are generated by plugging 15
+
+the manufactured solutions in the governing equation. Dirichlet velocity boundary conditions and Neumann pressure boundary conditions were used on all boundaries. The simulation was conducted for a kinematic viscosity  =0.5, artificial compressibility constant  = 4, and a convergence tolerance of 10-12 from initial conditions equal to 1% of the manufactured solutions.
+Five square domains, with a side length d = 2, having uniform quadrilateral grids, 10 × 10, 20 × 20, 40 × 40, 80 × 80, and 160 × 160, were used to compute the order of accuracy of the solution variable u = (p, vx, vy) and the velocity gradients. The grids are denoted by i with 1 being the coarsest grid and 5 the finest. The number of degrees of freedom NDOF represents the total number of solution points in i. The error measure with which the manufactured solutions was evaluated is the L1-norm 1, computed using
+
+1=
+
+NDOF k=1
+
+|
+
+|
+
+NDOF
+
+(35)
+
+where = u(x, y) - u(x, y), u(x, y) is the manufactured solution and u(x, y) is the computed numerical solution, which are both evaluated at solution points. The order of accuracy P is then evaluated using
+
+log P=
+log
+
+(i) (i+1 )
+h(i) h(i+1)
+
+(36)
+
+where
+
+h(i)
+
+=
+
+ 1/ NDOF
+
+for i  R2.
+
+For this test case, the hyperbolic
+
+relaxation time Tr for HINS-FR is set to 1/20. The choice[31] is based on
+
+the formula L2r/ where Lr taken as 1/2.
+
+From the tabulated results of the velocity components, shown in Tables 2
+
+and 3, it can be observed equal order of accuracy for the velocity and its
+
+16
+
+Table 2: Method of manufactured solutions problem for variable vx, observed order of accuracy for HINS-FR system and INS-FR original system for m = 3
+
+vx
+
+gxx
+
+gxy
+
+Grid
+
+1
+
+P
+
+1
+
+P
+
+1
+
+P
+
+(a) HINS-FR 1 3.15E-05 - 1.32E-04 - 1.74E-04 2 1.65E-06 4.26 7.08E-06 4.23 6.42E-06 4.76 3 9.86E-08 4.06 4.06E-07 4.12 2.96E-07 4.44 4 6.08E-09 4.02 2.44E-08 4.06 1.65E-08 4.16 5 3.78E-10 4.01 1.49E-09 4.03 1.00E-09 4.04 (b) INS-FR 1 3.53E-05 - 4.87E-04 - 5.06E-04 2 1.91E-06 4.21 6.24E-05 2.97 5.44E-05 3.22 3 1.12E-07 4.09 7.62E-06 3.03 6.59E-06 3.04 4 6.99E-09 4.01 9.52E-07 3.00 8.21E-07 3.00 5 4.39E-10 3.99 1.19E-07 3.00 1.03E-07 3.00
+
+17
+
+Table 3: Method of manufactured solutions problem for variable vy, observed order of accuracy for HINS-FR system and INS-FR original system for m = 3
+
+vy
+
+gyx
+
+gyy
+
+Grid
+
+1
+
+P
+
+1
+
+P
+
+1
+
+P
+
+(a) HINS-FR 1 1.30E-04 - 9.46E-04 - 7.29E-04 2 7.56E-06 4.10 5.96E-05 3.99 5.06E-05 3.85 3 4.50E-07 4.07 3.82E-06 3.96 3.36E-06 3.91 4 2.75E-08 4.03 2.44E-07 3.97 2.16E-07 3.96 5 1.70E-09 4.01 1.55E-08 3.98 1.37E-08 3.98 (b) INS-FR 1 2.22E-04 - 5.86E-03 - 6.13E-03 2 1.52E-05 3.87 7.33E-04 3.00 7.97E-04 2.94 3 9.49E-07 4.00 9.08E-05 3.01 9.93E-05 3.00 4 5.94E-08 4.00 1.13E-05 3.00 1.24E-05 3.00 5 3.72E-09 4.00 1.42E-06 3.00 1.54E-06 3.00
+
+18
+
+Table 4: Method of manufactured solutions problem for variable p, observed order of accuracy for HINS-FR system and INS-FR original system for m = 3
+
+Grid
+
+HINS-FR
+
+1
+
+P
+
+INS-FR
+
+1
+
+P
+
+1 4.64E-04 - 6.32E-04 2 2.27E-05 4.35 4.71E-05 3.74 3 1.26E-06 4.17 4.01E-06 3.55 4 7.57E-08 4.06 4.30E-07 3.22 5 4.68E-09 4.01 5.08E-08 3.08
+gradients is obtained for the HINS-FR solver. On the other hand, the accuracy order of the velocity gradient is one order lower than the velocity in the case of INS-FR solver. Moreover the INS-FR method shows nearly double the absolute error values for the velocity and up to two orders of magnitude higher absolute error values for its gradients.
+Similar behavior can be observed for the pressure when examining the results shown in Table 4. The pressure error produced by the HINS-FR solver is an order of magnitude lower when compared to that of the INS-FR solver. Furthermore, both velocity and pressure error converge at the same rate using HINS-FR, while INS-FR's pressure error lags behind by up to one order of accuracy. INS-FR's results are consistent with other conventional artificial compressibility solvers [55­57] where the pressure convergence order is consistently smaller than that of the velocity.
+19
+
+3.2. Taylor-Couette flow
+
+In this section, we simulate the Taylor-Couette flow[58] to showcase the
+
+superiority of the current implementation for problems with curved boundary
+
+elements. The flow is created due to the rotation of two infinitely long coaxial
+
+cylinders with fluid in-between them. If the inner cylinder with radius R1 is
+
+rotating at constant angular velocity 1 and the outer cylinder with radius
+
+R2 is rotating at constant angular velocity 2, then the azimuthal velocity
+
+component v at any angle  is
+
+v(r)
+
+=
+
+Ar
+
++
+
+B r
+
+,
+
+A
+
+=
+
+1
+
+~ 1
+
+- -
+
+R~2 R~2
+
+,
+
+B
+
+=
+
+1
+
+R12
+
+1 - ~ 1 - R~2
+
+(37)
+
+where
+
+~
+
+=
+
+2 1
+
+,
+
+R~
+
+=
+
+R1 R2
+
+Figure 2: Incompressible Taylor-Couette flow at Re = 10 on triangular mesh: coarsest mesh (left), azimuthal velocity V for m = 3 on finest mesh (right)
+
+In this work, the outer cylinder is stationary (i.e., 2 = 0) and the inner
+
+cylinder spins counter clockwise at rate 1 = 1. The inner radius R1 and
+
+other radius R2
+
+are set 1 and
+
+2 respectively.
+
+The Reynolds number
+
+Re
+
+=
+
+v1 da 
+
+20
+
+is set to 10, where v1 is the speed of the inner cylinder (i.e., v1 = vr=R1 = 1R1), da is annulus width (i.e., da = R2 - R1) and  is the kinematic viscosity.
+The order of accuracy is tested on a sequence of four uniformly refined triangular meshes, using second-order to fourth-order FR schemes. Quadratic curved elements are used on the boundaries. Figure 2 shows the coarsest mesh of the sequence and the computed solution on the finest mesh for third-order reconstruction scheme (i.e. m = 3 ).
+
+Figure
+
+3:
+
+Error
+
+convergence
+
+of
+
+or
+
+the
+
+variable
+
+u
+
+(left)
+
+and
+
+its
+
+gradient
+
+u x
+
+(middle)
+
+and
+
+u y
+
+(right)
+
+for
+
+HINS-FR
+
+and
+
+INS-FR
+
+methods
+
+in
+
+the
+
+Taylor-Couette
+
+problem
+
+The reductions in L2 error norm are plotted in Figure 3 for both HINSFR and INS-FR solvers. The resulting orders of accuracy are compared with expected orders of accuracy for both the velocity and its gradient. Since the problem is symmetric only the x-velocity component vx is considered in this comparison. The HINS-FR solver consistently produces more accurate results for the velocity. Moreover, velocity gradient errors are significantly improved when compared to the INS-FR solver by nearly one order of mag-
+
+21
+
+nitude. Confirming conclusions from the previous test case, INS-FR velocity gradients converge at a rate one order below that of the HINS-FR.
+
+3.3. Driven Cavity
+
+The problem of the flow inside a driven lid cavity is examined in this sec-
+
+tion. In this problem, the flow inside the cavity is driven by the movement of
+
+one or more walls. This results in a complex vortex pattern with separation
+
+and re-attachment on the cavity walls depending on the Reynolds Number
+
+as
+
+shown
+
+in
+
+Figure
+
+4.
+
+The
+
+Reynolds
+
+Number
+
+Re
+
+=
+
+ULid L 
+
+is
+
+set
+
+by
+
+choosing
+
+a suitable viscosity value while maintaining a unit lid velocity. No slip wall
+
+boundary conditions are applied everywhere on the boundaries. In Figure 5,
+
+Figure 4: Driven cavity problem schematic and streamlines pattern
+velocity and vorticity from both solvers (INS-FR and HINS-FR) are compared to reference results at the cavity mid-lines from Ghia et al.[59], Erturk et al.[60] and Botella and Peyret[61]. Results were computed at Re = 1000 on a 8x8 uniform quadrilateral mesh with m = 3. The figure shows that both methods produce excellent agreement with published literature with hardly any visible differences in both the velocity and vorticity distributions.
+22
+
+1
+
+0.8
+INS-FR Erturk et al
+0.6
+
+Ghia et al
+
+Botella and Peyre
+
+y
+
+0.5
+
+0.4 1 0.8 0.6
+0.2 0.4 0.2
+
+y
+
+HINS-FR
+
+INS-FR
+
+1Erturk et al
+
+Ghia et al
+
+Botella and Peyret
+
+1
+
+v
+
+0.5
+0.5 0
+-0.5
+
+0 -1 -0.5
+01
+
+v
+
+0
+
+0.5
+
+u
+
+1
+0
+
+-1 0 0.2 0.4 0.6 0.8 1 x
+15
+
+-10.8
+
+-0.5
+
+010
+
+0.5
+
+1
+
+y
+
+0.6 0.4
+
+-0.5
+
+z
+
+u 5
+0
+
+0.2
+
+-5
+
+0
+
+-10
+
+-10 -5 0
+
+5 10 15
+
+0 0.2 0.4 0.6 0.8
+
+z
+
+x
+
+-1
+
+Figure 5: Comparison between computed results and published literature
+
+1
+
+0 0.2
+
+1
+0.4
+
+x
+
+0.6
+
+23
+
+The effect of mesh resolution and Reynolds Number on the numerical stability of both methods is examined here. A series of simulations are carried out for Reynolds numbers between 10 and 1000 and the maximum allowable pseudo-time step stable is obtained by trial and error. Figure 6 shows that the HINS-FR solver is almost unaffected by the change in Reynolds number while the INS-FR formulation seems significantly affected by it. Additional
+
+10-1
+
+10-2
+
+stable
+
+10-3
+
+10-4
+
+10-5 10-6
+101
+
+102 Reynolds Number (Re)
+
+HINS-FR INS-FR
+103
+
+Figure 6: Effect of Reynolds number on the maximum pseudo-time step
+
+cases with Re = 10 and Re = 1000 are carried out using five different mesh
+
+resolutions in Figure 7. It can be observed that stable of HINS-FR solver decreases linearly with mesh size while it decreases quadratically for the INS-
+
+FR solver. The INS-FR solver is restricted by the parabolic and hyperbolic
+
+CFL limit such that
+
+
+
+<
+
+min(C
+
+F
+
+Lhyp
+
+h max(|ei
+
+|)
+
+,
+
+C
+
+F
+
+Lpar
+
+h2 2
+
+)
+
+where ei is the local spectral radius of the inviscid flux jacobian. For dif-
+
+fusion dominated problem, the parabolic criterion poses a severe restriction
+
+24
+
+on the pseudo-time step size. Such a restriction doesn't exist for HINS-FR where the system of equations is first order hyperbolic thus only limited by the hyperbolic CFL criterion
+
+
+
+<
+
+C
+
+F
+
+Lhyp
+
+h max(|ti
+
+|)
+
+where ti is the local spectral radius of the total flux jacobian.
+
+HINS-FR, Re = 100 HINS-FR, Re = 10 slope 1
+
+INS-FR, Re = 100 INS-FR, Re = 10 slope 2
+
+10-1
+
+10-2
+
+stable
+
+10-3
+
+10-4
+
+10-5
+
+1/16
+
+1/8
+
+1/4
+
+1/2
+
+1
+
+Mesh Size Ratio (h/h0)
+
+Figure 7: Effect of mesh resolution on the maximum pseudo-time step  at Re = 10 and Re = 100. h0 is the mesh size on the coarsest mesh
+
+3.4. Flow over Sphere The steady laminar flow over a sphere is simulated here to further ver-
+ify the computational accuracy and evaluate the efficiency of the developed HINS-FR method. The Reynolds number is set to Re = 20. The simulations were performed using polynomial orders m = 1 through 5 on a very coarse
+25
+
+O-type mesh, shown in Figure 8. The mesh contained only 1440 hexahedra with the far-field at 50 times the sphere diameter. In order to accurately capture the curvature of the sphere, second-order curved elements are used.
+In this test case, the results of both incompressible FR solvers are compared with published data computed using the high-order DG method[62] on a similarly coarse mesh as well as experiments.
+Figure 8: 3D hexahedral mesh for the flow over a sphere at Re = 20. Mesh count is 1440 elements
+The tabulated results given in Table 5 show that the developed HINS-FR solver achieves excellent agreement even with a first order polynomial reconstruction. For INS-FR, a third-order polynomial reconstruction is needed to achieve similar accuracy. On the other hand, fourth order polynomial reconstruction is required for the DG method. For both HINS-FR and INS-FR solvers, the computed drag coefficient becomes independent of the reconstruction order for m  3.
+An additional case is performed for Re = 100 where mixed meshes are employed as shown in Figure 9. This case is also a steady case showing an axisymmetric wake field. The case serves to demonstrate the accuracy and
+26
+
+Table 5: Comparison of computed drag coefficient with relevant numerical results and experiments in literature at Re = 20
+Coefficient of Drag (CD)
+
+m=1 m=2 m=3 m=4 m=5
+
+HINS-FR INS-FR
+
+2.7253 2.7248 2.7195 2.7192 2.7193 2.5486 2.7828 2.718 2.7196 2.7197
+
+Discontinuous Galerkin (DG) [62] 2.882 2.749 2.782 2.721 2.719
+
+Numerical Computation: Tabata and Itakura[63] Exp. Data: Schlichting [64]
+
+2.724 2.79
+
+efficiency of the developed for mixed mesh topologies. It also allows sufficient quantitative comparison with other published results.
+Two meshes are constructed, with prism layers near the surface of the sphere and tetrahedra through the domain, and denoted base mesh and fine mesh. A refinement box is set downstream of the sphere to properly capture the vortex structure due to separation and wake dynamics. The base mesh used in the simulation is made up of nearly 35K elements. This mesh is used to compute the solution at different reconstruction orders namely, m = 1, 2, 3, and 4. The solution is also computed on a more refined mesh with 750K elements and it is used to verify our previously obtained results and serve as benchmark results for future simulations. Consequently, it is only computed for third order reconstruction. The pressure and velocity field are initialized using freestream values and the simulation is performed until the
+
+27
+
+residual of all variables reach steady-state with a tolerance of 10-9.
+Figure 9: 3D mixed tetrahedral-prism mesh for the flow over sphere at Re = 100. Base mesh: 35K cells (left). Fine mesh: 750K cells (right)
+Figure 10: Velocity magnitude contours and streamlines for the flow over sphere at Re = 100 computed using the developed HINS-FR. Base mesh: 35K cells (left). Fine mesh: 750K cells (right)
+In Table 6, the computed drag coefficient and length of recirculation are compared for different reconstruction order m. with results from published literature.
+Both HINS-FR and INS-FR give the same value for the drag coefficient 28
+
+Table 6: Comparison of sphere drag coefficient and length of recirculation zone at Re =
+
+100 with relevant numerical and experiments results from literature
+
+Data
+
+CD
+
+Lr/d
+
+Present Method, Base Mesh
+
+HINS-FR (m = 1) HINS-FR (m = 2) HINS-FR (m = 3) HINS-FR (m = 4) INS-FR (m = 1) INS-FR (m = 2) INS-FR (m = 3) INS-FR (m = 4)
+
+1.01706 0.5826 1.10419 0.8624 1.09049 0.8618 1.08705 0.8611 0.95270 0.6234 1.13195 0.8774 1.09640 0.8624 1.08659 0.8628
+
+Present Method, Fine Mesh
+
+HINS-FR (m = 3) INS-FR (m = 3)
+
+1.08818 0.866 1.08817 0.865
+
+Numerical Computations
+
+HINS-FVM[45]
+
+1.109
+
+-
+
+INS-FVM[45]
+
+1.091
+
+-
+
+Spectral collocation method[65] 1.09 0.87
+
+Experiments
+
+Roos and Willmarth[66]
+
+1.08
+
+Clift et al.[67]
+
+1.09
+
+29
+
+on the fine mesh. For the base mesh, the HINS-FR consistently gives better agreement with the fine mesh result when compared to INS-FR. Although both methods agree well with other published results, the HINS-FR gives more consistent results with increasing order. Additionally, when compared to the finite-volume method implementation of the hyperbolic incompressible solver, the flux reconstruction solver is able to produce comparable, if not better, results with fewer degrees of freedom.
+30
+
+Figure 11: Convergence of the residuals of pressure for laminar flow past a sphere at Re=100 on the base mesh at m = 3
+We next examine the convergence performance of both solvers for the Re = 100 case on the base mesh with the maximum stable pseudo timestep used for each solver. The HINS-FR requires a pseudo time-step that is 2.25 times higher than that for the INS-FR which is clearly reflected in the number of iterations to convergence shown in Figure 11. However, when the residual is plotted against the computation time, the difference shrinks drastically with the HINS-FR still leading in terms of performance with a ratio of 1.45. This indicates that the computation cost per iteration is higher in the case of HINS-FR solver. This is understandable considering that the number of variables in the case of the hyperbolic incompressible Navier-Stokes formulation in 3D is 13 as compared to 4 for the conventional formulation.
+In order to compare the scalability and efficiency of the HINS-FR and INS-FR solvers, a strong and weak scaling study was also carried out. A mesh with 73,372 hexahedral elements was used for this study. The reconstruction polynomial order was set to m = 3. A 4 level P-multigrid Runge-KuttaVermeire smoother cycle 1-1-1-2-1-1-2 was found to give a good balance of residual reduction vs computational cost. Double precision was used for all
+31
+
+computations considered here.
+Figure 12: Strong Scaling of the incompressible flow past a sphere on NVIDIA Tesla P100 GPUs with p-Multigrid for HINS-FR and INS-FR solvers
+Figure 12 shows the strong and weak scaling for both solvers from 1 through 12 NVIDIA P100 GPUs. Strong scaling in both cases is almost linear up to 6 GPUs after which both solvers start to branch out. The INSFR solver experiences a quicker decline due to extra communication required by the LDG procedure. Regarding weak scaling, both solvers are able to maintain relatively good performance with an efficiency higher than 90% with the INS-FR solver slightly under-performing when compared to HINSFR solver.
+4. Conclusion A high order hyperbolic incompressible Navier-Stokes solver has been de-
+veloped using the flux reconstruction approach. The developed solver has been implemented in the cross-platform PyFR framework using the hyperbolic formulation of the artificial compressibility method. Significant reduction in the absolute error of the field variables and the gradient of the velocity
+32
+
+has been demonstrated . Additionally, it has been shown that equal orders of accuracy can be obtained for both the field variables and velocity gradients. Numerical results suggests that the improvement in the order of accuracy of the velocity gradient lead to a matching improvement of the pressure order of accuracy. Analysis shows that the time-step requirements are significantly relaxed when using the hyperbolic solver. This is because the parabolic CFL criterion is O(h2) while the hyperbolic CFL criterion is O(h). This leads to significant convergence speed-ups especially for diffusion dominated problems where the parabolic restriction can be quite severe. The strong scaling performance of the developed HINS-FR solver has been shown to be superior to the existing INS-FR solver due to the extra communication required for the computation of the viscous fluxes. In conclusion, the hyperbolic method is appealing owing to its accuracy, stability and efficiency in solving diffusion dominated problems.
+While the currently developed solver can be used for unsteady problems via dual-time marching, there is more to be desired regarding its performance. The current code implementation requires some optimization to better handle the sparsity of the flux vector. This will lead to significant improvements in memory foot-print and computational performance.
+Acknowledgment
+This work was supported in part by JSPS KAKENHI Grant Number JP19H02363. The numerical calculations were carried out on the TSUBAME 3.0 supercomputer at Tokyo Institute of Technology.
+33
+
+References
+[1] D. Caraeni, D. C. Hill, Unstructured-grid third-order finite volume discretization using a multistep quadratic data-reconstruction method, AIAA Journal 48 (2010) 808­817.
+[2] C. Ollivier-Gooch, A. Nejat, K. Michalak, Obtaining and verifying highorder unstructured finite volume solutions to the euler equations, AIAA Journal 47 (2009) 2105­2120.
+[3] T. Barth, D. Jespersen, The design and application of upwind schemes on unstructured meshes.
+[4] L. Cueto-Felgueroso, I. Colominas, J. Fe, F. Navarrina, M. Casteleiro, High-order finite volume schemes on unstructured grids using moving least-squares reconstruction. Application to shallow water dynamics, International Journal for Numerical Methods in Engineering 65 (2006) 295­331.
+[5] L. Cueto-Felgueroso, I. Colominas, X. Nogueira, F. Navarrina, M. Casteleiro, Finite volume solvers and moving least-squares approximations for the compressible Navier­Stokes equations on unstructured grids, Computer Methods in Applied Mechanics and Engineering 196 (2007) 4712 ­ 4736.
+[6] X. Nogueira, L. Cueto-Felgueroso, I. Colominas, F. Navarrina, M. Casteleiro, A new shock-capturing technique based on moving least squares for higher-order numerical schemes on unstructured grids, Com-
+34
+
+puter Methods in Applied Mechanics and Engineering 199 (2010) 2544 ­ 2558.
+[7] J.-C. Chassaing, X. Nogueira, S. Khelladi, Moving Kriging reconstruction for high-order finite volume computation of compressible flows, Computer Methods in Applied Mechanics and Engineering 253 (2013) 463 ­ 478.
+[8] Y. Liu, W. Zhang, Y. Jiang, Z. Ye, A high-order finite volume method on unstructured grids using RBF reconstruction, Computers & Mathematics with Applications 72 (2016) 1096 ­ 1117.
+[9] J. Guo, J.-H. Jung, A rbf-weno finite volume method for hyperbolic conservation laws with the monotone polynomial interpolation method, Applied Numerical Mathematics 112 (2017) 27 ­ 50.
+[10] A. Harten, B. Engquist, S. Osher, S. R. Chakravarthy, Uniformly high order accurate essentially non-oscillatory schemes, iii, Journal of Computational Physics 131 (1997) 3 ­ 47.
+[11] X.-D. Liu, S. Osher, T. Chan, Weighted essentially non-oscillatory schemes, Journal of Computational Physics 115 (1994) 200 ­ 212.
+[12] P. S. Farmakis, P. Tsoutsanis, X. Nogueira, WENO schemes on unstructured meshes using a relaxed a posteriori MOOD limiting approach, Computer Methods in Applied Mechanics and Engineering 363 (2020) 112921.
+[13] D. Zhong, C. Sheng, A new method towards high-order weno schemes
+35
+
+on structured and unstructured grids, Computers & Fluids 200 (2020) 104453.
+[14] D. S. Balsara, S. Garain, V. Florinski, W. Boscheri, An efficient class of weno schemes with adaptive order for unstructured meshes, Journal of Computational Physics 404 (2020) 109062.
+[15] P. Tsoutsanis, Stencil selection algorithms for weno schemes on unstructured meshes, Journal of Computational Physics: X 4 (2019) 100037.
+[16] P. Bakhvalov, T. Kozubskaya, Ebr-weno scheme for solving gas dynamics problems with discontinuities on unstructured meshes, Computers & Fluids 157 (2017) 312 ­ 324.
+[17] J. W. Gärtner, A. Kronenburg, T. Martin, Efficient weno library for openfoam, SoftwareX 12 (2020) 100611.
+[18] P. Tsoutsanis, A. F. Antoniadis, K. W. Jenkins, Improvement of the computational performance of a parallel unstructured weno finite volume cfd code for implicit large eddy simulation, Computers & Fluids 173 (2018) 157 ­ 170.
+[19] S. Zaghi, Off, open source finite volume fluid dynamics code: A free, high-order solver based on parallel, modular, object-oriented fortran api, Computer Physics Communications 185 (2014) 2151 ­ 2194.
+[20] H. T. Huynh, A Flux Reconstruction Approach to High-Order Schemes Including Discontinuous Galerkin Methods.
+36
+
+[21] P. E. Vincent, P. Castonguay, A. Jameson, A new class of high-order energy stable flux reconstruction schemes, Journal of Scientific Computing 47 (2011) 50­72.
+[22] P. Castonguay, D. Williams, P. Vincent, A. Jameson, Energy stable flux reconstruction schemes for advection­diffusion problems, Computer Methods in Applied Mechanics and Engineering 267 (2013) 400 ­ 417.
+[23] P. Castonguay, P. E. Vincent, A. Jameson, A new class of high-order energy stable flux reconstruction schemes for triangular elements, Journal of Scientific Computing 51 (2012) 224­256.
+[24] P. Vincent, A. Farrington, F. Witherden, A. Jameson, An extended range of stable-symmetric-conservative flux reconstruction correction functions, Computer Methods in Applied Mechanics and Engineering 296 (2015) 248 ­ 272.
+[25] F. Witherden, B. Vermeire, P. Vincent, Heterogeneous computing on mixed unstructured grids with pyfr, Computers & Fluids 120 (2015) 173 ­ 186.
+[26] F. Witherden, On the development and implementation of high-order flux reconstruction schemes for computational fluid dynamics, Ph.D. thesis, Imperial College London, 2015.
+[27] N. Loppi, F. Witherden, A. Jameson, P. Vincent, A high-order crossplatform incompressible navier­stokes solver via artificial compressibility with application to a turbulent jet, Computer Physics Communications 233 (2018) 193 ­ 205.
+37
+
+[28] N. Loppi, F. Witherden, A. Jameson, P. Vincent, Locally adaptive pseudo-time stepping for high-order flux reconstruction, Journal of Computational Physics 399 (2019) 108913.
+[29] B. Vermeire, F. Witherden, P. Vincent, On the utility of gpu accelerated high-order methods for unsteady flow simulations: A comparison with industry-standard tools, Journal of Computational Physics 334 (2017) 497 ­ 521.
+[30] C. Cox, C. Liang, M. W. Plesniak, A high-order solver for unsteady incompressible navier­stokes equations using the flux reconstruction method on unstructured grids with implicit dual time stepping, Journal of Computational Physics 314 (2016) 414 ­ 435.
+[31] H. Nishikawa, A first-order system approach for diffusion equation. i: Second-order residual-distribution schemes, Journal of Computational Physics 227 (2007) 315­352.
+[32] H. Nishikawa, A first-order system approach for diffusion equation. ii: Unification of advection and diffusion, Journal of Computational Physics 229 (2010) 3989­4016.
+[33] C. Cattaneo, A form of heat-conduction equations which eliminates the paradox of instantaneous propagation, Comptes Rendus 247 (1958) 431.
+[34] P. Vernotte, Les paradoxes de la theorie continue de l'equation de la chaleur, Compt. Rendu 246 (1958) 3154­3155.
+[35] H. Nishikawa, A hyperbolic poisson solver for tetrahedral grids, Journal of Computational Physics 409 (2020) 109358.
+38
+
+[36] A. S. Chamarthi, H. Nishikawa, K. Komurasaki, First order hyperbolic approach for anisotropic diffusion equation, Journal of Computational Physics 396 (2019) 243 ­ 263.
+[37] H. Nishikawa, Y. Nakashima, Dimensional scaling and numerical similarity in hyperbolic method for diffusion, Journal of Computational Physics 355 (2018) 121 ­ 143.
+[38] H. Nishikawa, On hyperbolic method for diffusion with discontinuous coefficients, Journal of Computational Physics 367 (2018) 102 ­ 108.
+[39] H. Nishikawa, First, second, and third order finite-volume schemes for advection­diffusion, Journal of Computational Physics 273 (2014) 287­ 309.
+[40] H. Nishikawa, Y. Liu, Hyperbolic advection­diffusion schemes for highreynolds-number boundary-layer problems, Journal of Computational Physics 352 (2018) 23 ­ 51.
+[41] H. Nishikawa, New-generation hyperbolic navier-stokes schemes: O (1/h) speed-up and accurate viscous/heat fluxes, in: 20th AIAA Computational Fluid Dynamics Conference, p. 3043.
+[42] H. Nishikawa, First, Second, and Third Order Finite-Volume Schemes for Navier-Stokes Equations.
+[43] H. Nishikawa, Alternative formulations for first-, second-, and thirdorder hyperbolic navier-stokes schemes, in: 22nd AIAA Computational Fluid Dynamics Conference, p. 2451.
+39
+
+[44] H. Nishikawa, Y. Liu, Hyperbolic Navier-Stokes Method for HighReynolds-Number Boundary Layer Flows.
+[45] H. T. Ahn, Hyperbolic cell-centered finite volume method for steady incompressible navier-stokes equations on unstructured grids, Computers & Fluids 200 (2020) 104434.
+[46] A. Mazaheri, H. Nishikawa, Efficient high-order discontinuous galerkin schemes with first-order hyperbolic advection­diffusion system approach, Journal of Computational Physics 321 (2016) 729­754.
+[47] J. Lou, H. Luo, H. Nishikawa, Discontinuous galerkin methods for hyperbolic advection-diffusion equation on unstructured grids, in: Proc. of The 9th International Conference on Computational Fluid Dynamics, Istanbul, Turkey.
+[48] J. Lou, L. Li, H. Luo, H. Nishikawa, Reconstructed discontinuous galerkin methods for linear advection­diffusion equations based on firstorder hyperbolic system, Journal of Computational Physics 369 (2018) 103 ­ 124.
+[49] L. Li, J. Lou, H. Nishikawa, H. Luo, Reconstructed discontinuous galerkin methods for compressible flows based on a new hyperbolic navier-stokes system, Journal of Computational Physics 427 (2021) 110058.
+[50] S. Lou, S. sheng Chen, B. xi Lin, J. Yu, C. Yan, Effective high-order energy stable flux reconstruction methods for first-order hyperbolic linear
+40
+
+and nonlinear systems, Journal of Computational Physics 414 (2020) 109475.
+[51] D. M. Williams, L. Shunn, A. Jameson, Symmetric quadrature rules for simplexes based on sphere close packed lattice arrangements, Journal of Computational and Applied Mathematics 266 (2014) 18­38.
+[52] L. Shunn, F. Ham, Symmetric quadrature rules for tetrahedra based on a cubic close-packed lattice arrangement, Journal of Computational and Applied Mathematics 236 (2012) 4348­4364.
+[53] A. J. Chorin, A numerical method for solving incompressible viscous flow problems, Journal of Computational Physics 2 (1967) 12 ­ 26.
+[54] B. C. Vermeire, N. A. Loppi, P. E. Vincent, Optimal embedded pair runge-kutta schemes for pseudo-time stepping, Journal of Computational Physics 415 (2020) 109499.
+[55] K. Salari, P. Knupp, Code verification by the method of manufactured solutions, Technical Report, Sandia National Labs (US), 2000.
+[56] J. Manzanero, G. Rubio, D. A. Kopriva, E. Ferrer, E. Valero, An entropy­stable discontinuous galerkin approximation for the incompressible navier­stokes equations with variable density and artificial compressibility, Journal of Computational Physics 408 (2020) 109241.
+[57] F. Bassi, F. Massa, L. Botti, A. Colombo, Artificial compressibility godunov fluxes for variable density incompressible flows, Computers & Fluids 169 (2018) 186 ­ 200.
+41
+
+[58] G. I. Taylor, Stability of a viscous liquid contained between two rotating cylinders, Philosophical Transactions of the Royal Society of London. Series A, Containing Papers of a Mathematical or Physical Character 223 (1923) 289­343.
+[59] U. Ghia, K. N. Ghia, C. Shin, High-re solutions for incompressible flow using the Navier-Stokes equations and a multigrid method, Journal of computational physics 48 (1982) 387­411.
+[60] E. Erturk, T. C. Corke, C. Gökçöl, Numerical solutions of 2-d steady incompressible driven cavity flow at high Reynolds numbers, International journal for Numerical Methods in fluids 48 (2005) 747­774.
+[61] O. Botella, R. Peyret, Benchmark spectral results on the lid-driven cavity flow, Computers & Fluids 27 (1998) 421­433.
+[62] A. Crivellini, V. D'Alessandro, F. Bassi, Assessment of a high-order discontinuous Galerkin method for incompressible three-dimensional navier­stokes equations: Benchmark results for the flow past a sphere up to re=500, Computers & Fluids 86 (2013) 442 ­ 458.
+[63] M. Tabata, K. Itakura, A precise computation of drag coefficients of a sphere, International Journal of Computational Fluid Dynamics 9 (1998) 303­311.
+[64] H. Schlichting, K. Gersten, Boundary-layer theory, Springer, 2016.
+[65] R. Mittal, A Fourier­Chebyshev spectral collocation method for simulating flow past spheres and spheroids, International journal for numerical methods in fluids 30 (1999) 921­937.
+42
+
+[66] F. W. Roos, W. W. Willmarth, Some experimental results on sphere and disk drag, AIAA journal 9 (1971) 285­291.
+[67] R. Clift, J. R. Grace, M. E. Weber, Bubbles, drops, and particles, Courier Corporation, 2005.
+43
+
+

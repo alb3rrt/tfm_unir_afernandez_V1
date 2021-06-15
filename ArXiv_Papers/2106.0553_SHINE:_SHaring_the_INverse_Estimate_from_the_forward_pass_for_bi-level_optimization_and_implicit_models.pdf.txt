@@ -1,0 +1,1889 @@
+SHINE: SHaring the INverse Estimate from the forward pass for bi-level optimization and implicit
+models
+
+arXiv:2106.00553v1 [cs.LG] 1 Jun 2021
+
+Zaccharie Ramzi CEA (Neurospin and Cosmostat), Inria (Parietal)
+Gif-sur-Yvette, France zaccharie.ramzi@inria.fr
+
+Florian Mannel University of Graz
+Graz, Austria
+
+Shaojie Bai Carnegie Mellon University
+Pittsburgh, USA
+
+Jean-Luc Starck AIM, CEA, CNRS Université Paris-Saclay Université Paris Diderot Sorbonne Paris Cité
+
+Philippe Ciuciu CEA (Neurospin), Inria (Parietal)
+Gif-sur-Yvette, France
+
+Thomas Moreau Inria (Parietal)
+Gif-sur-Yvette, France
+
+Abstract
+In recent years, implicit deep learning has emerged as a method to increase the depth of deep neural networks. While their training is memory-efficient, they are still significantly slower to train than their explicit counterparts. In Deep Equilibrium Models (DEQs), the training is performed as a bi-level problem, and its computational complexity is partially driven by the iterative inversion of a huge Jacobian matrix. In this paper, we propose a novel strategy to tackle this computational bottleneck from which many bi-level problems suffer. The main idea is to use the quasi-Newton matrices from the forward pass to efficiently approximate the inverse Jacobian matrix in the direction needed for the gradient computation. We provide a theorem that motivates using our method with the original forward algorithms. In addition, by modifying these forward algorithms, we further provide theoretical guarantees that our method asymptotically estimates the true implicit gradient. We empirically study this approach in many settings, ranging from hyperparameter optimization to large Multiscale DEQs applied to CIFAR and ImageNet. We show that it reduces the computational cost of the backward pass by up to two orders of magnitude. All this is achieved while retaining the excellent performance of the original models in hyperparameter optimization and on CIFAR, and giving encouraging and competitive results on ImageNet.
+1 Introduction
+Implicit deep learning models such as Neural ODEs [10], OptNets [2] or Deep Equilibrium models (DEQs) [3, 4] have recently emerged as a way to train infinitely deep models without the associated memory cost. Indeed, while it has been observed that the performance of deep learning models increases with their depth [43], an increase in depth also translates into an increase in the memory footprint required for training, which is hardware-constrained. While other works such as invertible
+https://www.cosmostat.org/people/zaccharie-ramzi
+Preprint. Under review.
+
+neural networks [19, 40] or gradient checkpointing [11] also tackle this issue, implicit models do so using an O(1) memory cost and with constraints on the architecture that are usually not detrimental to the model performance [3].
+In general, the formulation of DEQs can be cast as a bi-level problem of the following form:
+
+arg min L(z ) subject to g(z ) = 0
+
+(1)
+
+
+
+This formulation allows us to consider both DEQs and other bi-level problems such as bi-level
+
+optimization under the same framework. We will refer to the root finding problem g(z) = 0 as the inner problem, and call its resolution the forward pass. On the other hand, we will refer to
+
+arg min L(z ) as the outer problem, and call the computation of the gradient of L(z ) w.r.t.  the backward pass. The core idea for DEQs is that their output z is expressed as a fixed point of
+
+a
+
+parametric
+
+function
+
+f
+
+from
+
+d
+R
+
+to Rd,
+
+i.e.,
+
+g (z
+
+)
+
+=
+
+z
+
+- f(z ) = 0.2 This model is said to
+
+have infinitely many weight-tied layers as z can be obtained by successively applying the layer f
+
+infinitely many times, provided f is contractive. To train this type of network efficiently and avoid
+
+high memory cost, one does not compute the gradient through back-propagation but relies on the
+
+implicit
+
+function
+
+theorem
+
+[26]
+
+which
+
+gives
+
+an
+
+analytical
+
+expression
+
+of
+
+the
+
+partial
+
+derivative
+
+z 
+
+.
+
+These models have been successfully applied to large-scale tasks such as language modeling [3],
+
+computer vision tasks [4] and inverse problems [18, 23].
+
+While their training is memory efficient, it requires the computation of matrix-vector products
+
+involving the inverse of a large Jacobian matrix, which is computationally demanding. To make this
+
+computation tractable, one needs to rely on an iterative algorithm based on vector-Jacobian products,
+
+which renders the training particularly slow, as highlighted by the original authors [4] (see also the
+
+break down of the computational effort in Appendix E.3). With the increasing popularity of DEQs, a
+
+core question is how to reduce the computational cost of the training. This would make DEQs more
+
+accessible for practitioners and reduce the associated energy cost.
+
+More generally, this computation issue is prevalent in many bi-level problems where the implicit
+
+function theorem is used. For instance, Pedregosa [38] proposed to use such formulation to perform
+
+hyperparameter optimization for logistic regression, where a similar operation involving the iterative
+
+inversion of a large scale matrix slows down the method. In this case, the inner optimization problem
+
+minz r(z) is smooth and convex, which enables us to write them also in the form of Eq. (1) where g(z) = zr(z). In this work, while study DEQs as a high-dimensional problem instance in the deep learning context, we also show that our approach applies to the differentiation of these general
+
+bi-level problem formulations.
+
+In particular, for DEQ models, the forward pass is usually computed with a quasi-Newton (qN)
+
+algorithm, such as Broyden's method [6], which approximates tefficiently he Jacobian matrix and its
+
+inverse for root-finding. More generally, bi-level optimization problems often rely on the LBFGS [31]
+
+algorithm to solve the inner problem while approximating the inverse of the Hessian in the direction
+
+of the steps. In both cases, the generated quasi-Newton (qN) matrices efficiently approximate the
+
+(inverse of the) Jacobian/Hessian. In this work, we propose to exploit these properties and design
+
+extra updates of the qN matrices which maintain the approximation property in the direction of the
+
+steps, and ensure that the inverse Jacobian is approximated in an additional direction. Specifically,
+
+this direction is selected such that the gradient approximation provably converges to the true gradient.
+
+In effect, we can compute the gradient using the inverse of the final qN matrix instead of an iterative
+
+algorithm to invert the Jacobian in the gradient's direction, while stressing that the inverse of a qN
+
+matrix, and thus the multiplication with it, can be computed very efficiently. The contributions of our
+
+paper are the following:
+
+· We introduce a new method to greatly accelerate the backward pass of DEQs (and generally, the differentiation of bi-level problems) using qN matrices that are available as a by-product of the forward computations. We call this method SHINE (SHaring the INverse Estimate).
+· We enhance this method by incorporating knowledge from the outer problem into the inner problem resolution.
+· We provide strong theoretical guarantees for this approach in various settings.
+· We additionally showcase its use in hyperparameter optimization. Here, we demonstrate that it provides a gain in computation time compared to the state of the art.
+
+2Here, we do not explicitly write the dependence of f on the input x of the DEQ, usually referred to as the injection.
+
+2
+
+· We test it for DEQs for the classification task on two datasets, CIFAR and ImageNet. Here, we show that it decreases the training time while remaining competitive in terms of performance.
+· We empirically show that accelerated backward methods perform well even when contractivity assumptions are not met for DEQs.
+We emphasize that the goal of this paper is neither to improve the algorithms used to compute z , nor is it to demonstrate how to perform the inversion of a matrix in a certain direction as a stand-alone task. Rather, we are describing an approach that combines the resolution of the inner problem with the computation of the gradient of the outer problem to accelerate the overall process. The idea to use additional updates of the qN matrices to ensure additional approximation properties is not new, and it is also known that a full matrix inversion can be accomplished in this way. For instance, Gower and Richtárik [20] used sketching to design appropriate extra secant conditions in order to obtain guarantees of uniform convergence towards the inverse of the Jacobian. However, to the best of our knowledge, our work is the first in which the additional update is designed to yield the inverse in a single direction (which is substantially cheaper than computing the inverse). In particular, we have not seen this idea in machine learning. A concurrent work by Fung et al. [16] is also concerned with the acceleration of DEQs' training, where the inverse Jacobian is approximated with the identity. Under strong contractivity and conditioning assumptions, it is proved that the resulting approximation is a descent direction and this is empirically tested with constrained networks. In this paper, we extend the Jacobian-Free method to large scale multiscale DEQs and show that it performs well in this setting, which was not done in the original paper [16]. We also show that the Jacobian-Free method is not suitable for more general bi-level problems.
+
+2 Hypergradient Optimization with Approximate Jacobian Inverse
+
+2.1 SHINE: Hypergradient Descent with Approximate Jacobian Inverse
+
+Hypergradient Optimization Hypergradient optimization is a first-order method used to solve
+
+Algorithm 1: qN method to solve g(z ) = 0
+
+Problem (1). We recall that in the case of smooth Result: Root z , qN matrix B
+
+convex
+
+optimization,
+
+g z
+
+is
+
+the Hessian
+
+of the
+
+inner optimization problem, while for deep equi-
+
+b = true if using Broyden's method, b = false if using BFGS
+
+librium models, it is the Jacobian of the root n = 0, z0 = 0, B0 = I
+
+equation. In the rest of this paper, with a slight while not converged do
+
+abuse of notation, we will refer to both these
+
+pn = -Bn-1g(zn), zn+1 = zn + npn
+
+matrices with Jg whenever the results can be applied to both contexts. To enable Hypergradi-
+
+// n can be 1 or determined by line-search
+
+ent Optimization, i.e. gradient descent on L with
+
+yn = g(zn+1) - g(zn)
+
+respect to , Bai et al. [3, Theorem 1] show the
+
+sn = zn+1 - zn
+
+following theorem, which is based on implicit
+
+if b then
+
+differentiation [26]: Theorem 1 (Hypergradient [3, 26]). Let   Rp
+
+Bn+1 = arg min X - Bn F
+X: Xsn=yn
+else
+
+be a set of parameters, let L : Rd  R be a loss function and g : Rd  Rd be a root-defining function. Let z  Rd such that g(z ) = 0 and
+
+Bn+1 =
+
+arg min
+
+X-1 - Bn-1
+
+X: X=XT  Xsn=yn
+
+Jg (z ) is invertible, then the gradient of the loss L wrt. , called Hypergradient, is given by
+
+// The norm used in BFGS is a weighted Frobenius norm
+
+end
+
+L  z
+
+= zL(z
+
+)Jg (z
+
+)-1 g 
+
+z
+
+.
+
+(2)
+
+nn+1 end
+
+z = zn, B = Bn In practice, we use an algorithm to approximate
+
+z , and Theorem 1 gives a plug-in formula for the backward pass. We highlight that this formula
+
+is independent of the choice of the algorithm. Moreover, as opposed to explicit networks, we do
+
+not need to store intermediate activations, resulting in the aforementioned training time memory
+
+gain for DEQs. Once z has been obtained, one of the major bottlenecks in the computation of the
+
+Hypergradient is the inversion of Jg (z
+
+) in the directions
+
+g 
+
+z
+
+or zL(z ).
+
+3
+
+Quasi-Newton methods In practice, the forward pass is often carried out with qN methods. For in-
+stance, in the case of bi-level optimization for Logistic Regression, Pedregosa [38] used L-BFGS [31],
+while for Deep Equilibrium Models, Bai et al. [3] used Broyden's method [6], later adapted to the
+multi-scale case in a limited-memory version [4].
+These quasi-Newton methods were first inspired by Newton's method, which finds the root of g via the recurrent Jacobian-based updates zn+1 = zn - Jg (zn)-1g(zn). Specifically, they replace the Jacobian Jg (zn) by an approximation Bn that is based on available values of the iterates zn and g rather than its derivative. These Bn, called qN matrices, are defined recursively via an optimization problem with constraints called secant conditions. Solving this problem leads to expressing Bn as a rank-one or rank-two update of Bn-1, so that Bn is the sum of the initial guess B0 (in our settings, the identity) and n low-rank matrices (less than n in limited memory settings). This low rank structure allows efficient multiplication by Bn and Bn-1. We now explain how the use of qN methods as inner solver can be exploited to resolve this computational bottleneck.
+
+SHINE Roughly speaking, our proposition is to use B-1 = limn Bn-1 as a replacement for Jg (z )-1 in Eq. (2), i.e. to share the inverse estimate between the forward and the backward passes. This gives the approximate Hypergradient
+
+p
+
+= zL(z
+
+)B-1 g 
+
+z
+
+(3)
+
+In
+
+practice
+
+we
+
+will
+
+consider
+
+the
+
+non-asymptotical
+
+direction
+
+p(n)
+
+=
+
+z L(zn )Bn-1
+
+g 
+
+zn
+
+. Thanks to
+
+the Sherman-Morrison formula [42], the inversion of Bn can be done very efficiently (using scalar
+
+products) compared to the iterative methods needed to invert the true Jacobian Jg (z ). In turn, this
+
+significantly reduces the computational cost of the Hypergradient computation.
+
+Relationship to the Jacobian-Free method Because B0 = I in our setting, we may regard B as an identity matrix perturbed by a few rank-one updates. In the directions that are used for updates, B
+is going to be different from the identity, and hopefully closer to the true Jacobian in those directions.
+However, in all orthogonal directions we fall exactly into the setting of the Jacobian-Free method introduced by Fung et al. [16]. In that work, Jg (z )-1 is approximated by I, and the authors highlight that this is equivalent to using a preconditioner on the gradient. Under strong assumptions
+on g they show that this preconditioned gradient is still a descent direction. In their experiments, they force g to respect such assumptions, thereby constraining the performance of the network.
+
+2.2 Convergence to the true gradient
+
+To further justify and formalize the idea of SHINE, we show that the direction p(n) converges to the
+
+Hypergradient
+
+L 
+
+z
+
+. We now collect the assumptions that will be used for this purpose.
+
+Assumption 1 (Uniform Linear Independence (ULI) [30]). There exist a positive constant  > 0
+
+and natural numbers n0  0 and m  d with the following property: For any n  n0 we can find indices n  n1  . . .  nd  n + m such that, for pn defined in Algorithm 1, the smallest singular value of the d × d matrix
+
+, pn1
+pn1
+
+pn2 pn2
+
+, ...,
+
+pnd pnd
+
+is no smaller than .
+
+Assumption 2 (Smoothness and convergence to the fixed point). (i)
+
+ n=0
+
+zn - z
+
+<  for some
+
+z with g(z ) = 0; (ii) g is C1, Jg is Lipschitz continuous near z , and Jg (z ) is invertible; (iii)
+
+z L
+
+is
+
+continuous,
+
+and
+
+,
+
+g 
+
+is
+
+continuous.
+
+Remark. The Assumption 2 (i) implies limn zn = z . The existence of the Jacobian and its inverse are assumptions that are already made in the regular DEQ setting just to train the model.
+
+Theorem 2 (Convergence of SHINE to the Hypergradient using ULI). Let us denote p(n), the SHINE direction for iterate n in Algorithm 1 with b = true. Under Assumptions 1 and 2, for a given parameter , (zn) converges q-superlinearly to z and
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+4
+
+Proof. From [35, Theorem 5.7] we obtain that limn Bn = Jg (z ). We can then conclude using the continuity of the inversion operator on the space of invertible matrices and of the right and left
+matrix vector multiplications. A complete proof is given in Appendix B.1.
+
+Theorem 2 establishes convergence of the SHINE direction to the true Hypergradient, but relies on Assumption 1 (ULI). While ULI is often used to prove convergence results for qN matrices, e.g. in [12, 30, 36], it is a strong assumption whose satisfaction in practice is debatable, cf., e.g., [15]. For Broyden's method, ULI is violated in all numerical experiments in [32­34], and those works also prove that ULI is necessarily violated in certain settings (but the setting of this work is not covered). In the following we therefore derive results that do not involve ULI.
+
+2.3 Outer Problem Awareness
+
+The ULI assumption guarantees convergence of Bn-1 to Jg (z )-1. However, Eq. (2) only requires
+
+the multiplication of Jg (z
+
+)-1 with
+
+g 
+
+|z
+
+from the right and zL(z ) from the left.
+
+BFGS with OPA In order to strengthen Theorem 2, let us consider the setting of bi-level op-
+
+timization with a single regularizing hyperparameter .
+
+There, the partial derivative
+
+g 
+
+|z
+
+is a
+
+d-dimensional
+
+vector
+
+and
+
+it
+
+is
+
+possible
+
+to
+
+compute
+
+its
+
+approximation
+
+g 
+
+|zn
+
+at
+
+a
+
+reasonable
+
+cost.
+
+We propose to incorporate additional updates of the quasi-Newton matrix Bn into Algorithm 1
+
+that
+
+improve
+
+the
+
+approximation
+
+quality
+
+of
+
+Bn-1
+
+in
+
+the
+
+direction
+
+g 
+
+|zn
+
+(thus
+
+asymptotically
+
+in
+
+the
+
+direction
+
+g 
+
+|z
+
+). Given a current iterate pair (zn, Bn), these additional updates only change Bn, but
+
+not zn. We will demonstrate that a suitable update direction en  Rd is given by
+
+en
+
+=
+
+tn
+
+Bn-1
+
+g 
+
+,
+zn
+
+(4)
+
+where (tn)  [0, ) satisfies n tn < . This update direction will be used to create an extra secant condition X-1(g(zn + en) - g(zn)) = en for the additional update of Bn. Since this extra update is based on the outer problem, we refer to this technique as Outer-Problem Awareness (OPA). The complete pseudo code of the OPA method in the LBFGS algorithm [31] is given in Appendix A.
+We now prove that if extra updates are applied at a fixed frequency, then fast (q-superlinear) convergence of (zn) to z is retained, while convergence of the SHINE direction to the true Hypergradient is also ensured. To show this, we use the following assumption.
+Assumption 3 (Assumptions for BFGS). Let g(z) = zr(z) for some C2 function r : Rd  R. Consider Algorithm 1 with b = false. We assume some regularity on r and that an appropriate line search is used. An extended version of this assumption is given in Appendix B.2 (Assumption 5).
+
+Theorem 3 (Convergence of SHINE to the Hypergradient for BFGS with OPA). Let us consider p(n), the SHINE direction for iterate n in Algorithm 1 that is enriched by extra updates in the direction en defined in (4). Under Assumptions 2 (ii-iii) and 3, for a given parameter , we have the following:
+Algorithm 1, for any symmetric and positive definite matrix B0, generates a sequence (zn) that converges q-superlinearly to z , and there holds
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+(5)
+
+Proof. It follows from known results that the extra updates do not destroy the q-superlinear conver-
+
+gence of (zn). The proof of (5) relies firstly on the fact that by continuity of the derivative of g,
+
+we have limn
+
+g 
+
+|zn
+
+=
+
+g 
+
+|z
+
+.
+
+Due to the extra updates we can show convergence of the qN
+
+matrices to the true Hessian in the direction of the extra steps en, from which (5) follows. A full
+
+proof is provided in Appendix B.2.
+
+Remark. Theorem 3 also holds without line searches (i.e., n = 1 for all n) and any C2 function r (such that g(z) = zr(z)) with locally Lipschitz continuous Hessian if z0 is close enough to some z with zr(z ) = 0 and 2zzr(z ) positive definite.
+We note that Theorem 3 guarantees fast convergence of the iterates (zn) and that z0 does not have to be close to z for that guarantee. Also, there is no restriction on B0 other than being symmetric and positive definite (which is satisfied for our choice B0 = I). Finally, Theorem 3 does not rely on ULI. From a practical standpoint we thus regard Theorem 3 as a much stronger result than Theorem 2.
+
+5
+
+Adjoint Broyden with OPA
+
+It is not practical to use the partial derivative
+
+g 
+
+in the DEQ setting
+
+because it is a huge Jacobian that we do not have access to in practice. In order to still leverage the
+
+core idea of OPA, we propose to use extra updates that ensure that Bn-1 approximates Jg (z )-1 in the direction zL(z ) applied by left-multiplication, as required by (2). An appropriate secant
+
+condition is given by
+
+vnT Bn+1 = vnT Jg (zn+1),
+
+(6)
+
+where
+
+vnT = zL(zn)Bn-1.
+
+(7)
+
+To incorporate the secant condition (6), we use the Adjoint Broyden's method [41], a qN method
+
+relying on the efficient vector-Jacobian multiplication by Jg using auto-differentiation tools. To prove convergence of the SHINE direction for this method, we need the following assumption.
+
+Assumption 4 (Uniform boundedness of the inverse qN matrices). The sequence (Bn) generated by Algorithm 1 satisfies
+sup Bn-1 < .
+nN
+Remark. Convergence results for quasi-Newton methods usually include showing that Assumption 4
+holds, cf. [7, Theorem 3.2] for Broyden's method and the BFGS method, respectively, [41, Theorem 1]
+for the Adjoint Broyden's method. It can also be proved that Assumption 4 holds for globalized
+variants of these methods, e.g., for the line-search globalizations of Broyden's method proposed in [29]. We point out that Assumption 1 entails lim Bn = Jg (z ) and thus lim Bn-1 = Jg (z )-1, so it is clearly stronger than Assumption 4.
+
+Theorem 4 (Convergence of SHINE to the Hypergradient for Adjoint Broyden with OPA). Let us consider p(n), the SHINE direction for iterate n in Algorithm 1 with the Adjoint Broyden secant condition (6) and extra update in the direction vn defined in (7). Under Assumptions 2 and 4, for a given parameter , we have q-superlinear convergence of (zn) to z and
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+Proof. The q-superlinear convergence of (zn) follows from [41, Theorem 2]. To establish convergence of the SHINE direction, we proceed in three steps. First, it is shown that for zL(z ) = 0 the claim holds due to continuity and Assumption 4. Then zL(z ) = 0 is considered and it is proved that the desired convergence holds on the subsequence that corresponds to the additional
+updates. Lastly, this result is transferred to the entire sequence by involving the fixed frequency of
+the additional updates. The complete proof is provided in Appendix B.3.
+
+Using the Adjoint Broyden's method comes at a computational cost. Indeed, because we now rely
+on Jg , we have to store the activations of g(z) (which has a computational cost in addition to a memory cost), but also perform the vector-Jacobian product in addition to the function evaluation.
+
+3 Results
+We test our method in 3 different setups and compare it to the original iterative inversion and its closest competitor, the Jacobian-Free method [16]. We draw the reader's attention to the fact that although the Jacobian-Free method [16] is used outside the assumptions needed to have theoretical guarantees3 of descent, it still performs relatively well in the Deep Equilibrium setting. The same is true for SHINE: While the ULI assumption is not met (and we are in practice far from the fixed point convergence), it performs well in practice.
+Implementations. All the bi-level optimization experiments were done using the HOAG code [38]4, which is based on the Python scientific ecosystem [21, 39, 44]. All the Deep Equilibrium experiments were done using the PyTorch [37] code for Multiscale DEQ [4]5, which was distributed under the MIT license. Plots were done using Matplotlib [24], with Science Plots style [17]. DEQ trainings were done in a publicly funded HPC, using nodes with 4 V100 GPUs. In practice, we never reach convergence of (zn), hence the approximate gradient might be far from the true gradient. To improve the approximation quality, we now propose two variants of our method.
+3See the results on contractivity in Appendix E.2. 4https://github.com/fabianp/hoag 5https://github.com/locuslab/mdeq
+
+6
+
+Transition to the exact Jacobian Inverse. The approximate gradient p(n) can also be used as the initialization of an iterative algorithm for inverting Jg (z ) in the direction zL(z ). With a good initialization, faster convergence can be expected. Moreover, if the iterative algorithm is also a qN method, which is the case in practice in the Multiscale DEQ implementation, we can use the qN matrix B from the forward pass to initialize the qN matrix of this algorithm. We refer to this strategy as the refine strategy. Because the refine strategy is essentially a smart initialization scheme, it recovers all the theoretical guarantees of the original method [3, 4, 38].
+
+Fallback in the case of wrong inversion. Empirically, we noticed that using B can sometimes produce bad approximations, although with very low probability. We propose to detect this with by monitoring a telltale sign based on the norm of the approximation, as we verified on several examples that cases with a huge norm compared to the correct inversion also had a very bad correlation with the correct inversion. In these cases, we can simply fallback onto another inversion method. For the Deep Equilibrium experiments, when the norm of the inversion using SHINE is 1.3 times above the norm of the inversion using the Jacobian-Free method (which is available at no extra computational cost), we use the Jacobian-Free inversion. We refer to this strategy as the fallback strategy.
+
+3.1 Bi-level optimization ­ Hyperparameter optimization in Logistic Regression
+
+We first test SHINE in the simple setting of bilevel optimization for L2-regularized logistic regression, using the code from Pedregosa [38] and the same datasets. Convergence on unseen data is illustrated in Figure 2.6 An acceptable level of performance is reached twice faster for the SHINE method compared to any other competitor, except Jacobian-Free on the real-sim dataset. However, its behaviour is unstable as one can notice with the 20news dataset. Another finding is that the refine strategy does not provide a definitive improvement over the vanilla version of SHINE. To make sure that SHINE performance does not results from poor hyperparameter choice, we verified that one cannot simply truncate the inversion iterations to a small number (see Appendix E.1).
+
+1.000 0.998 0.996 0.994
+1.00
+
+1.05
+a b
+
+1.10
+
+Direction Additional Krylov Random
+
+Figure 1: Quality of the inversion using OPA : Ratio of the inverse approximation b = Bn-1v over the exact inverse a = Jg (z )-1v function of the cosine similarity between a and b for 3 different
+directions: the prescribed direction, the Krylov
+direction and a random direction.
+
+Loss cossim(a, b)
+
+103 101 10-1
+0
+
+20news
+
+20
+
+40
+
+Time (s)
+
+103
+
+102
+
+101
+
+100
+
+10-1
+
+60
+
+0
+
+real-sim
+
+10
+
+20
+
+Time (s)
+
+HOAG Jacobian-Free SHINE (ours) SHINE refine (ours) Grid search
+30
+
+Figure 2: Bi-level optimization: Convergence of different hyperparameter optimization methods on the L2-regularized logistic regression problem for the 2 datasets (20news [28] and real-sim [1]) on held-out test data. An extended version of this figure with more methods is provided in Appendix E.1.
+
+We also tested our implementation of OPA on the 20news dataset. We did not compare it to the Fortran L-BFGS implementation because we use a pure Python implementation for OPA. In the original method the inversion uses optimized code. In contrast, in our implementation of OPA the inner solver is slow in comparison to the computation of hypergradients. However, the improvement
+6To facilitate the reader's understanding of the figures, we plot the empirical suboptimality, but we do remind them that there is no guarantee of convergence on held-out test data, as is better seen on the real-sim dataset.
+
+7
+
+20news
+103
+
+Loss
+
+102
+
+HOAG
+
+101
+
+SHINE (ours)
+
+SHINE - OPA (ours)
+100
+
+10-1
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+120
+
+Time (s)
+
+Figure 3: Bi-level optimization with OPA: Convergence of different hyperparameter optimization methods on the L2-regularized logistic regression problem for the 20news dataset [28] on held-out test data. The methods are implemented with a pure Python implementation of L-BFGS in order to allow the introduction of OPA.
+
+of SHINE over the original method is still clear, cf. the results in Figure 3. We underline, though,
+
+that SHINE with OPA has a strong theoretical foundation.
+
+We also showed on a smaller dataset, the breast cancer dataset [14], that OPA indeed ensures a
+
+better approximation of the inverse in the prescribed direction. For a given split of the data, we
+
+compared the quality of the approximation of the inversion in three different directions: a direction
+
+chosen randomly but used for the OPA update, the Krylov direction
+
+g z
+
+z
+
+(zn - zn-1) and a random
+
+direction not used in the qN algorithm. The results for 100 runs with different random seeds are
+
+depicted in Figure 1, where we can observe that OPA indeed ensures a better inversion compared to a
+
+random direction. We also notice that a poor direction for the inversion is correlated with a small
+
+magnitude.
+
+3.2 Deep Equilibrium Models
+Next, we tested SHINE on the more challenging DEQ setup. Two experiments illustrate the performance of SHINE on the image classification task on two datasets. For both datasets, we used the exact same configuration of models as that used in the original Multiscale DEQ paper [4] and did not fine tune any hyperparameter. For the different DEQs training methods, models for a given seed share the same unrolled-pretraining steps. We do not include OPA in the DEQ results because we have not managed to optimize its implementation and fix all the bugs, but provide partial results in Appendix E.4.
+
+CIFAR-10. The first dataset is CIFAR-10 [27] which features 60,000 32×32 images representing 10 classes. For this dataset, the size of the multi-scale fixed point is d = 50k. We train the models for five different random seeds.
+The results in Figure 4 show that for the vanilla version, SHINE slightly outperforms the JacobianFree method [16]. Additionally, our results suggest that SHINE (in its vanilla version) is able to reduce the time taken for the backward pass almost 10-fold compared to the original method while retaining a competitive performance (on par with Res-Net-18 [22] at 92.9%). Finally, we do highlight that the Jacobian-Free method [16] is able to perform well outside the scope of its theoretical assumptions, albeit with slightly worse performance than SHINE.
+
+ImageNet. The second dataset is the ImageNet dataset [13] which features 1.2 million images cropped to 224×224, representing 1000 classes. This dataset is recognized as a large-scale computer vision problem and the dimension of the fixed point to find is d = 190k.
+For this challenging task, we noticed that the vanilla version of SHINE was suffering a big drop just after the transition from unrolled pre-training to actual equilibrium training. To remedy partly this problem, we introduced the fallback to Jacobian-Free inversion. The results for a single random seed presented in Figure 4 for the ImageNet dataset are given for SHINE with fallback. We verified that the fallback is barely used, by logging the proportion of samples that end up using it.
+
+8
+
+93.5
+93.0
+92.5 0
+
+CIFAR10
+
+50
+
+100
+
+150
+
+200
+
+250
+
+ImageNet
+
+Top-1 accuracy (%)
+
+74 72
+
+0
+
+100
+
+200
+
+300
+
+400
+
+500
+
+600
+
+700
+
+800
+
+Median backward pass in ms, on a single V100 GPU, Batch size = 32
+
+Original Method
+
+SHINE (ours)
+
+Jacobian-Free
+
+# Backward iter.
+
+0
+
+1
+
+2
+
+5
+
+7
+
+10
+
+20
+
+27
+
+Figure 4: DEQ: Top-1 accuracy function of backward pass computational cost for the different methods considered to train DEQs, on CIFAR [27] and ImageNet [13].
+
+Despite the drop suffered at the beginning of the equilibrium training, SHINE in its refined version is able to perform on par with the Jacobian-Free method [16]. We also confirm the importance of choosing the right initialization to perform accelerated backpropagation, by showing that with a limited iterative inversion, the performance of the original method deteriorates. Finally, while the drop in performance for the accelerated methods is significant when applied in their vanilla version, we remind the reader that no fine-tuning was performed on the training hyperparameters, making those results encouraging (on par with architectures like ResNet-18 [22]).
+4 Conclusion and Discussion
+We introduced SHINE, a method that leverages the qN matrices from the forward pass to obtain an approximation of the gradient of the loss function, thereby reducing the time needed to compute this gradient. We showed that this method can be used on a wide range of applications going from bi-level optimization to small and large scale computer vision tasks. We found that both SHINE and the Jacobian-Free method reduce the required amount of time for the backward pass of implicit models, potentially lowering the barriers for training implicit models. As those methods still suffer from a small performance drop, there is room for further improvement. In particular, a potential experimentation avenue would be to understand how to balance the efforts of the Adjoint Broyden method in order to come closer to guaranteeing the asymptotical correctness of the approximate inversion. On the theoretical side, this may involve the rate of convergence of the approximated gradient. It also seems desirable to develop a version of Theorem 4 in which convergence of (zn) to z is not an assumption but rather follows from the assumptions, as achieved in Theorem 3. We have no doubt that the contraction assumption used for the Jacobian-Free method would allow to prove such a result, but expect that a significantly weaker assumption will suffice.
+Broader Impacts
+By reducing the computational burden needed to train DEQs, SHINE contributes to lowering the overall energy consumption required to train such models. It can also enable the training of such models on edge devices which was cited as an unclear development for these models by Bai et al. [4]. Another potential use of this technique is to be able to train more models and therefore make the research on DEQs more accessible or more thorough. This of course will favor both the potentially harmful or positive implementations of such models that were listed in the original Multiscale DEQ paper [4].
+
+9
+
+References
+[1] Libsvm datasets. https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/. Accessed: 2021-05-06.
+[2] B. Amos and J. Zico Kolter. OptNet: Differentiable Optimization as a Layer in Neural Networks. In ICML, 2017. ISBN 1703.00443v4.
+[3] S. Bai, J. Z. Kolter, and V. Koltun. Deep equilibrium models. In NeurIPS, 2019.
+[4] S. Bai, V. Koltun, and J. Z. Kolter. Multiscale deep equilibrium models. In NeurIPS, 2020.
+[5] J. Bergstra and Y. Bengio. Random Search for Hyper-Parameter Optimization Yoshua Bengio. Journal of Machine Learning Research, 13:281­305, 2012. URL http://scikit-learn. sourceforge.net.
+[6] C. G. Broyden. A Class of Methods for Solving Nonlinear Simultaneous Equations. Mathematics of Computation, 19(92):577­593, 1965.
+[7] C. G. Broyden, J. E. jun. Dennis, and J. J. More. On the local and superlinear convergence of quasi-Newton methods. J. Inst. Math. Appl., 12:223­245, 1973. ISSN 0020-2932. doi: 10.1093/imamat/12.3.223.
+[8] R. H. Byrd and J. Nocedal. A tool for the analysis of quasi-Newton methods with application to unconstrained minimization. SIAM J. Numer. Anal., 26(3):727­739, 1989. ISSN 0036-1429; 1095-7170/e. doi: 10.1137/0726042.
+[9] R. H. Byrd, R. B. Schnabel, and G. A. Shultz. Parallel quasi-Newton methods for unconstrained optimization. Math. Program., 42(2 (B)):273­306, 1988. ISSN 0025-5610; 1436-4646/e. doi: 10.1007/BF01589407.
+[10] R. T. Chen, Y. Rubanova, J. Bettencourt, and D. Duvenaud. Neural Ordinary differential equations. In NeurIPS, number NeurIPS, 2018. doi: 10.1007/978-3-030-15679-4{\_}5.
+[11] T. Chen, B. Xu, C. Zhang, and C. Guestrin. Training Deep Nets with Sublinear Memory Cost. Technical report, 2016. URL http://arxiv.org/abs/1604.06174.
+[12] A. R. Conn, N. I. Gould, and P. L. Toint. Convergence of quasi-Newton matrices generated by the symmetric rank one update. Mathematical Programming, 50(1-3):177­195, 1991. ISSN 00255610. doi: 10.1007/BF01594934.
+[13] J. Deng, W. Dong, R. Socher, L.-J. Li, Kai Li, and Li Fei-Fei. ImageNet: A large-scale hierarchical image database. In 2009 IEEE Conference on Computer Vision and Pattern Recognition. Institute of Electrical and Electronics Engineers (IEEE), 2009. doi: 10.1109/cvpr. 2009.5206848.
+[14] D. Dua and C. Graff. UCI machine learning repository, 2017. URL http://archive.ics. uci.edu/ml.
+[15] H. Fayez Khalfan, R. H. Byrd, and R. B. Schnabel. A theoretical and experimental study of the symmetric rank-one update. SIAM J. Optim., 3(1):1­24, 1993. ISSN 1052-6234; 1095-7189/e. doi: 10.1137/0803001.
+[16] S. W. Fung, H. Heaton, Q. Li, D. Mckenzie, S. Osher, and W. Yin. Fixed Point Networks: Implicit Depth Models with Jacobian-Free Backprop. Technical report, 2021.
+[17] J. D. Garrett and H.-H. Peng. garrettj403/SciencePlots, Feb. 2021. URL http://doi.org/10. 5281/zenodo.4106649.
+[18] D. Gilton, G. Ongie, and R. Willett. Deep Equilibrium Architectures for Inverse Problems in Imaging. Technical report, 2021. URL http://arxiv.org/abs/2102.07944.
+[19] A. N. Gomez, M. Ren, R. Urtasun, and R. B. Grosse. The Reversible Residual Network: Backpropagation Without Storing Activations. In Conference on Neural Information Processing Systems (NIPS ), 2017.
+10
+
+[20] R. M. Gower and P. Richtárik. Randomized quasi-Newton updates are linearly convergent matrix inversion algorithms. SIAM Journal on Matrix Analysis and Applications, 38(4):1380­1409, 2017. ISSN 10957162. doi: 10.1137/16M1062053.
+[21] C. R. Harris, K. J. Millman, S. J. van der Walt, R. Gommers, P. Virtanen, D. Cournapeau, E. Wieser, J. Taylor, S. Berg, N. J. Smith, R. Kern, M. Picus, S. Hoyer, M. H. van Kerkwijk, M. Brett, A. Haldane, J. F. del Río, M. Wiebe, P. Peterson, P. Gérard-Marchant, K. Sheppard, T. Reddy, W. Weckesser, H. Abbasi, C. Gohlke, and T. E. Oliphant. Array programming with NumPy. Nature, 585(7825):357­362, 9 2020. ISSN 14764687. doi: 10.1038/s41586-020-2649-2. URL https://doi.org/10.1038/s41586-020-2649-2.
+[22] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. In Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern Recognition, 2016. ISBN 9781467388504. doi: 10.1109/CVPR.2016.90.
+[23] H. Heaton, S. W. Fung, A. Gibali, and W. Yin. Feasibility-based Fixed Point Networks. Technical report, 2021. URL http://arxiv.org/abs/2104.14090.
+[24] J. D. Hunter. Matplotlib: A 2D graphics environment. Computing in Science and Engineering, 9(3):90­95, 2007. ISSN 15219615. doi: 10.1109/MCSE.2007.55.
+[25] D. P. Kingma and J. L. Ba. Adam: A method for stochastic optimization. In 3rd International Conference on Learning Representations, ICLR 2015 - Conference Track Proceedings. International Conference on Learning Representations, ICLR, 12 2015. URL https://arxiv.org/abs/1412.6980v9.
+[26] S. G. Krantz and H. R. Parks. The Implicit Function Theorem: History, Theory, and Applications. Springer New York, 1 2013. ISBN 9781461459811. doi: 10.1007/978-1-4614-5981-1.
+[27] A. Krizhevsky. Learning Multiple Layers of Features from Tiny Images. Technical report, 2009.
+[28] K. Lang. NewsWeeder: Learning to Filter Netnews. In Proceedings of the Twelfth International Conference on Machine Learning, pages 331­339. Elsevier, 1995. doi: 10.1016/ b978-1-55860-377-6.50048-7.
+[29] D. Li and M. Fukushima. A derivative-free line search and global convergence of Broyden-like method for nonlinear equations. Optim. Methods Softw., 13(3):181­201, 2000. ISSN 1055-6788; 1029-4937/e. doi: 10.1080/10556780008805782.
+[30] D. Li, J. Zeng, and S. Zhou. Convergence of Broyden-Like Matrix. Applied Mathematics Letter, 11(5):35­37, 1998.
+[31] D. C. Liu and J. Nocedal. On the limited memory BFGS method for large scale optimization. Mathematical Programming, Series B, 45(3):503­528, 1989. ISSN 0025-5610.
+[32] F. Mannel. On the convergence of the Broyden-like matrices. 2020.
+[33] F. Mannel. Convergence properties of the Broyden-like method for mixed linear­nonlinear systems of equations. Numerical Algorithms, pages 1­29, 2021. ISSN 15729265. doi: 10.1007/s11075-020-01060-y.
+[34] F. Mannel. On the convergence of Broyden's method and some accelerated schemes for singular problems. 2021.
+[35] J. More and J. Trangenstein. On the global convergence of Broyden's method. Math. Comput., 30:523­540, 1976. ISSN 0025-5718; 1088-6842/e. doi: 10.2307/2005323.
+[36] J. Nocedal and S. Wright. Quasi-Newton Methods. In Numerical Optimization, pages 135­163. 2006.
+[37] A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, A. Desmaison, A. Köpf, E. Yang, Z. DeVito, M. Raison, A. Tejani, S. Chilamkurthy, B. Steiner, L. Fang, J. Bai, and S. Chintala. PyTorch: An Imperative Style, High-Performance Deep Learning Library. In NeurIPS, 12 2019. URL https://arxiv.org/abs/1912.01703.
+11
+
+[38] F. Pedregosa. Hyperparameter optimization with approximate gradient. 33rd International Conference on Machine Learning, ICML 2016, 2:1150­1159, 2016.
+[39] F. Pedregosa, G. Varoquaux, A. Gramfort, V. Michel, B. Thirion, O. Grisel, M. Blondel, P. Prettenhofer, R. Weiss, V. Dubourg, J. Vanderplas, A. Passos, D. Cournapeau, M. Brucher, M. Perrot, and E. Duchesnay. Scikit-learn: Machine Learning in Python Gaël Varoquaux Bertrand Thirion Vincent Dubourg Alexandre Passos PEDREGOSA, VAROQUAUX, GRAMFORT ET AL. Matthieu Perrot. Journal of Machine Learning Research, 12:2825­2830, 2011. URL http://scikit-learn.sourceforge.net.
+[40] M. E. Sander, P. Ablin, M. Blondel, and G. Peyré. Momentum Residual Neural Networks. Technical report, 2021. URL http://arxiv.org/abs/2102.07870.
+[41] S. Schlenkrich, A. Griewank, and A. Walther. On the local convergence of adjoint Broyden methods. Mathematical Programming, 121(2):221­247, 2010. ISSN 14364646. doi: 10.1007/ s10107-008-0232-y.
+[42] J. Sherman and W. J. Morrison. Adjustment of an inverse matrix corresponding to a change in one element of a given matrix. The Annals of Mathematical Statistics, 21(1):124­127, 1950. doi: 10.1214/aoms/1177729893.
+[43] M. Telgarsky. Benefits of depth in neural networks. Journal of Machine Learning Research, 49 (June):1517­1539, 2 2016. URL http://arxiv.org/abs/1602.04485.
+[44] P. Virtanen, R. Gommers, T. E. Oliphant, M. Haberland, T. Reddy, D. Cournapeau, E. Burovski, P. Peterson, W. Weckesser, J. Bright, S. J. van der Walt, M. Brett, J. Wilson, K. J. Millman, N. Mayorov, A. R. Nelson, E. Jones, R. Kern, E. Larson, C. J. Carey, I. Polat, Y. Feng, E. W. Moore, J. VanderPlas, D. Laxalde, J. Perktold, R. Cimrman, I. Henriksen, E. A. Quintero, C. R. Harris, A. M. Archibald, A. H. Ribeiro, F. Pedregosa, P. van Mulbregt, A. Vijaykumar, A. P. Bardelli, A. Rothberg, A. Hilboll, A. Kloeckner, A. Scopatz, A. Lee, A. Rokem, C. N. Woods, C. Fulton, C. Masson, C. Häggström, C. Fitzgerald, D. A. Nicholson, D. R. Hagen, D. V. Pasechnik, E. Olivetti, E. Martin, E. Wieser, F. Silva, F. Lenders, F. Wilhelm, G. Young, G. A. Price, G. L. Ingold, G. E. Allen, G. R. Lee, H. Audren, I. Probst, J. P. Dietrich, J. Silterra, J. T. Webber, J. Slavic, J. Nothman, J. Buchner, J. Kulick, J. L. Schönberger, J. V. de Miranda Cardoso, J. Reimer, J. Harrington, J. L. C. Rodríguez, J. Nunez-Iglesias, J. Kuczynski, K. Tritz, M. Thoma, M. Newville, M. Kümmerer, M. Bolingbroke, M. Tartre, M. Pak, N. J. Smith, N. Nowaczyk, N. Shebanov, O. Pavlyk, P. A. Brodtkorb, P. Lee, R. T. McGibbon, R. Feldbauer, S. Lewis, S. Tygier, S. Sievert, S. Vigna, S. Peterson, S. More, T. Pudlik, T. Oshima, T. J. Pingel, T. P. Robitaille, T. Spura, T. R. Jones, T. Cera, T. Leslie, T. Zito, T. Krauss, U. Upadhyay, Y. O. Halchenko, and Y. Vázquez-Baeza. SciPy 1.0: fundamental algorithms for scientific computing in Python. Nature Methods, 17(3):261­272, 3 2020. ISSN 15487105. doi: 10.1038/ s41592-019-0686-2. URL https://doi.org/10.1038/s41592-019-0686-2.
+12
+
+A OPA algorithm
+
+Algorithm LBFGS: (Limited memory) BFGS method with OPA
+
+Input: initial guess (z0, B0-1), where B0-1 is symmetric and positive definite, tolerance > 0, frequency of additional updates M  N, memory limit L  N  {}, (tn) a null sequence of positive numbers with n tn < 
+Let F := zg for n = 0, 1, 2, . . . do
+if F (zn)  then let z := zn and let B := Bn; STOP if (n mod M ) = 0 then
+
+let
+
+en
+
+:=
+
+tn
+
+Bn-1
+
+g 
+
+, y^n := F (zn + en) - F (zn) and r^n := (en)T y^n
+zn
+
+if r^n > 0 then
+
+let a^n := en - Bn-1y^n and let
+
+B^n-1
+
+:= Bn-1 +
+
+a^n(en)T + en(a^n)T r^n
+
+-
+
+(a^n)T y^n (r^n)2
+
+en
+
+(en
+
+)T
+
+else let B^n-1 := Bn-1
+Let Bn-1 := B^n-1 if n  L then remove update n - L from Bn-1 Let pn := -Bn-1F (zn) Obtain n via line-search and let sn := npn Let zn+1 := zn + sn, yn := F (zn+1) - F (zn) and rn := (sn)T yn if rn > 0 then
+let an := sn - Bn-1yn and let
+
+Bn-+11
+
+:= Bn-1 +
+
+an(sn)T + sn(an)T rn
+
+-
+
+(an)T yn (rn)2
+
+sn(sn)T
+
+else let Bn-+11 := Bn-1 if n  L then remove update n - L from Bn-+11
+Output: z , B
+
+Remark. A possible choice for (tn) is to use an arbitrary t0 > 0 and tn := sn-1 for n  1.
+
+B Proofs of SHINE convergence
+To facilitate reading, we restate the results before proving them.
+
+B.1 Convergence using ULI
+
+Theorem 2 (Convergence of SHINE to the Hypergradient using ULI). Let us denote p(n), the SHINE direction for iterate n in Algorithm 1 with b = true. Under Assumptions 1 and 2, for a given parameter , (zn) converges q-superlinearly to z and
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+Proof. Under Assumptions 1 and 2, [35, Theorem 5.7] shows that Bn satisfies
+
+lim
+n
+
+Bn
+
+=
+
+Jg (z
+
+)
+
+The inversion operator is continuous in the space of invertible matrices, so we have:
+
+lim
+n
+
+Bn-1
+
+=
+
+Jg (z
+
+)-1
+
+13
+
+Because
+
+z L
+
+and
+
+g 
+
+are
+
+continuous
+
+at
+
+z
+
+by Assumption 2 (iii), we also have thanks to Assump-
+
+tion 2 (i):
+
+lim
+n
+
+z L(zn )
+
+=
+
+z L(z
+
+)
+
+and
+
+lim g = g n  zn  z
+
+By continuity we then deduce that, as claimed,
+
+lim
+n
+
+p(n)
+
+=
+
+lim
+n
+
+z L(zn )Bn-1
+
+g 
+
+(zn)
+
+=
+
+z L(z
+
+)Jg (z
+
+)-1 g 
+
+z
+
+L =
+ z
+
+B.2 Convergence for BFGS with OPA
+Assumption 5 (Extended Assumptions for BFGS). Let g(z) = zr(z) for some C2 function r : Rd  R. Consider Algorithm 1 with b = false and suppose that
+1. the set  := {z  Rd : r(z)  r(z0)} is convex;
+2. r is strongly convex in an open superset of  (this implies that r has a unique global minimizer z ) and has a Lipschitz continuous Hessian near z ;
+3. there are positive constants 1, 2 such that the line search used in the algorithm ensures that for each n  0 either
+
+r(zn+1)  r(zn) - 1
+
+r(zn)T pn 2 pn
+
+or
+
+r(zn+1)  r(zn) + 2r(zn)T pn
+
+is satisfied; 4. the line search has the property that n = 1 will be used if both
+
+(Bn - Jg (zn))sn sn
+
+and
+
+zn - z
+
+are sufficiently small.
+Remark. The requirements 3. and 4. on the line search are, for instance, satisfied under the well-known Wolfe conditions, see [9, section 3] for further comments.
+Theorem 3 (Convergence of SHINE to the Hypergradient for BFGS with OPA). Let us consider p(n), the SHINE direction for iterate n in Algorithm 1 that is enriched by extra updates in the direction en defined in (4). Under Assumptions 2 (ii-iii) and 3, for a given parameter , we have the following: Algorithm 1, for any symmetric and positive definite matrix B0, generates a sequence (zn) that converges q-superlinearly to z , and there holds
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+(5)
+
+Proof. The proof is divided into two steps. The first step is to establish the q-superlinear convergence of (zn) to z and the Dennis­Moré condition
+
+lim
+n
+
+(Bn
+
+-
+
+Jg (z
+
+))
+
+en en
+
+= 0.
+
+(8)
+
+The second step is then to show that (8) implies the desired convergence of the SHINE direction.
+Step one: It is easy to check that instead of updating Bn-1 we can also obtain the sequence (Bn) by directly updating Bn according to
+
+Bn+1
+
+=
+
+Bn
+
++
+
+ynynT ynT sn
+
+-
+
+Bnsn(Bnsn)T sTn Bnsn
+
+for the usual update (skipping the update if ynT sn  0) and
+
+B^n
+
+=
+
+Bn +
+
+y^ny^nT y^nT en
+
+-
+
+Bnen(Bnen)T eTn Bnen
+
+for the extra update (skipping the update if y^nT en  0). Here, the quantities yn, y^n and en are defined as in Algorithm LBFGS. We can now argue almost verbatim as in the proof of [9, Theorem 3.1]
+to show that (zn) converges q-superlinearly to z and that, moreover, a fixed fraction of the extra
+
+14
+
+updates is actually applied, i.e., B^n = Bn for at least 0.5Q of the indices n = 0, M, 2M, . . . , QM for any Q  N. By Ne  {0, M, 2M, . . .} we denote the set of indices of extra updates that are actually applied. From [8, Theorem 3.2] we obtain that
+
+lim
+Ne n
+
+B^n - Jg (z )
+
+en = 0. en
+
+(9)
+
+Since at least every second extra update is actually carried out, the sequence (jn)nM+1 given
+
+by jn := arg minmNe,m<n|n - m| is well-defined and satisfies |n - jn|  2M - 1 for all n  N. To infer from (9) that (8) holds, it suffices to show that limn Bn - B^jn = 0. Due to |n - jn|  2M - 1 for all n, the difference Bn - B^jn is a sum of at most 2M - 1 BFGS
+updates in search directions, but contains no extra updates. Therefore, the bounded deterioration
+
+principle implies that Bn - B^jn  C
+
+n k=jn
+
+zn - z
+
+for all n  M + 1 and some constant
+
+C > 0. Since (zn) converges q-superlinearly to z and since |n - jn|  2M - 1, it follows that
+
+limn
+
+n k=jn
+
+zn - z
+
+= 0, which concludes the proof of the first step.
+
+Step
+
+two:
+
+We
+
+abbreviate
+
+vn
+
+:=
+
+g 
+
+|zn
+
+.
+
+From
+
+the
+
+definition
+
+of
+
+en
+
+and
+
+(8)
+
+we
+
+infer
+
+that
+
+(Bn - Jg (z
+
+))
+
+en en
+
+= (I - Jg (z
+
+)Bn-1)
+
+vn Bn-1vn
+
+converges to zero, too. Multiplying this with Jg (z )-1 yields
+
+lim
+n
+
+Jg (z
+
+)-1 - Bn-1
+
+vn Bn-1vn
+
+= 0,
+
+which shows that limn Bn-1vn
+
+=
+
+limn Jg (z )-1vn
+
+=
+
+Jg (z
+
+)-1
+
+g 
+
+|z
+
+by Assump-
+
+tion 2 (iii).
+
+Using Assumption 2 (iii) again it follows that
+
+lim
+n
+
+p(n)
+
+=
+
+lim
+n
+
+z L(zn )Bn-1
+
+g 
+
+zn
+
+= zL(z
+
+)Jg (z
+
+)-1 g 
+
+z
+
+L
+
+=
+
+,
+
+ z
+
+which concludes the proof.
+
+B.3 Convergence for Adjoint Broyden with OPA
+
+Theorem 4 (Convergence of SHINE to the Hypergradient for Adjoint Broyden with OPA). Let us consider p(n), the SHINE direction for iterate n in Algorithm 1 with the Adjoint Broyden secant condition (6) and extra update in the direction vn defined in (7). Under Assumptions 2 and 4, for a given parameter , we have q-superlinear convergence of (zn) to z and
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+Proof. Due to Assumption 2, the superlinear convergence of (zn) follows from [41, Theorem 2]. The proof of the remaining claim is divided into two cases.
+
+Case 1: Suppose that zL(z ) = 0. By continuity this implies limn zL(zn) = 0. Since the
+
+sequence
+
+(Bn-1
+
+g 
+
+|zn
+
+)
+
+is
+
+bounded
+
+by
+
+Assumption
+
+4,
+
+it
+
+follows
+
+that
+
+lim
+n
+
+p(n)
+
+=
+
+lim
+n
+
+z
+
+L(zn)Bn-1
+
+g 
+
+zn
+
+=0=
+
+L 
+
+z
+
+,
+
+as claimed.
+Case 2: Suppose that zL(z ) = 0. By continuity this implies zL(zn) = 0 for all sufficiently large n  N. Let us denote by Ne  N the set of indices of extra updates. We stress that this set is infinite since, by construction, every M -th update is an extra update. We have vn = 0 for all sufficiently large n  Ne, hence [41, Lemma 3] yields
+
+lim
+Ne n
+
+zL(zn)(I - Bn-1Jg (z )) (z L(zn )Bn-1 )T
+
+= lim
+Ne n
+
+(vn)T (Bn - Jg (z )) vn
+
+= 0.
+
+This implies
+
+lim
+Ne n
+
+zL(zn)(Jg (z )-1 - Bn-1) z L(zn )Bn-1
+
+= 0,
+
+15
+
+thus necessarily
+
+lim
+Ne n
+
+zL(zn)(Jg (z )-1 - Bn-1)
+
+= 0.
+
+Since limNe n zL(zn)Jg (z )-1 = zL(z )Jg (z )-1 by continuity, we find
+
+Ne
+
+lim
+n
+
+z L(zn )Bn-1
+
+=
+
+z L(z
+
+)Jg (z
+
+)-1,
+
+whence
+
+Ne
+
+lim
+n
+
+p(n)
+
+=
+
+Ne
+
+lim
+n
+
+z
+
+L(zn
+
+)Bn-1
+
+g 
+
+zn
+
+= zL(z
+
+)Jg (z
+
+)-1 g 
+
+z
+
+L
+
+=
+
+,
+
+ z
+
+(10)
+
+where we have used continuity again. To prove that these limits hold not only for Ne n   but in fact for all N n  , we establish, as intermediate claim, that for any fixed m  N we have limn Bn+m - Bn = 0. Note that this claim is equivalent to limn Bn+1 - Bn = 0. Denoting by L  0 the Lipschitz constant of Jg near z , we find
+
+Bn+1 - Bn
+
+=
+
+vnvnT [Jg (zn+1) - Bn] vn 2
+
+ Jg (zn+1) - Jg (z ) +
+
+[Jg (z ) - Bn]T vn vn
+
+ L zn+1 - z
+
++ EnT vn . vn
+
+Both terms on the right-hand side go to zero as n goes to infinity: the first one due to
+
+limn zn = z
+
+and the second one since limn
+
+EnT vn vn
+
+= 0 by [41, Lemma 3]. This shows
+
+that limn Bn+1 - Bn = 0, which concludes the proof of the intermediate claim.
+
+From limn Bn+m - Bn = 0 for any fixed m  N it follows that for any sequence
+
+(jn)  N with supn |jn - n| <  there holds limn Bjn - Bn = 0. This implies for any such sequence (jn) the limit limn Bj-n1 - Bn-1 = 0. To establish this, note that for C := max{supn Bn , supn Bn-1 }, which is finite by Assumption 4 and the combination of the
+bounded deterioration principle [41, Lemma 2] with Assumption 2 (i), the set
+
+A  Rd×d : A-1 exists , A  C, A-1  C
+
+includes the sequence (Bn) and is compact by the Banach lemma, so inversion is a uniformly continuous operation on this set.
+
+Now let us construct a sequence (jn)  Ne by defining, for every n  N, jn := arg minmNe |n-m|. That is, for every n, jn denotes the member of Ne with the smallest distance to n. It is clear that |n - jn|  M - 1 for all n, hence limn Bj-n1 - Bn-1 = 0. Using this and, again, continuity it is easy to see that
+
+lim
+n
+
+p(n) - p(jn)
+
+= 0,
+
+which implies by (10) that
+
+lim
+n
+
+p(n)
+
+=
+
+lim
+n
+
+p(jn
+
+)
+
+=
+
+Ne
+
+lim
+n
+
+p(n)
+
+=
+
+L 
+
+z
+
+,
+
+thereby establishing the claim.
+
+Remark. An inspection of the proof reveals that if Bn is never updated in the direction zn, but only
+
+updated in the direction vn defined in (7), then Assumption 4 can be replaced by the significantly
+
+weaker
+
+assumption
+
+that
+
+the
+
+sequence
+
+(Bn-1
+
+g 
+
+|zn )
+
+is
+
+bounded.
+
+The
+
+price
+
+to
+
+pay
+
+is
+
+that
+
+the
+
+conver-
+
+gence rate of (zn) to z will be slower (q-linear instead of q-superlinear) since the updates in the
+
+direction zn are critical for ensuring fast convergence of (zn) to z .
+
+C Logistic Regression Hyperparameters
+For both datasets we split the data randomly (with a different seed for each run) between trainingvalidation-test, with the following proportions: 90%-5%-5%. The hyperparameters are the same as in the original HOAG work [38], except:
+
+16
+
+· We use a memory limitation of 30 updates (not grid-searched) for accelerated methods (Jacobian-Free and SHINE), compared to 10 for the original method. This is because the approximation should be better using more updates. We verified that using 30 updates for the original method does not improve the convergence speed. That number is 60 for OPA.
+· We use a smaller exponential decrease of 0.78 (not grid-searched) for the accelerated methods, compared to 0.99 for the original method. This is because in the very long run, the approximation can cause oscillations.
+We also use the same setting as Pedregosa [38] for the Grid and Random Search. Finally, we highlight that warm restart is used for both the inner problem and the Hessian inversion in the direction of the gradient.
+OPA inversion experiments For the OPA experiments, we used a memory limitation of 60, and a tolerance of 10-6. The OPA update is done every 5 regular updates.
+D DEQ training details
+The training details are the same as the original Multiscale DEQ paper [4]: all the hyperparameters are kept the same and not fine-tuned, and the data split is the same. We recall here some important aspects. For both datasets, the network is first trained in an unrolled weight-tied fashion for a few epochs in order to stabilize the training. We also underline that the DEQ models, in addition to having a fixed-point-defining sub-network, also have a classification and a projection head.
+D.1 CIFAR Adam optimizer [25] is used with a 10-3 start learning rate, and a cosine annealing schedule.
+D.2 ImageNet The Stochastic Gradient Descent optimizer is used with a 5 × 10-2 start learning rate, and a cosine annealing schedule. The images are downsampled 2 times before being fed to the fixed-point defining sub-network.
+E Additional results
+E.1 Bi-level optimization extended
+In order to make sure that SHINE was indeed improving over HOAG [38], we also looked at the results obtained when performing an inversion with a precision lower than that prescribed by Pedregosa [38] originally (i.e. truncating the iterative inversion). These results, also complemented with Random Search [5], can be seen in Figure E.1. They confirm that the advantage provided by SHINE cannot be retrieved with a looser tolerance on the inversion.
+E.2 Contractivity assumption
+One of the main limiting assumptions in the original Jacobian-Free method work [16], is the contractivity assumption. We showed here that it was not important to enforce this in order to achieve excellent results, but one can wonder whether this assumption is not met in practice thanks to the unrolled pretraining of DEQs. We looked at the contractivity of the fixed-point defining sub-network empirically by using the power-method applied to a non-linear function, in the CIFAR setting. The results, summarized in Table E.1, show that the fixed-point defining sub-network is not contractive at all.
+E.3 Time gains
+Because the total training time is not only driven by backward pass but also by the forward pass and the evaluation, we show for completeness in Table E.2 the time gains for the different acceleration methods for the overall epoch. We do not report in this table the time taken for pre-training which is equivalent across all methods, and is not something on which SHINE has an impact. It is clear in Table E.2 that accelerated methods can have a significant impact on the training of DEQs because we see that half the time of the total pass is spent on the backward pass (more on ImageNet [13]). We also notice that while SHINE has a slightly slower backward pass than the Jacobian-Free method [16], the difference is negligible when compared to the total pass computational cost.
+17
+
+Loss
+
+103 102 101 100 10-1 10-2
+0
+
+20news
+
+10
+
+20
+
+30
+
+40
+
+50
+
+60
+
+Time (s)
+real-sim
+
+103
+
+102
+
+101
+
+100
+
+10-1 0
+
+5
+
+10
+
+15
+
+20
+
+25
+
+30
+
+Time (s)
+
+HOAG HOAG - lim. backward
+
+SHINE (ours) SHINE refine (ours)
+
+Grid search Random search
+
+Jacobian-Free
+
+Figure E.1: Bi-level optimization: Convergence of different hyperparameter optimization methods on the L2-regularized logistic regression problem for two datasets (20news [28] and real-sim [1]) on held-out test data.
+
+E.4 DEQ OPA results
+We can clearly see in Figure E.2 that in the case of DEQs, OPA also significantly improves the inversion over the other accelerated methods. We also see that the improvements of SHINE over the Jacobian-Free method without OPA are marginal. Because the inversion is so good, we would expect that the performance of SHINE with OPA would be on par with the original method's. However, this is not what we see in the results presented in Table E.3. Indeed, OPA does improve on SHINE with only Adjoint Broyden, but it does not outperform SHINE done with Broyden.
+
+18
+
+Table E.1: Non-linear spectral radius obtained by the power method for the fixed-point defining
+
+sub-network for the 3 different methods.
+
+Method
+
+Non-linear spectral radius
+
+Original
+
+230.5
+
+Jacobian-Free 193.7
+
+SHINE
+
+234.2
+
+Table E.2: The time required for each method on the different datasets during the equilibrium training.
+
+For the forward and backward passes, the time is measured offline, for a single batch of 32 samples,
+
+with a single GPU, using the median to avoid outliers. This time is given in milliseconds. For the
+
+epochs, the time is measured by taking an average of the 6 first epochs, and given in hours-minutes
+
+for Imagenet and minutes-seconds for CIFAR. The epoch time for SHINE without improvement on
+
+Imagenet is not given because it never reaches the 26 forward steps: the implicit depth is too short.
+
+Fallback is not used for CIFAR. Numbers in parenthesis indicate the number of inversion steps for
+
+the refined versions.
+
+Dataset Name
+
+CIFAR [27]
+
+ImageNet [13]
+
+Method Name
+
+Forward Backward Epoch Forward Backward Epoch
+
+Original [4]
+
+256
+
+210
+
+4min40 644
+
+798
+
+3h38
+
+Jacobian-Free [16]
+
+249
+
+12.9 3min10 621
+
+13.5
+
+2h02
+
+SHINE Fallback (ours)
+
+218
+
+16.0 3min20 622
+
+35.3
+
+2h13
+
+SHINE Fallback refine (5, ours) 272
+
+96.6 3min50 622
+
+212
+
+2h44
+
+Jacobian-Free refine (5)
+
+260
+
+86.5 3min40 620
+
+186
+
+2h43
+
+Original limited backprop
+
+281
+
+86.4 3min50 653
+
+187
+
+2h40
+
+cossim(a, b)
+
+0.9
+
+0.8
+
+Method
+
+Jacobian-Free
+
+SHINE w. Broyden
+0.7
+SHINE w. Adj. Broyden
+
+SHINE w. Adj. Broyden / OPA
+0.6
+
+0.5
+
+1.2
+
+1.4
+
+1.6
+
+1.8
+
+2.0
+
+a/b
+
+Figure E.2: Quality of the inversion using OPA in DEQs : Ratio of the inverse approximation
+over the exact inverse function of the cosine similarity between the inverse approximation b = zL(z )Bn-1 and the exact inverse a = zL(z )Jg (z )-1 for different methods. For OPA, the extra update frequency is 5. 100 runs were performed with different batches.
+
+Table E.3: CIFAR DEQ OPA results : Top-1 accuracy of different methods on the CIFAR dataset,
+
+and epoch mean time.
+
+Methode name
+
+Top-1 Accuracy (%) Epoch mean time
+
+Original
+
+93.51
+
+4min40
+
+Jacobian-Free
+
+93.09
+
+3min10
+
+SHINE (Broyden)
+
+93.14
+
+3min20
+
+SHINE (Adj. Broyden)
+
+92.89
+
+4min
+
+SHINE (Adj. Broyden/OPA) 93.04
+
+4min40
+
+19
+
+

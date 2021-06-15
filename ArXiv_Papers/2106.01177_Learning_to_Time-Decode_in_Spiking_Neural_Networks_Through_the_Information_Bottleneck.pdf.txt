@@ -1,0 +1,1092 @@
+Learning to Time-Decode in Spiking Neural Networks Through the Information Bottleneck
+
+arXiv:2106.01177v1 [cs.NE] 2 Jun 2021
+
+Nicolas Skatchkovsky KCLIP lab, Dept. of Eng. King's College London
+London, UK
+nicolas.skatchkovsky@kcl.ac.uk
+
+Osvaldo Simeone KCLIP lab, Dept. of Eng. King's College London
+London, UK
+osvaldo.simeone@kcl.ac.uk
+
+Hyeryung Jang ION group, Dept. of A.I.
+Dongguk University Seoul, Korea
+hyeryung.jang@dgu.ac.kr
+
+Abstract
+One of the key challenges in training Spiking Neural Networks (SNNs) is that target outputs typically come in the form of natural signals, such as labels for classification or images for generative models, and need to be encoded into spikes. This is done by handcrafting target spiking signals, which in turn implicitly fixes the mechanisms used to decode spikes into natural signals, e.g., rate decoding. The arbitrary choice of target signals and decoding rule generally impairs the capacity of the SNN to encode and process information in the timing of spikes. To address this problem, this work introduces a hybrid variational autoencoder architecture, consisting of an encoding SNN and a decoding Artificial Neural Network (ANN). The role of the decoding ANN is to learn how to best convert the spiking signals output by the SNN into the target natural signal. A novel end-to-end learning rule is introduced that optimizes a directed information bottleneck training criterion via surrogate gradients. We demonstrate the applicability of the technique in an experimental settings on various tasks, including real-life datasets.
+1 Introduction
+While traditional Artificial Neural Networks (ANNs) implement static rate-based neurons, Spiking Neural Networks (SNNs) incorporate dynamic spike-based neuronal models that are closer to their biological counterparts. In different communities, SNNs are used either as models for the operation of biological brains or as efficient solutions for cognitive tasks. The efficiency of SNNs, when implemented on dedicated hardware, hinges on the high capacity, low latency, and high noise tolerance of information encoding in the timing of spikes [1]. Recent results leveraging novel prototype chips confirm the potential order-of-magnitude gains in terms of latency- and energy-to-accuracy metrics for several optimization and inference problems [2]. In contrast, the landscape of training algorithms for SNNs is still quite fractured [2], and a key open question is how to derive learning rules that can optimally leverage the time encoding capabilities of spiking neurons. This is the focus of this work.
+Learning how to decode. Consider the problem of training an SNN ­ a network of spiking neurons. To fix the ideas, as illustrated in Fig. 1(a)-(b), say that we wish to train an SNN to classify inputs from a neuromorphic sensor, such as a DVS camera [5], which are in the form of a collection of spiking signals. We hence have a spiking signal as input and a natural signal (the label) as output. As another example in Fig. 1(e), we may wish to "naturalize'' the output of a DVS camera to produce the corresponding natural image [6]. The direct training of an SNN hinges on the definition of a loss function operating on the output of the SNN. This is typically done by converting the target natural signals into spiking signals that serve as the desired output of the SNN. As seen in Fig. 1(a)-(b), one could for instance assign a large-rate spiking signal or an earlier spike to the readout neuron representing the correct class. The loss function then measures the discrepancy between actual output spiking signals and the corresponding spiking targets.
+Preprint. Under review.
+
+a.
+
+c. t `1'
+
+t
+
+d. 
+
+t `7'
+
+t error
+
+t
+
+b.
+
+t `1' t `7'
+
+, j ,
+
+i ,
+,
+
+t t error
+
+i
+
+t
+
+, j
+
+,
+
+
+
+e.
+
+ +  
+
+natural target signal
+
+0.75
+
+t
+
+0.02
+
+t
+
+0.99
+
+j
+
+t
+
+0.0
+
+i  
+
+0.33
+
+,
+
+Figure 1: (a) Illustration of an SNN trained for image classification with first-to-spike decoding. (b) Illustration of an SNN trained for image classification with rate decoding. (c) Illustration of an SG scheme [3]: At each time-step, updates for neuron i are computed using local eligibility traces ei,t, and per-neuron learning signals Li,t, obtained from errors computed based on handcrafted target signals (gray). (d) Illustration of ML learning for SRM with stochastic threshold [4]: Updates for readout neurons (green) are obtained with local eligibility traces based on handcrafted target spiking signal (gray), while updates for hidden neurons (red) make use of a common learning signal t based on the same target signal. (e) Illustration of the proposed hybrid variational autoencoder: An encoding SNN processes inputs from a spiking image source, such as a DVS camera, to produce a spiking latent representation. A decoding ANN learns to decode this representation with the aim of reconstructing a natural target signal, such as an image, corresponding to the spiking input of the SNN. SNN and ANN are jointly trained under a directed information bottleneck criterion. Accordingly, training of the ANN is based on backpropagation, while training of the SNN uses per-neuron learning signals computed on common feedback from the ANN.
+
+The approach outlined in the previous paragraph has an important problem: By selecting handcrafted target spiking signals, one is effectively choosing a priori the type of information encoding into spikes that the SNN is allowed to produce. This constrains the capacity of the SNN to fully leverage the time encoding capabilities of spiking signals. For instance, the target signals outlined in Fig. 1(a) correspond to assuming rate decoding, while those in Fig. 1(b) to first-to-spike decoding [7]. This paper proposes a method that allows the SNN to automatically learn how to best encode the input into spiking signals, without constraining a priori the decoding strategy.
+To this end, we introduce the hybrid SNN-ANN autoencoder architecture shown in Fig. 1(e) that consists of the encoding SNN to be trained alongside a decoding ANN. The role of the decoding ANN is to learn how to best convert the spiking signals output by the SNN into the target natural signal. Encoding SNN and decoding ANN are trained end-to-end so as to ensure that the SNN produces informative spike-based representations that can be efficiently decoded into the desired natural signals.
+
+Directed information bottleneck. How to jointly train the hybrid SNN-ANN autoencoder? On the one hand, we wish the spiking output of the SNN to be informative about the target natural signal ­ which we will refer to as reference signal ­ and, on the other, we would like the spiking output of the SNN to remove all extraneous information present in the spiking input that is not informative about the reference signal. To capture this dual requirement, we adopt an information bottleneck (IB) formulation [8], and view the ANN as the inference network in a variational autoencoder system [9].
+In applying the variational IB methodology to the hybrid SNN-ANN autoencoder in Fig. 1(e), we make two key contributions. 1) Given the inherently dynamic operation of the SNN, we generalize the
+
+2
+
+IB criterion to apply to directed information metrics [10], in lieu of conventional mutual information. We refer to the resulting approach as variational directed IB (VDIB). 2) In order to enable the optimization of information-theoretic metrics, such as the IB, we introduce an SNN model that encompasses deterministic hidden neurons and probabilistic readout neurons. In so doing, we combine two strands of research on training SNN: The first line focuses purely on deterministic models, viewing an SNN as a Recurrent Neural Network (RNN) and deriving approximations of backpropagation-through-time (BPTT) through surrogate gradient (SG) techniques [3, 11­15]; while the second assumes probabilistic neurons only, deriving approximations of maximum likelihood (ML) learning. Additional discussion on related work can be found in the next section.
+
+2 Related works
+Training SNNs. In recent years, SG techniques for training SNNs have gained significant momentum, becoming the state-of-the-art and de-facto eclipsing other techniques. As reviewed in [12], these techniques rely on surrogate derivatives to replace the ill-defined derivative of the step activation function of spiking neurons. The SGs are combined with truncated and approximated versions of BPTT, including the use of per-layer local error signals [13] and per-neuron learning signals defined using direct feedback alignment [3, 15]. Learning rules for probabilistic SNNs are typically derived by tackling the ML problem, and result in updates that rely on random sampling and common ­ rather than per-neuron ­ learning signals. The approach was shown to generalize to networks of winner-take-all neurons [16]. As illustrated in Fig. 1, the proposed approach builds on both models to enable the use of SG methods for the optimization of probabilistic learning criterion.
+Hybrid SNN-ANN architectures. A hybrid SNN-ANN architecture has been recently proposed in [17] for gesture similarity analysis, based on the variational autoencoder (VAE) framework. Although yielding a similar objective, the encoder in [17] is not fully spiking since the ANN receives the membrane potentials of the spiking neurons in the readout layer of the SNN. The model proposed in our work circumvents this limitation.
+Information bottleneck. The IB technique originated two decades ago [8] in the context of a rate-distortion problem formation assuming discrete variables. The approach has regained interest in recent years, first as a means to explain the performance of ANNs [18], and then as a training criterion in [9]. We extend the IB by considering temporal signals under causality constraints, hereby replacing the mutual information with directed information [10]. The IB principle has been previously used in the SNN literature in the case of a single neuron [19, 20]. Finally, it has been used in theoretical neuroscience to explain processing in sensory neurons [21] and as a unifying principle for the predictive and efficient coding theories. Our model encompasses the framework introduced in [21].
+
+3 Problem definition
+
+Notations. Consider three jointly distributed random vectors x, y, and z with distribution
+
+p(x, y, z). The conditional mutual information (MI) between x and y given z is defined as
+
+I(x; y|z) = Ep(x,y,z) log
+
+p(x,y|z) p(x|z)p(y|z)
+
+, where Ep[·] represents the expectation with respect
+
+to the distribution p. The Kullback-Leibler (KL) divergence between two probability distributions
+
+p(x) and q(x) defined on the same probability space is KL(p(x)||q(x)) = Ep(x) log
+
+p(x) q(x)
+
+.
+
+For any two jointly distributed random vectors a = (a1, . . . , aT ) and b = (b1, . . . , bT ) from time 1 to T , the  -causally conditioned distribution of a given b is defined as
+
+T
+
+p()(a||b) = p(at|at-1, btt- ),
+
+(1)
+
+t=1
+
+where we denote as att21 = (at1+1, . . . , at2 ) the overall random vector from time t1 + 1 to t2. ; This distribution (1) captures the causal dependence of sequence a on the last  samples of b. If  = T , we recover the causally conditioned distribution [10].
+
+We also define the  -directed information with   0 as
+
+T
+
+I()(a  b) = I(att- ; bt|bt-1).
+
+(2)
+
+t=1
+
+3
+
+This metric quantifies the causal statistical dependence of sequence a on the more recent  samples and b. With  = T , this recovers the standard directed information [10]. We denote as  the convolution operator ft  gt = 0 fgt-.
+Problem definition. We study the hybrid SNN-ANN autoencoder architecture in Fig. 1 with the aim of training an SNN encoder to produce a time-encoded spiking representation y of the spiking input x that is informative about a natural reference signal r. Throughout, a spiking signal is a binary vector sequence, with "1" representing a spike, and a natural signal is a real-valued vector sequence. In the prototypical application in Fig. 1(e), the input x is obtained from a neuromorphic sensor, such as a DVS camera [5], and the reference signal r represents the corresponding target natural signal, such as a label or the original natural image. The spiking representation y produced by the SNN is fed to an ANN, whose role is to decode y into the reference signal r. Importantly, we do not a priori constrain the decoding strategy. In contrast, existing works typically handcraft target spiking signals y corresponding to some fixed decoding rule, such as rate decoding (Fig. 1(a)-(b)). Our main contribution is a method to train encoding SNN and decoding ANN jointly, with the goal of discovering automatically efficient time-decoding rules from spiking signals produced by the encoding SNN.
+To optimize SNN encoder and ANN decoder, we consider a data set comprising N pairs (x, r) of exogeneous spiking inputs x and natural reference signals r generated from an unknown population distribution p(x, r). The exogeneous inputs are in the form of arbitrary time vector sequence x = (x1, . . . , xT ) with xt  {0, 1}NX , while the reference signals r = (r1, . . . , rT ), with rt  RNR , define general target signals. In the image naturalization task illustrated in Fig. 1, the exogenous inputs x are the spiking signals encoding the input from a DVS camera, with NX being the number of pixels; and the reference signals r encode the pixel intensities of the natural image. This can be done for instant by setting rt = 0NR for t = 1, . . . , T - 1, and rT equal to the grayscale image of NR pixels; or setting rt to equal the grayscale image of all t = 1, . . . , T .
+We wish to train the encoding SNN to output a spiking representation y that is maximally informative about the natural target signal r. As we will detail below, the SNN implements a causal stochastic mapping between latent signal y and input x that depends on a vector of parameters we as
+
+T
+
+p(wee)(y||x) = p(yt|yt-1, xtt-e ),
+
+(3)
+
+t=1
+
+where the integer e represents the memory of the encoding SNN and we the synaptic weights of the SNN. As a starting point, consider maximizing the d-directed information between y and r as
+
+max
+we
+
+Iw(ed)(y
+
+
+
+r),
+
+(4)
+
+for a decoding window d  0, over the vector we of the encoding SNN parameters. The use of the
+d-directed information, in lieu of the mutual information I(y; r), reflects the practical requirement that reference signal rt be well represented by a limited window ytt-d of past outputs of the SNN in a causal manner. The directed information Iw(ed)(y  r) is evaluated with respect to the marginal p(y, r) of the joint distribution
+
+pwe (x, y, r) = p(x, r)p(wee)(y||x).
+
+(5)
+
+The maximization (4) does not impose any constraint on the complexity of the spiking representation y. To address this problem, we adopt the directed information bottleneck (DIB) objective
+
+RDIB(we) = Iw(ed)(y  r) -  · Iw(ee)(x  y),
+
+(6)
+
+where  > 0 is a hyperparameter. The penalty term Iw(ee)(x  y) is the directed information between the input x and the spiking representation y, which captures the complexity of the causal encoding done by the SNN. This term is evaluated with respect to the marginal p(x, y) = p(x)p(wee)(y||x) of the joint distribution (5), and it reflects the limited memory of the SNN encoding mapping (3). It
+can be interpreted as the amount of information about input x that is (causally) preserved by the
+representation y. To the best of our knowledge, the DIB objective is considered in this paper for the
+first time.
+
+4
+
+4 Learning to decode through the IB
+
+In order to address the DIB problem (6), we adopt a variational formulation that relies on the introduction of a decoding network, as in the architecture illustrated in Fig. 1(d). The decoding network implements the causally conditional distribution
+
+T
+
+qw(dd)(r||y) =
+
+qwd (rt|rt-1, ytt-d )
+
+(7)
+
+t=1
+
+between spiking representation y and natural reference signal r. The decoder (7) is causal, with memory given by integer d > 1 and is parametrized by a vector wd. The decoder can be implemented
+in several ways. A simple approach, that we follow in the remainder of this paper, is to use a model qwd (rt|rt-1, ytt-d ) = qwd (rt|ytt-d ), where qwd (rt|ytt-d ) is an ANN with inputs given by a window ytt-d of d samples from the spiking representation y. Alternatively, one could use an RNN to directly model the kernel qwd (rt|rt-1, ytt-d ). Note that the introduction of the decoder network (7) is consistent with the use of the d-directed information in (6). We emphasize that the use of an ANN, or RNN, for decoding, is essential in order to allow the reference sequence r to be a natural
+signal.
+
+With such a network, using a standard variational inequality [9], we bound the two terms in (6) to obtain the variational DIB (VDIB) loss LVDIB(we, wd) as an upper bound on the negative DIB
+objective (6)
+
+LVDIB(we, wd) = Epwe (y,r) - log qw(dd)(r||y) + · Ep(x) KL(pw(ee)(y||x)||q(y)) , (8)
+
+average decoder's log-loss
+
+information theoretic regularization
+
+in which we have introduced an arbitrary "prior" distribution q(y) = t q(yt|yt-1) on the spiking representation. As in the implementation in [9] for the standard IB criterion, we will consider q(y) to
+
+be fixed, although it can potentially be optimized on. To enforce sparsity of the encoder's outputs, the
+
+"prior" q(y) can be chosen as a sparse Bernoulli distribution [4], i.e., q(y) =
+
+T t=1
+
+Bern(yt
+
+|p)
+
+for
+
+some small probability p. The derivation of the bound can be found in Appendix A.1.
+
+The learning criterion (8) enables the joint training of encoding SNN and decoding network via the problem
+
+min LVDIB(we, wd),
+
+(9)
+
+we ,wd
+
+which we address via SGD. To this end, we now give general expressions for the gradients of the
+VDIB criterion (8) with respect to the encoder and decoder weights by leveraging the REINFORCE
+Monte Carlo gradients. In the next section, we will then detail how the gradient with respect to the encoding SNN weights we can be approximated by integrating SG [3] with the probabilistic
+approach [4]. To start, the VDIB loss in (8) can equivalently be stated as
+
+LVDIB(we, wd) = E p(x, r) Epw(ee)(y||x)
+
+population distribution
+
+enc. SNN
+
+- log qw(dd)(r||y) + · log
+
+pw(ee)(y||x) q(y)
+
+:= wd (y,r)
+
+:= we (y,x)
+
+, (10)
+
+where we have defined the decoder loss wd (y, r) and the encoder loss we (y, x), as shown in (10). The gradient with respect to the encoder weights we can be obtained via the REINFORCE gradient technique [22, Ch. 8] [23] as
+
+we LVDIB(we, wd) = Ep(x,r)Ep(wee)(y||x)
+
+wd (y, r) +  · we (y, x) · we log pw(ee)(y||x) , (11)
+
+while the gradient with respect to the decoder weights wd can be directly computed as
+
+wd LVDIB(we, wd) = Ep(x,r)Ep(wee)(y||x) wd wd (y, r) .
+
+(12)
+
+5
+
+Unbiased estimates of the gradients (11)-(12) can be evaluated by using one sample (x, r)  p(x, r) from the data set, along with a randomly generated SNN output y  p(wee)(y||x). We obtain
+
+we LVDIB(we, wd)  wd (y, r) +  · we (y, x) · we log p(wee)(y||x)
+
+(13)
+
+wd LVDIB(we, wd)  wd wd (y, r).
+
+(14)
+
+While the gradient wd wd (y, r) can be computed using standard backpropagation on the decoding ANN, the gradient we log p(wee)(y||x) for the encoder weights depends on the SNN model, and is detailed in the next section.
+
+As we will describe in the next section, and as illustrated in Fig. 1(d), the learning rule for the SNN involves common learning signal wd (y, r) +  · we (y, x) which includes two feedback signals, one from the ANN decoder ­ the loss wd (y, r) ­ and one from the SNN encoder, namely we (y, x). The latter imposes a penalty for the distribution of the representation y that depends on its "distance", in terms of log-likelihood ratio, with respect to the reference distribution q(y). Apart from
+the described common learning signals, which is a hallmark of probabilistic learning rules [4, 4, 24],
+the update also involves per-neuron terms derived as in SG-based rules. The proposed algorithm is
+detailed in Appendix A.1 and derived next.
+
+5 SNN Model
+
+The encoding SNN is a directed network N of spiking neurons for which at each time-step t = 1, . . . , T , each neuron i  N outputs a binary value zi,t  {0, 1}. The set of neurons can be partitioned as N = H  Y, where H denotes the set of NH hidden neurons, and Y the set of NY readout neurons that output spiking signal y over T time instants. The SNN defines the stochastic
+mapping p(wee)(y||x) in (3) between exogenous input sequence x and the output y of the readout neurons. For each neuron i  N , we denote as Pi the set of pre-synaptic neurons, i.e., the set of neurons having directed synaptic links to neuron i. With a slight abuse of notation, we include the
+NX exogenous inputs in this set. In order to enable the use of information-theoretic criteria via the
+stochastic mapping (3), as well as the efficiency of SG-based training, we model the readout neurons in Y using the (probabilistic) Spike Response Model (SRM) [25] with stochastic threshold [4], while the hidden neurons in H follow the standard (deterministic) SRM. Accordingly, the spiking mechanism of every neuron i  N in the SNN depends on the spiking history of pre-synaptic neurons
+and of the post-synaptic neuron itself through the neuron's membrane potential [4, 24, 25]
+
+ui,t =
+
+wiej t  zj,t + wie t  zi,t-1 + w¯ie.
+
+jPi
+
+(15)
+
+In (15), the contribution of each pre-synaptic neuron j is given by the synaptic trace t  zj,t, where
+the sequence t is the synaptic spike response and zj,t is the pre-synaptic neuron's output, multiplied by the synaptic weight wiej. The membrane potential is also affected by the post-synaptic trace t  zi,t-1, where t is the feedback response and zi,t is the post-synaptic neuron's output, which is weighted by wie. The spike response t and feedback response t can be different for visible and hidden neurons (see Appendix A.2), and they have memory limited for e samples, i.e., t = t = 0 for t > e. Finally, w¯ie is a learnable bias parameter. Choices for these functions and details on the neuron models are provided in Appendix A.2.
+
+Deterministic SRM. For each hidden neuron i  H, the binary output hi,t  {0, 1} at time t depends on its membrane potential ui,t as
+
+si,t = (ui,t),
+
+(16)
+
+where (·) is the Heaviside step function: A spike is emitted when the membrane potential ui,t is positive.
+
+6
+
+SRM with stochastic threshold. For each neuron i  Y in the readout layer, the spiking probability, when conditioned on the overall spiking history, depends on the membrane potential as
+
+pwie (yi,t = 1|ui,t) = (ui,t),
+
+(17)
+
+where (x) = 1/(1 + exp (-x)) is the sigmoid function, and wie = {wiej, wie, w¯ie} is the per-neuron
+
+set of parameters. This yields the encoding stochastic mapping (3) as
+
+T
+
+p(wee)(y||x) =
+
+pwie (yi,t||ui,t).
+
+iY t=1
+
+(18)
+
+Gradients. From Sec. 4, given (13)-(14), we need to compute the gradients we log p(wee)(y||x). For the readout neurons, this can be directly done as [4]
+
+wiej log pwie (yi,t = 1|ui,t) = t  zj,t yi,t - (ui,t) = eij,t,
+
+(19)
+
+where we recall that zj,t is the spiking signal of pre-synaptic neuron j. In (19), we have defined the pre-synaptic eligibility trace eij,t. Learning rules can similarly derived for weights wie and w¯ie, with corresponding eligibility traces ei,t and e¯i,t, and we define per-neuron eligibility trace ei,t = {eij,t, ei,t, e¯i,t}. For neurons i  H in the hidden layer, we rely on e-prop [3] ­ an SG-based
+
+technique ­ to obtain the approximation
+
+T
+
+wiej log p(wee)(y||x) 
+
+Li,teti,j ,
+
+t=1
+
+(20)
+
+with the learning signal
+
+Li,t = Bik yk,t - (uk,t)
+
+(21)
+
+kY
+
+characterized by random, but fixed, weights Bik following direct feedback alignment [26], and eligibility trace
+
+eij,t =  (ui,t - ) t  zj,t .
+
+(22)
+
+The approximation (20) comes from: (i) truncating the BPTT by ignoring the dependence of the log-loss - log pwie (yi,t|ui,t) at time t on the weight wie due to the previous time instants t < t; (ii) replacing backpropagation through neurons, via feedback alignment; and (iii) using the derivative of a
+surrogate function  (·) [12]. For example, with a sigmoid surrogate gradient, we have  (·) =  (·).
+
+The overall algorithm, referred to as VDIB, is summarized in Appendix A.1. As anticipated in the
+previous sections, the updates (31) and (32) contain elements from both probabilistic and SG-based learning rules. In particular, the global learning signal wd (y, r) +  · we (y, x) relates to the global signal used in probabilistic learning [4, 24], whilst per-neuron error signal (21) is a feature of
+SG schemes [3, 12].
+
+6 Experiments
+
+We now evaluate the proposed VDIB solution in an experimental setting. We specifically focus on two tasks: predictive coding and naturalization of spiking signals. The former task highlights the aspect of causal, online, encoding and decoding, and relates closely with work in theoretical neuroscience [21]. In contrast, the latter task emphasizes the role of the proposed approach for neuromorphic computing [6]. Specifically, the naturalization of spiking inputs, e.g., obtained from a DVS camera [5], enables the integration of neuromorphic sensors with conventional digital sensors and processors [6].
+
+As the proposed hybrid architecture gives flexibility in the choice of the decoding ANN, we have
+
+considered three options: (i) a simple logistic regression model, (ii) a multilayer perceptron (MLP)
+
+with one hidden layer, and (iii) a convolutional neural network (CNN) with two convolutional layers
+
+and one fully connected layer. As discussed in Sec. 3, at each time t, the decoding ANN is given
+
+the sequence ytt-d of d time samples produced by the encoding SNN. As a benchmark, we also
+
+consider conventional rate decoding, whereby time samples within the sequence ytt-d are summed
+
+over time, yielding
+
+t t
+
+=t-d
+
+yt
+
+,
+
+before
+
+being
+
+fed
+
+to
+
+the
+
+ANN.
+
+By considering encoding networks with a layered architecture, our implementation of both ANN and
+
+SNN makes use of automatic differentiation and general-purpose deep learning libraries [27] and
+
+Tesla V100 GPUs.
+
+7
+
+encoder spike rate
+
+inepxu. ts
+
+0.4
+
+encoding window e
+
+oSuNtpNuts
+
+0.2
+
+decoding window d lag 
+
+oAutNpNuts
+
+0.0
+
+MSE
+
+0.15
+
+MSE
+
+0.15
+
+0.10
+
+0.10 0.05
+
+0.05
+
+filtering
+
+prediction
+
+-5 -3 -1
+
+1
+
+3
+
+5
+
+10-4
+
+10-2
+
+100
+
+102
+
+104
+
+lag
+
+
+
+Figure 2: Left: Illustration of the exogenous inputs (top), and accuracy as a function of the target lag  (bottom). Right: Encoding network spike rates with lag  = -2 versus regularization constant 
+(top), and corresponding accuracy (bottom). Shaded areas represent standard deviations.
+
+6.1 Predictive and efficient coding
+In this first experiment, we explore the use of the proposed hybrid variational autoencoder for a predictive coding problem. Following the experiment proposed in [21], we consider exogenous signals consisting of 20 correlated spiking signals that represent two independent auto-regressive "drifting Gaussian blobs". At each time t, the position pt  {1, . . . , 20} of each "blob" across the exogenous inputs follows a (wrapped) Gaussian path N (t, ), with t evolving according to an AR(2) process t = t-1 + vt, with vt = avt-1 - b t, t  N (0, 1),  = 0.45, a = 0.9 and b = 0.14. A realization of the exogenous inputs can be found in Fig. 2(left, top). The reference signal rt at time-step t consists of the one-hot encoding of the positions of the two blobs at time t +  for some time lag   Z. A one layer encoder compresses the 20 exogenous spiking signals into 10 spiking signals, which are decoded by a softmax regressor (playing the role of the decoding ANN). We choose the reference distribution q(y) to be i.i.d. Bern(0.2) to enforce temporal sparsity. We set e = T , and d = 5 and, where not mentioned otherwise,  = 1. Training is done over 50, 000 randomly generated examples, of length T = 100. Testing is done on a single example of length T = 1, 000. Results are presented in terms of mean squared error (MSE), and averaged over 5 trials with random initializations. In the right panels, it can be seen that by modulating the value of , one can explore the trade-off between temporal sparsity and accuracy. Overall, the approach is seen to yield compact spiking representations that enable the reconstruction of the input signal via online decoding.
+6.2 Naturalizing MNIST images
+Table 1: Comparison of classification accuracy with various encoding and decoding strategies for naturalization of MNIST digits, with an MLP ANN decoder.
+
+Encoding \ Decoding Rate
+
+VDIB
+
+Rate Time
+
+60.50 ± 0.32% 91.32 ± 0.27% 86.43 ± 0.84% 92.82 ± 0.25%
+
+We now consider image naturalization. To start, we obtain exogenous input spiking signals x by
+encoding MNIST images using either Poisson encoding (see [25]) or time-to-first spike encoding (as in [7]). The relevance signal is defined as rt = 0NX for t = 1, . . . , T - 1, and rT is the original image. Results are provided in terms of the accuracy of the convolutional LeNet ANN trained on the
+original MNIST dataset [28]. Specifically, we feed the decoded natural images to the LeNet ANN, and report its accuracy. The hybrid variational autoencoder compresses the 784 exogenous spiking
+
+8
+
+riemcaognes. inepx.uts
+
+rate decoding
+
+VDIB
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+Figure 3: Top: Exogenous spiking inputs from the MNIST-DVS dataset summed over time samples (first row), and reconstructed natural images via VDIB (second row). Bottom: T-SNE representation of the spiking signals produced by the SNN with rate decoding (left), and with VDIB (right).
+signals into 256 spiking signals at the readout layer of the SNN. We set e = d = T = 30, and  = 0.001. Training is carried over 200, 000 examples, and testing is done on the 10, 000 images from the test dataset. Other experimental details can be found in Appendix A.3.
+We explore the impact of various encoding and decoding strategies in Table 1, when using a decoding MLP. From Table 1, we note that, although rate decoding provides clear benefits in reducing the size of inputs to the decoder, this is at the cost of a large drop in accuracy. The clear performance advantages for time decoding validate our working hypothesis regarding the importance to move away from handcrafted decoding strategies.
+6.3 Naturalizing MNIST-DVS images Finally, we evaluate VDIB on the MNIST-DVS dataset [29]. Following [16, 30­32], we crop images to 26 × 26 pixels, and to 2 seconds. We also use a sampling period of 10 ms, which yields T = 200, and evaluate the impact of coarser sampling rates on the proposed method. To obtain natural images, the reference signal r used during training is given by a single image of the corresponding class from the MNIST dataset. In this experiment, the 676 exogenous signals from MNIST-DVS images are compressed by the encoder into 256 spiking signals, which are fed to a convolutional decoder. We set e = d = T , and  = 0.001. Training is carried over 100, 000 examples, and testing is done on the 10, 000 images from the test dataset.
+Fig. 3(top row) illustrates with some examples that VDIB can effectively naturalize MNIST-DVS images. In the bottom row, we show T-SNE [33] representations of encoded spiking signals produced by the SNN when using VDIB, and compare them with those produced when considering rate decoding. The latter is seen to be unable to produce representations from which class patterns can be identified.
+7 Conclusion
+In this work, we have introduced VDIB, a variational learning algorithm for a hybrid SNN-ANN autoencoder that is based on a directed, causal, variant of the information bottleneck. The proposed system enables a shift from conventional handcrafted decoding rules to optimized learned decoding. VDIB can find applications in neuromorphic sensing through naturalization of spiking signals, and generally as a broad framework for the design of training algorithms for SNNs. This includes applications in mobile edge computing, offering opportunities in, e.g., personal healthcare. Limitations of this work include the choice of ANNs for decoders, where the usage of RNNs may result in improvements. Another line for future work consists in learning the reference distribution q(y) instead of fixing it.
+9
+
+Acknowledgments and Disclosure of Funding
+This work was supported by the European Research Council (ERC) under the European Union's Horizon 2020 research and innovation programme (grant agreement No. 725731) and by Intel Labs via the Intel Neuromorphic Research Community.
+The authors acknowledge use of the Joint Academic Data science Endeavour (JADE) HPC Facility (http://www.jade.ac.uk/), and use of the research computing facility at King's College London, Rosalind (https://rosalind.kcl.ac.uk).
+References
+[1] Mark Humphries, The Spike An Epic Journey Through the Brain in 2.1 Seconds, Princeton University Press, 2021.
+[2] Mike Davies, Andreas Wild, Garrick Orchard, Yulia Sandamirskaya, Gabriel A. Fonseca Guerra, Prasad Joshi, Philipp Plank, and Sumedh R. Risbud, "Advancing neuromorphic computing with Loihi: A survey of results and outlook," Proceedings of the IEEE, vol. 109, no. 5, pp. 911­934, 2021.
+[3] Guillaume Bellec, Franz Scherr, Anand Subramoney, Elias Hajek, Robert Salaj, Darjan Legenstein, and Wolfgang Maass, "A solution to the learning dilemma for recurrent networks of spiking neurons," Nature Communications, vol. 11, no. 3625, 2020.
+[4] Hyeryung Jang, Osvaldo Simeone, Brian Gardner, and André Grüning, "An introduction to probabilistic spiking neural networks: Probabilistic models, learning rules, and applications," IEEE Signal Processing Magazine, vol. 36, no. 6, pp. 64­77, 2019.
+[5] P. Lichtsteiner, C. Posch, and T. Delbruck, "A 128 x 128 120db 30mw asynchronous vision sensor that responds to relative intensity change," in Proc. Int. Solid State Circuits Conf., Feb 2006, pp. 2060­2069.
+[6] Dennis Robey, Wesley Thio, Herbert H. C. Iu, and Jason Kamran Eshraghian, "Naturalizing neuromorphic vision event streams using gans," CoRR, vol. abs/2102.07243, 2021.
+[7] Alireza Bagheri, Osvaldo Simeone, and Bipin Rajendran, "Training probabilistic spiking neural networks with first- to-spike decoding," in 2018 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), 2018, pp. 2986­2990.
+[8] Naftali Tishby, Fernando C. Pereira, and William Bialek, "The information bottleneck method," in The 37th annual Allerton Conf. on Communication, Control, and Computing, 1999, pp. 368­377.
+[9] Alex Alemi, Ian Fischer, Josh Dillon, and Kevin Murphy, "Deep variational information bottleneck," in ICLR, 2017.
+[10] Gerhard Kramer, Directed information for channels with feedback, Hartung-Gorre, 1998.
+[11] Emre O Neftci, Charles Augustine, Somnath Paul, and Georgios Detorakis, "Event-driven random back-propagation: Enabling neuromorphic deep learning machines," Frontiers in neuroscience, vol. 11, pp. 324, 2017.
+[12] Emre O Neftci, Hesham Mostafa, and Friedemann Zenke, "Surrogate gradient learning in spiking neural networks: Bringing the power of gradient-based optimization to spiking neural networks," IEEE Signal Processing Magazine, vol. 36, no. 6, pp. 51­63, 2019.
+[13] Jacques Kaiser, Hesham Mostafa, and Emre Neftci, "Synaptic plasticity dynamics for deep continuous local learning (DECOLLE)," Frontiers in Neuroscience, vol. 14, pp. 424, 2020.
+[14] Sumit Bam Shrestha and Garrick Orchard, "Slayer: Spike layer error reassignment in time," in Advances in Neural Information Processing Systems, S. Bengio, H. Wallach, H. Larochelle, K. Grauman, N. Cesa-Bianchi, and R. Garnett, Eds. 2018, vol. 31, Curran Associates, Inc.
+[15] Friedemann Zenke and Surya Ganguli, "SuperSpike: Supervised learning in multilayer spiking neural networks," Neural Computation, vol. 30, no. 6, pp. 1514­1541, 2018.
+[16] Hyeryung Jang, Nicolas Skatchkovsky, and Osvaldo Simeone, "VOWEL: A local online learning rule for recurrent networks of probabilistic spiking winner-take-all circuits," arXiv preprint arXiv:2004.09416, 2020.
+10
+
+[17] Kenneth Stewart, Andreea Danielescu, Lazar Supic, Timothy Shea, and Emre Neftci, "Gesture similarity analysis on event data using a hybrid guided variational auto encoder," 2021.
+[18] Naftali Tishby and Noga Zaslavsky, "Deep learning and the information bottleneck principle," in 2015 IEEE Information Theory Workshop (ITW), 2015, pp. 1­5.
+[19] Stefan Klampfl, Robert Albin Legenstein, and Wolfgang Maass, "Spiking neurons can learn to solve information bottleneck problems and to extract independent components," Neural computation, vol. 21, no. 4, pp. 911­959, 2009.
+[20] Lars Buesing and Wolfgang Maass, "A Spiking Neuron as Information Bottleneck," Neural Computation, vol. 22, no. 8, pp. 1961­1992, 08 2010.
+[21] Matthew Chalk, Olivier Marre, and Gasper Tkacik, "Toward a unified theory of efficient, predictive, and sparse coding," Proceedings of the National Academy of Sciences, vol. 115, no. 1, pp. 186­191, 2018.
+[22] Osvaldo Simeone, "A brief introduction to machine learning for engineers," Foundations and Trends® in Signal Processing, vol. 12, no. 3-4, pp. 200­431, 2018.
+[23] Andriy Mnih and Danilo Rezende, "Variational inference for monte carlo objectives," in International Conference on Machine Learning, 2016, pp. 2188­2196.
+[24] Hyeryung Jang, Nicolas Skatchkovsky, and Osvaldo Simeone, "Spiking neural networks ­ Parts I, II, and III," https://arxiv.org/abs/2010.14208, 2020.
+[25] Wulfram Gerstner and Werner M Kistler, Spiking Neuron Models: Single Neurons, Populations, Plasticity, Cambridge University Press, 2002.
+[26] Arild Nøkland and Lars Hiller Eidnes, "Training neural networks with local error signals," in Proceedings of the 36th International Conference on Machine Learning, Kamalika Chaudhuri and Ruslan Salakhutdinov, Eds. 09­15 Jun 2019, vol. 97 of Proceedings of Machine Learning Research, pp. 4839­4850, PMLR.
+[27] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala, "Pytorch: An imperative style, high-performance deep learning library," in Advances in Neural Information Processing Systems 32, H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E. Fox, and R. Garnett, Eds., pp. 8024­8035. Curran Associates, Inc., 2019.
+[28] Y. LeCun, B. Boser, J. S. Denker, D. Henderson, R. E. Howard, W. Hubbard, and L. D. Jackel, "Backpropagation applied to handwritten zip code recognition," Neural Computation, vol. 1, no. 4, pp. 541­551, 1989.
+[29] Teresa Serrano-Gotarredona and Bernabé Linares-Barranco, "Poker-dvs and mnist-dvs. their history, how they were made, and other details," Frontiers in neuroscience, vol. 9, pp. 481, 2015.
+[30] Bo Zhao, Ruoxi Ding, Shoushun Chen, Bernabe Linares-Barranco, and Huajin Tang, "Feedforward categorization on aer motion events using cortex-like features in a spiking neural network," IEEE transactions on neural networks and learning systems, vol. 26, no. 9, pp. 1963­1978, 2014.
+[31] James A Henderson, TingTing A Gibson, and Janet Wiles, "Spike event based learning in neural networks," arXiv preprint arXiv:1502.05777, 2015.
+[32] N. Skatchkovsky, H. Jang, and O. Simeone, "Federated neuromorphic learning of spiking neural networks for low-power edge intelligence," in Proc. of International Conference on Acoustics, Speech and Signal Processing. IEEE, 2020.
+[33] Laurens van der Maaten and Geoffrey Hinton, "Visualizing data using t-sne," Journal of Machine Learning Research, vol. 9, no. 86, pp. 2579­2605, 2008.
+[34] Jonathan W Pillow, Jonathon Shlens, Liam Paninski, Alexander Sher, Alan M Litke, EJ Chichilnisky, and Eero P Simoncelli, "Spatio-temporal correlations and visual signalling in a complete neuronal population," Nature, vol. 454, no. 7207, pp. 995­999, 2008.
+11
+
+A Appendix
+
+A.1 Derivation of the bound
+
+As described in Sec 4, using a decoding network defined by the causally conditional distribution qw(dd)(r||y) from eq. (7), we use a standard variational inequality [9] to lower bound the mutual information at each step t = 1, . . . , T
+
+Iw(ed)(ytt-d ; rt|rt-1)  Epwe (yt,rt)
+
+log
+
+qwd (rt|rt-1, ytt-d ) p(rt|rt-1)
+
+(23)
+
+= Epwe (yt,rt) log qwd (rt|rt-1, ytt-d ) + H (rt|rt-1).
+
+(24)
+
+Summing over the time-steps, we then obtain
+
+T
+
+T
+
+Iw(ed)(y  r) 
+
+Epwe (yt,rt) log qwd (rt|rt-1, ytt-d ) +
+
+H (rt |rt-1 )
+
+t=1
+
+t=1
+
+(25)
+
+T
+
+= Epwe (y,r)
+
+log qwd (rt|rt-1, ytt-d ) + H(r)
+
+t=1
+
+(26)
+
+= Epwe (y,r) log qw(dd)(r||y) + H(r),
+
+(27)
+
+where the entropy of the target signals H(r) is independent of the model parameters we and can be ignored for the purpose of training.
+
+To bound the second information term in (6), we introduce an arbitrary auxiliary distribution q(y) = t q(yt|yt-1) on the readout layer. As in the implementation in [9], we will consider it to be fixed,
+although it can potentially be optimized on. Using a standard variational inequality [9], we then
+obtain the upper bound the mutual information of the encoder for each t = 1, . . . , T as
+
+Iwe (xt; yt)  Epwe (yt,xt)
+
+log
+
+pwe (yt|xtt-e , yt-1) q(yt|yt-1)
+
+.
+
+(28)
+
+Summing over time-steps t = 1, . . . , T , we obtain
+
+Iwe (x  y)  Epwe (y,x)
+
+log pw(ee)(y||x) q(y)
+
+.
+
+(29)
+
+Combining bounds (25)-(29), we obtain the variational DIB loss LV DIB(we, wd) as an upper bound on the negative DIB objective
+
+LV DIB(we, wd) = Epwe (y,r) - log qw(dd)(r||y) +  · Ep(x) KL(pw(ee)(y||x)||q(y)) . (30)
+
+This completes the derivation. The proposed method is detailed in Algorithm 1.
+
+A.2 Neuron models
+
+Deterministic SRM. For hidden neurons i  H, synaptic and feedback filters are chosen as the alpha-function spike response t = exp(-t/mem) - exp(-t/syn) and the exponentially decaying feedback filter t = - exp(-t/ref) for t  1 with some positive constants mem, syn, and ref. It is then common to compute the membrane potential (15) using the following set of autoregressive
+equations [24]
+
+pj,t = exp - 1/mem pj,t-1 + qj,t-1,
+
+(33a)
+
+with qj,t = exp - 1/syn qj,t-1 + sj,t-1,
+
+(33b)
+
+and ri,t = exp - 1/ref ri,t-1 + si,t-1.
+
+(33c)
+
+Equations (33a)-(33b) define the computation of the pre-synaptic contribution via a second-order autoregressive (AR) filter, while the feedback of neuron i is computed in (33c) via a first-order AR filter.
+
+12
+
+Algorithm 1: Learn to Time-Decode via Variational Directed IB (VDIB)
+
+Input: Exogeneous spiking signal x, reference natural signal r, reference distribution q(y),
+learning rate , moving average parameter , regularization strength  Output: Learned model parameters we, wd
+
+1 initialize parameters we, wd;
+
+2 for each iteration do 3 draw a sample (x, r) from the data set
+
+4 for each time t = 1, . . . , T do
+
+5
+
+- generate spike outputs from the encoding SNN yt  pwe (yt||xt)
+
+6
+
+- a central processor collects the log-probabilities log pwe (yi,t||xt) for all readout
+
+neurons i  Y and updates the encoder loss
+
+we (yt, xt, ht) = log
+iY
+
+pwe (yi,t||xt) q(yi,t)
+
+7
+
+- generate outputs from the decoding network rt  qwd (rt||yt)
+
+8
+
+- a central processor collects the log-probabilities log qwd (r||yt) and updates the decoder
+
+loss
+
+wd (yt, rt) = - log qwd (rt||yt)
+
+9
+
+for each encoding network readout neuron i  Y do
+
+10
+
+compute update i,t using (19) as
+
+i,t = ei,t
+
+11
+
+end
+
+12
+
+for each encoding network hidden neuron i  H do
+
+13
+
+compute update i,t using (20) as
+
+i,t = Li,t · ei,t
+
+14
+
+end
+
+15
+
+update the encoding SNN model parameters as
+
+we  we -  · wd (yt, rt) +  · we (yt, xt, ht) · t
+
+(31)
+
+16
+
+update decoding ANN model parameters as
+
+wd  wd -  · wd wd (yt, rt)
+
+(32)
+
+17 end 18 end
+
+SRM with stochastic threshold. For readout neurons, we associate each synapse with Ka  1 spike responses {tk}Kk=a1 and corresponding weights {wiej,k}Kk=a1, so that the contribution from
+pre-synaptic neuron j to the membrane potential in (15) can be written as the double sum [34]
+
+Ka
+wiej,k tk  zj,t .
+jPi k=1
+
+(34)
+
+By choosing the spike responses tk to be sensitive to different synaptic delays, this parameterization allows SRM with stochastic threshold neurons to learn distinct temporal receptive fields [4, Fig. 5].
+
+13
+
+Table 2: Hyperparameters used in the different experiments.
+
+Parameter \ Experiment
+  NX NY NR Decoder Encoder architecture d e p
+
+Predictive coding
+1 1e - 2 20 10 210 Linear NY 5 T 0.2
+
+MNIST
+1e - 3 1e - 5 784 256 784 MLP/Conv 600 - NY T T 0.3
+
+MNIST-DVS
+1e - 3 1e - 4 676 256 784 Conv 800 - NY T T 0.3
+
+0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25 0 5 10 15 20 25
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+5
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+10
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+15
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+20
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+25
+
+Figure 4: Top: Reconstructed MNIST digits. Bottom: Corresponding original target images.
+
+A.3 Experimental details
+Decoder architectures. As explained in Sec. 6, we use three types of decoders: a fully-connected linear model, an MLP, and a convolutional ANN. The MLP comprises two layers, with architecture (NY × d)/2 - NR. The convolutional ANN has two convolutional layers with reLU activation and a fully-connected layer, with architecture T /2c3p1s2 - 20c3p1s2 - NR, where XcY pZsS represents X 1D convolution filters (Y × Y ) with padding Z and stride S.
+
+Training hidden neurons with SG. Part of the code used for feedback alignment has been adapted from https://github.com/ChFrenkel/DirectRandomTargetProjection/, distributed under the Apache v2.0 license.
+
+Efficient and predictive coding. In this experiment, we consider a logistic regression model
+
+for the decoder, i.e., qw(dd)(rt|ytd ) = S(rt|fwd (ytd )) where S(·) is the softmax function and
+
+fwd (x) = wdx + b with learnable bias b. We choose NX = NY = 20, which gives NR =
+
+20 1
+
++
+
+20 2
+
+= 210. Other hyperparameters are precised in Table 2. Results are averaged over five
+
+trials with random initializations of the networks. Code and weights for the LeNet network have
+
+been obtained from https://github.com/csinva/gan-vae-pretrained-pytorch
+
+and are freely available.
+
+Table 3: Comparison of classification accuracy with various encoding and decoding strategies for naturalization of MNIST digits, with MLP and convolutional ANN decoders.
+
+Encoding \ Decoding Rate (MLP) Time (MLP)
+
+Time (Conv)
+
+Rate Time
+
+60.50 ± 0.32% 91.32 ± 0.27% 88.73 ± 1.06% 86.43 ± 0.84% 92.82 ± 0.25% 90.72 ± 0.39%
+
+MNIST. The MNIST dataset is freely available online and has been obtained from https:// pytorch.org/vision/stable/_modules/torchvision/datasets/mnist.html. It consists of 60, 000 training examples from ten classes, and 10, 000 test examples. Results are averaged over three trials with random initializations of the networks. In Fig. 4, we show examples of
+
+14
+
+reconstructed digits with time encoding, and an MLP decoder. This validates that, as well as being able to be classified with high accuracy, the reconstructions look accurate. We also provide additional results on accuracy, using a convolutional decoder. This choice causes a small degradation in the performance of the system, but alleviates requirements on the GPU memory. MNIST-DVS. The MNIST-DVS dataset is freely available online from http://www2. imse-cnm.csic.es/caviar/MNISTDVS.html. Examples have been obtained by displaying MNIST digits on a screen to a DVS camera. More information on the dataset can be found from [29].
+15
+
+

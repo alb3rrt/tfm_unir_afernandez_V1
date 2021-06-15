@@ -1,0 +1,1400 @@
+Self-Supervised Learning of Event-Based Optical Flow with Spiking Neural Networks
+
+arXiv:2106.01862v1 [cs.CV] 3 Jun 2021
+
+Federico Paredes-Vallés f.paredesvalles@tudelft.nl
+
+Jesse J. Hagenaars j.j.hagenaars@tudelft.nl
+
+Guido C. H. E. de Croon g.c.h.e.decroon@tudelft.nl
+Micro Air Vehicle Laboratory Delft University of Technology, The Netherlands
+
+Abstract
+Neuromorphic sensing and computing hold a promise for highly energy-efficient and high-bandwidth-sensor processing. A major challenge for neuromorphic computing is that learning algorithms for traditional artificial neural networks (ANNs) do not transfer directly to spiking neural networks (SNNs) due to the discrete spikes and more complex neuronal dynamics. As a consequence, SNNs have not yet been successfully applied to complex, large-scale tasks. In this article, we focus on the self-supervised learning problem of optical flow estimation from event-based camera inputs, and investigate the changes that are necessary to the state-of-the-art ANN training pipeline in order to successfully tackle it with SNNs. More specifically, we first modify the input event representation to encode a much smaller time slice with minimal explicit temporal information. Consequently, we make the network's neuronal dynamics and recurrent connections responsible for integrating information over time. Moreover, we reformulate the self-supervised loss function for event-based optical flow to improve its convexity. We perform experiments with various types of recurrent ANNs and SNNs using the proposed pipeline. Concerning SNNs, we investigate the effects of elements such as parameter initialization and optimization, surrogate gradient shape, and adaptive neuronal mechanisms. We find that initialization and surrogate gradient width play a crucial part in enabling learning with sparse inputs, while the inclusion of adaptivity and learnable neuronal parameters can improve performance. We show that the performance of the proposed ANNs and SNNs are on par with that of the current state-of-the-art ANNs trained in a self-supervised manner.
+1 Introduction
+Neuromorphic hardware promises highly energy-efficient and low-latency sensing and processing thanks to its sparse and asynchronous nature. Event cameras capture brightness changes at microsecond resolution [16], while neuromorphic processors have demonstrated orders of magnitude lower energy consumption and latency compared to von Neumann architectures [11, 27]. One of the larger impediments to widespread neuromorphic adoption is the fact that learning algorithms designed for traditional artificial neural networks (ANNs) do not transfer one-to-one to spiking neural networks (SNNs), which exhibit sparse, binary activity and more complex neuronal dynamics. On the one hand,
+These authors contributed equally to this work. Preprint. Under review.
+
+Event stream
+
+tkr aink+K iknp ikn+p 1 ikn+p 2 ikn+p 3 ikn+p 4
+
+x [-]
+
+y [-] t [s]
+
+iknp
+
+ikn+p 1 ikn+p 2 ikn+p 3
+
+ikn+p 4
+
+SNN
+
+u^k
+
+Optical flow u^k+1 u^k+2 u^k+3 u^k+4
+
+Event representation
+
+Contrast maximization loss via motion compensation
+
+Figure 1: Self-supervised event-based optical flow pipeline for deep SNNs. In order of processing, the event stream is split into small partitions with the same number of events, which are formatted and then fed to the network in a sequential fashion. An optical flow map is predicted for each partition, associating every input event with a motion vector. Once a sufficient number of events has been processed, we perform a backward pass using our contrast maximization loss [15].
+
+this has driven research into the conversion of ANNs to SNNs without loss of accuracy, but with the promised efficiency gains [40]. On the other hand, it has limited the application of directly-trained SNNs in the computer vision domain to less complicated and often discrete problems like image classification [10, 13] on constrained datasets such as N-MNIST [31] or DVS128 Gesture [2]. Still, many ongoing developments in the area of direct SNN training are promising and may form building blocks for tackling more complex tasks. Surrogate gradients [30, 39, 43, 49], which act as stand-in for the non-differentiable spiking function in the backward pass, enable traditional backpropagation with few adjustments. Similarly, the inclusion of parameters governing the neurons' internal dynamics in the optimization was demonstrated to be beneficial [13, 36]. Many works also include some form of activity regularization to keep neurons from excessive spiking [5, 49] or to balance excitability through adaptation [4, 34]. Kickstarting initial activity (hence gradient flow) is often not the goal of these regularization terms, even though [49] shows that there is a narrow activity band in which learning is optimal. This ties in with the initialization of parameters, which has not been rigorously covered for SNNs with sparse inputs yet, leaving room for improvement. Taking these lessons, our goal is to demonstrate the potential of neuromorphic sensing and processing on a complex task. To this end, we tackle a real-world large-scale problem by learning, in a selfsupervised fashion and using SNNs, to estimate the optical flow encoded in a continuous stream of events; a task that is usually tackled with deep, fully convolutional ANNs [52, 54]. By focusing on such a problem, we aim to identify and tackle emerging knowledge gaps regarding SNN training. In summary, the main contribution of this article is two-fold. First, we propose a novel self-supervised learning (SSL) framework for event-based optical flow estimation that puts emphasis on the networks' capacity to integrate temporal information. This training pipeline, illustrated in Fig. 1, is built around a reformulation of the self-supervised loss function from [54] that improves its convexity. Second, through this framework, we train the first set of deep SNNs that successfully solve the problem at hand. We validate our proposals through extensive quantitative and qualitative evaluations on multiple datasets. Additionally, for the SNNs, we investigate the effects of elements such as parameter initialization and optimization, surrogate gradient shape, and adaptive neuronal mechanisms.
+2 Related Work
+Due to the potential of event cameras to enable high-bandwidth optical flow estimation, extensive research has been conducted on this topic since these sensors were introduced [1, 6, 8, 14]. Regarding
+2
+
+learning-based approaches, in [52], Zhu et al. proposed the first convolutional ANN for this task, which was trained in an SSL fashion with the supervisory signal coming from the photometric error between subsequent grayscale frames captured with the active pixel sensor (APS) of the DAVIS240C [7]. Alongside this network, the authors released the Multi-Vehicle Stereo Event Camera (MVSEC) dataset [53], the first event camera dataset with ground-truth optical flow estimated from depth and ego-motion sensors. A similar SSL approach was introduced in [46], but here optical flow was obtained through an ANN estimating depth and camera pose. Later, Zhu et al. refined their pipeline and, in [54], proposed an SSL framework around the contrast maximization for motion compensation idea from [14, 15]; with which, as explained in Section 3.2, the supervisory signal comes directly from the events and there is no need for additional sensors. More recently, Stoffregen and Scheerlinck et al. showed in [42] that, if trained with synthetic event sequences (from an event camera simulator [37]) and ground-truth data in a pure supervised fashion, the ANN from [52, 54] reaches higher accuracy levels when evaluated on MVSEC. Lastly, to hold up to the promise of high-speed optical flow, there has been a significant effort toward the miniaturization of optical flow ANNs [26, 33]. With respect to learning-based SNNs for optical flow estimation, only the works of Paredes-Vallés et al. [34] and Lee et al. [24, 25] are to be highlighted. In [34], the authors presented the first convolutional SNN in which motion selectivity emerges in an unsupervised fashion through Hebbian learning [21] and thanks to synaptic connections with multiple delays. However, this learning method limits the deployability of this architecture to event sequences with similar statistics to those used during training. On the other hand, in [24], the authors proposed a hybrid network, integrating spiking neurons in the encoder with ANN layers in the decoder, trained through the SSL pipeline from [52]. This architecture was later expanded in [25] with a secondary ANN-based encoder used to retrieve information from the APS frames. Lastly, SNNs have also been implemented in neuromorphic hardware for optical flow estimation [18], although this did not involve learning. Hence, until now, no one has yet attempted the SSL of optical flow with a pure SNN approach. Most of the SNN work in other computer vision domains has so far been focused on discrete problems like classification [10, 13, 44, 51] and binary motion-based segmentation [32]. A notable exception is the work from Gehrig et al. [17], who propose a convolutional spiking encoder to continuously predict angular velocities from event data. However, until now, no one has yet attempted a dense (i.e., with per-pixel estimates) regression problem with deep SNNs that requires recurrency.
+
+3 Method
+
+3.1 Input event representation
+
+An event camera consists of a pixel array that responds, in a sparse and asynchronous fashion, to changes in brightness through streams of events [16]. For an ideal camera, an event ei = (xi, ti, pi) of polarity pi  {+, -} is triggered at pixel xi = (xi, yi)T and time ti whenever the brightness change since the last event at that pixel reaches the contrast sensitivity threshold for that polarity.
+
+The great majority of learning-based models proposed to date for the problem of event-based optical flow estimation encode, in one form or another, spatiotemporal information into the input event representation before passing it to the neural architectures. This allows stateless (i.e., non-recurrent) ANNs to accurately estimate optical flow at the cost of having to accumulate events over relatively long time windows for their apparent motion to be perceivable. The most commonly used representations make use of multiple discretized frames of event counts [24, 25, 33, 42, 54] and/or the per-pixel average or the most recent event timestamps [26, 46, 52].
+
+Ideally, SNNs would immediately receive spikes at event locations, which implies that temporal
+
+information should not be encoded in the input representation, but should be extracted by the network.
+
+To enforce this, we use a representation consisting only of per-pixel and per-polarity event counts, as
+
+in Fig. stream
+
+1.iknTp h=i.s
+
+representation gets {ei}Ni=-01 (referred
+
+populated with consecutive, non-overlapping to as input partition) each containing a fixed
+
+partitions of the event number of events, N .
+
+3.2 Self-supervised learning of optical flow via contrast maximization We use the contrast maximization proxy loss for motion compensation [15] to learn to estimate optical flow from the continuous event stream in a self-supervised fashion. The idea behind this optimization framework is that accurate optical flow information is encoded in the spatiotemporal misalignments
+
+3
+
+among the events triggered by the same portion of a moving edge (i.e., blur) and that, to retrieve it,
+
+one has to compensate for this motion (i.e., deblur the event partition). Knowing the per-pixel optical
+
+flow u(x) = (u(x), v(x))T , the events can be propagated to a reference time tref through:
+
+xi = xi + (tref - ti)u(xi)
+
+(1)
+
+In this work, we reformulate the deblurring quality measure proposed by Mitrokhin et al. [28] and Zhu et al. [54]: the per-pixel and per-polarity average timestamp of the image of warped events (IWE). The lower this metric, the better the event deblurring and the more accurate the optical flow estimation. We generate an image of the average timestamp at each pixel for each polarity p via bilinear interpolation:
+
+Tp (x;u|tref) =
+
+j (x - xj)(y - yj)tj j (x - xj)(y - yj) +
+
+(2)
+
+(a) = max(0, 1 - |a|)
+
+j = {i | pi = p }, p  {+, -},  0
+
+Previous works minimize the sum of the squared temporal images resulting from the warping process [33, 54]. However, we scale this sum prior to the minimization with the number of pixels with at least one warped event in order for the loss function to be convex:
+
+Lcontrast(tref) =
+
+x T+(x;u|tref)2 + T-(x;u|tref)2 x [n(x ) > 0] +
+
+(3)
+
+where n(x ) denotes a per-pixel event count of the IWE. As shown in Appendix A, without the
+
+scaling, the loss function is not well-defined as the optimal solution is to always warp events with large
+
+timestamps out of the image space so they do not contribute to Eq. 2. Previous works circumvented
+
+this issue by limiting the maximum magnitude of the optical flow vectors that could be estimated
+
+through scaled TanH activations in the prediction layers [33, 54].
+
+Aprsevinen[5t 4te]m, wpeorpaelrsfcoarmlintgheiswsuaerspidnugripnrgocbeascskbporothpaingaatifoonrw. Tarhde(ttofrwetfa)lalnodssinusaedbatcoktwraairndofuarsheivoenn(tt-bbrewaf )setdo optical flow networks is then given by:
+
+Lcontrast = Lcontrast(tfrwef) + Lcontrast(tbrewf )
+
+(4)
+
+Lflow = Lcontrast + Lsmooth
+
+(5)
+
+where  is a scalar balancing the effect of the two losses and Lsmooth is a Charbonnier smoothness prior [9], as in [52, 54]. Since Lcontrast does not propagate the error back to pixels without input events, we mask the output of our networks so that null optical flow vectors are returned at these pixels locations. Furthermore, we mask the computation of Lsmooth so that this regularization mechanism only considers optical flow estimates from neighboring pixels with at least one event.
+
+As hinted by the motion model in Eq. 1 and discussed in [15, 41], there has to be enough linear blur in the input event partition for Lcontrast to be a robust supervisory signal. This is usually not the case in our training pipeline due to the small number of input events N that we pass to the networks at each feovtkrreawinnkta+prdaKrpti=a.tsios{.n(Faoniinrdp,tihut^sisic)r}oeKira=rsekos,pnwo, nwhdiecinhdgeifisopnateibcauafslfeflecroowtnhdaeatsrtgyimetesavtepenos.tpApualtartttrieatdiionenivn,egtrhyteimfsooer,-wcwaaelrldepdepratfrsoasrimnwiniatghbpaaacnrktiwintpiaorundt pass with the content of the buffer using backpropagation through time once it contains K successive event-flow tuples, after which we detach the state of the networks from the computational graph and clear the buffer. Note that Lsmooth is also applied in the temporal dimension by smoothing optical flow estimates at the same pixel location from adjacent tuples.
+
+3.3 Spiking neuron models
+
+We compare various spiking neuron models from literature on the task of event-based optical flow estimation. All models are based on the leaky-integrate-and-fire (LIF) neuron, whose membrane potential U and synaptic input current I at timestep k can be written as:
+
+Uik = (1 - Sik-1)Uik-1 + (1 - )Iik
+
+(6)
+
+Iik =
+
+Wifjf Sjk +
+
+WirrecSrk-1
+
+(7)
+
+j
+
+r
+
+4
+
+where j and r denote presynaptic neurons while i is for postsynaptic,  is the membrane decay or leak, S  {0, 1} a neuron spike, and W ff and W rec feedforward and recurrent connections, respectively. Membrane decays can either be fixed or learned. A neuron fires an output spike S if the membrane potential exceeds a threshold , which can either be fixed, learned, or adaptive (see below). Firing also triggers a reset of U , which is either hard, as in Eq. 6, or soft, as in [4]. The former is said to be more suitable for deeper networks, as it gets rid of errors accumulated by the surrogate gradient [23]. Following [4], we introduce an adaptive threshold to make up the adaptive LIF (ALIF) model. A second state variable T acts as a low-pass filter over the output spikes, adapting the firing threshold based on the neuron's activity:
+
+ik = 0 + 1Tik
+
+(8)
+
+Tik = Tik-1 + (1 - )Sik-1
+
+(9)
+
+where for U
+
+an{d0,I1}aarereid(leenatrincaabl lteo)
+
+constants, and  is the (learnable) threshold decay/leak. ALIF's the LIF formulation. By decaying the threshold very slowly, T
+
+equations can act as
+
+a longer-term memory of the neuron [5].
+
+Instead of postsynaptic adaptivity, we can keep a trace of presynaptic activity and use that to regularize neuron firing, giving the presynaptic LIF (PLIF) model. The authors of [34] implement this kind of adaptation mechanism by subtracting a presynaptic trace P from the input current:
+
+Iik =
+
+Wifjf Sjk +
+
+WirrecSrk-1 - 0Pik
+
+j
+
+r
+
+(10)
+
+Pik
+
+=
+
+1Pik-1
+
++
+
+1 - 1 |Ri|
+
+jRi
+
+Sjk-1
+
+(11)
+
+wnehuerroeni{0o,v1e}raarlel
+
+(learnable) addition and decay channels (i.e., the second term
+
+constants, and in Eq. 11 is an
+
+Ri is the set of receptive fields average pooling averaged over
+
+of all
+
+channels). Adaptation based on presynaptic instead of postsynaptic activity minimizes adaptation
+
+delay, making it especially suited to the fast-changing nature of event data [34]. In this spirit, we also
+
+propose the XLIF model, a crossover between ALIF and PLIF, which adapts its threshold based on
+
+presynaptic activity:
+
+ik = 0 + 1Pik
+
+(12)
+
+As surrogate gradient for the spiking function , we opt for the derivative of the inverse tangent  (x) = aTan = 1/(1 + x2) [13] because it is computationally cheap, with  being the surrogate width and x = U - . In order to ensure gradient flow (hence learning) in the absence of neuron firing, the width should be sufficient to cover at least a range of subthreshold membrane potentials, while the height should be properly scaled (i.e.,  1) for stable learning [49]. Exact shape is of less importance for final accuracy. Further details on all hyperparameters can be found in Appendix G.
+
+3.4 Network architectures
+We evaluate the two trends on neural network design for event cameras through (spiking) recurrent variants of EV-FlowNet [52] (encoder-decoder) and FireNet [38] (lightweight, no downsampling). An overview of the evaluated architectures can be found in Fig. 2. The use of explicit recurrent connections in all our ANNs and SNNs is justified through the ablation study in Appendix D. The base architecture referred to as EV-FlowNet is a recurrent version of the network proposed in [52]. Once represented as in Section 3.1, the input event partition is passed through four recurrent encoders performing strided convolution followed by ConvGRU [3] with output channels doubling after each encoder (starting from 32), two residual blocks [19], and four decoder layers that perform bilinear upsampling followed by convolution. After each decoder, there is a (concatenated) skip connection from the corresponding encoder, as well as a depthwise (i.e., 1 × 1) convolution to produce a lower scale flow estimate, which is then concatenated with the activations of the previous decoder. The Lflow loss (see Eq. 5) is applied to each intermediate optical flow estimate via upsampling. All layers use 3 × 3 kernels and ReLU activations except for the prediction layers, which use TanH activations. The FireNet architecture in Fig. 2 is an adaptation of the lightweight network proposed in [38], which was originally designed for event-based image reconstruction. However, as shown in [33], this
+
+5
+
+EV-FlowNet
+
+P1
+
+P2
+
+P3
+
+P4
+
+u^k
+
+Conv
+
+iknp
+
+G1
+
+G2
+
+G3
+
+G4
+
+R1
+
+R2
+
+D1
+
+D2
+
+D3
+
+D4
+
+ConvRecurr
+
+Residual block
+
+FireNet
+
+Upsampling + Conv
+
+iknp
+
+E1
+
+G1
+
+E2
+
+E3
+
+G2
+
+E4
+
+E5
+
+P
+
+u^k Strided Conv + ConvRecurr
+
+Figure 2: Schematic of the base neural networks used in this work. All evaluated variants inherit from these architectures and only vary the neuron model and/or the convolutional recurrent layer.
+
+architecture is also suitable for fast optical flow estimation. The base architecture consists of five encoder layers that perform single-strided convolution, two ConvGRUs, and a final prediction layer that performs depthwise convolution. All layers have 32 output channels and use 3 × 3 kernels and ReLU activations except for the final layer, which uses a TanH activation. Based on these architectures, we have designed several variants: (i) RNN-EV-FlowNet and RNNFireNet, which use vanilla ConvRNNs (see Appendix B) instead of ConvGRUs; (ii) Leaky-EVFlowNet and Leaky-FireNet, which use ConvRNNs and whose neurons are stateful cells with leaks (for a more direct comparison with the SNNs, see Appendix B); and (iii) SNN-EV-FlowNet and SNN-FireNet (with SNN being LIF, ALIF, PLIF or XLIF), the SNN variants that use ConvRNNs and whose neurons are spiking and stateful according to the neuron models in Section 3.3. The prediction layers of all SNN variants are kept real-valued with TanH activation, acting as a learned decoder from binary spikes to a dense optical flow estimate. The first layer of the SNNs can likewise be viewed as a learned spike encoder, receiving integer event counts and emitting spikes.
+4 Experiments
+To highlight the robustness of our SSL pipeline, we train our networks on the indoor forward-facing sequences from the UZH-FPV Drone Racing Dataset [12], which is characterized by a much wider distribution of optical flow vectors than the datasets that we use for evaluation, i.e., MVSEC [52], High Quality Frames (HQF) [42], and the Event-Camera Dataset (ECD) [29]. The selected training sequences consist of approximately 15 minutes of event data that we split into 140 128 × 128 (randomly cropped) sequences with 500k events each. We further augment this data using random horizontal, vertical, and polarity flips. Our framework is implemented in PyTorch2. We use the Adam optimizer [22] and a learning rate of 0.0002, and train with a batch size of 8 for 100 epochs. We clip gradients based on a global norm of 100. We fix the number of events for each input partition to N = 1k, while we use 10k events for each training event partition. This is equivalent to K = 10 forward passes per backward pass (i.e., the network's unrolling), as described in Section 3.2 and illustrated in Fig. 1. Lastly, we empirically set the scaling weight for Lsmooth to  = 0.001. We evaluated our architectures on the MVSEC dataset [53] with the ground-truth optical flow data provided by Zhu et al. in [52], which was generated at each APS frame timestamp, and scaled to be the displacement for the duration of one (dt = 1) and four (dt = 4) APS frames. Optical flow predictions were also generated at each frame timestamp by using all the events in the time window as input for dt = 1, or 25% of the window events at a time for dt = 4 (due to the larger displacements). For comparison against the ground truth, the predicted optical flow is converted from units of pixels/partition to units of pixel displacement by multiplying it with dtgt/dtinput. We compare our recurrent ANNs and SNNs against the state-of-the-art on self-supervised event-based optical flow estimation: the original (non-recurrent) EV-FlowNet [52] trained with either photometric error as in [52] or contrast maximization [54], and the hybrid SNN-ANN network from [24]. Quantitative results of this evaluation are presented in Table 1. We report the average endpoint error (AEE) and the percentage of points with AEE greater than 3 pixels and 5% of the magnitude of the optical
+2Our code will be made open-source upon publication.
+6
+
+Table 1: Quantitative evaluation on MVSEC [53]. For each sequence, we report the AEE (lower is better, ) in pixels and the percentage of outliers, %Outlier (). Best in bold, runner up underlined.
+
+dt = 1
+EV-FlowNet [52] EV-FlowNet [54] Hybrid-EV-FlowNet [24] EV-FlowNet RNN-EV-FlowNet Leaky-EV-FlowNet LIF-EV-FlowNet ALIF-EV-FlowNet PLIF-EV-FlowNet XLIF-EV-FlowNet FireNet RNN-FireNet Leaky-FireNet LIF-FireNet ALIF-FireNet PLIF-FireNet XLIF-FireNet
+
+outdoor_day1 AEE %Outlier 0.49 0.20
+
+0.32 0.00
+
+0.49
+
+-
+
+0.47 0.25 0.56 1.09
+
+0.53 0.28 0.53 0.33 0.57 0.42 0.60 0.52 0.45 0.16
+
+0.55 0.35 0.62 0.52 0.52 0.41 0.57 0.40 0.62 0.45 0.56 0.38 0.54 0.34
+
+indoor_flying1 AEE %Outlier 1.03 2.20
+
+0.58 0.00
+
+0.84
+
+-
+
+0.60 0.51 0.62 0.97
+
+0.71 0.60 0.71 1.41 1.00 2.46 0.75 0.85 0.73 0.92
+
+0.89 1.93 0.96 2.60 0.90 2.66 0.98 2.48 1.04 3.02 0.90 1.93 0.98 2.75
+
+indoor_flying2 AEE %Outlier 1.72 15.10
+
+1.02 4.00
+
+1.28
+
+-
+
+1.17 8.06 1.20 8.82
+
+1.43 11.37 1.44 12.75 1.78 17.69 1.52 13.38 1.45 12.18
+
+1.62 14.65 1.77 17.55 1.67 16.09 1.77 16.40 1.85 18.88 1.67 14.47 1.82 18.19
+
+indoor_flying3 AEE %Outlier 1.53 11.90
+
+0.87 3.00
+
+1.11
+
+-
+
+0.93 5.64 0.93 5.51
+
+1.14 8.12 1.16 9.11 1.55 15.24 1.23 9.48 1.17 8.35
+
+1.35 10.64 1.48 13.60 1.43 13.16 1.50 12.81 1.58 15.00 1.41 11.17 1.54 14.57
+
+dt = 4
+
+EV-FlowNet [52]
+
+1.23
+
+EV-FlowNet [54]
+
+1.30
+
+Hybrid-EV-FlowNet [24] 1.09
+
+EV-FlowNet
+
+1.69
+
+RNN-EV-FlowNet
+
+1.91
+
+Leaky-EV-FlowNet
+
+1.99
+
+LIF-EV-FlowNet
+
+2.02
+
+ALIF-EV-FlowNet
+
+2.13
+
+PLIF-EV-FlowNet
+
+2.24
+
+XLIF-EV-FlowNet
+
+1.67
+
+FireNet
+
+2.04
+
+RNN-FireNet
+
+2.35
+
+Leaky-FireNet
+
+1.96
+
+LIF-FireNet
+
+2.12
+
+ALIF-FireNet
+
+2.36
+
+PLIF-FireNet
+
+2.11
+
+XLIF-FireNet
+
+2.07
+
+7.30
+9.70 -
+12.50 16.39 17.86 18.91 20.96 23.76 12.69 20.93 24.31 18.26 21.00 25.82 20.64 18.83
+
+2.25 24.70
+
+2.18 24.20
+
+2.24
+
+-
+
+2.16 21.51 2.23 22.10 2.59 30.71 2.63 29.55 3.81 50.36 2.80 34.34 2.72 31.69
+
+3.35 42.50 3.64 46.54 3.42 42.03 3.72 48.27 3.94 52.35 3.44 44.02 3.73 47.89
+
+4.05 45.30
+
+3.85 46.80
+
+3.83
+
+-
+
+3.90 40.72
+
+4.01 41.74
+
+4.94 54.74
+
+4.93 51.10
+
+6.40 66.03
+
+5.21 52.98
+
+4.93 51.36
+
+5.71 61.03
+
+6.33 63.89
+
+5.92 58.80
+
+6.27 64.16
+
+6.65 67.61
+
+5.94 64.02
+
+6.51 67.25
+
+3.45 39.70
+
+3.18 47.80
+
+3.18
+
+-
+
+3.00 29.60 3.07 30.87 3.84 42.33 3.88 41.49 5.53 61.07 4.12 45.31 3.91 42.52
+
+4.68 53.42 5.20 56.60 4.98 52.57 5.23 58.43 5.60 61.93 4.98 57.53 5.43 60.59
+
+Non-recurrent ANNs with input event representations encoding spatiotemporal information, as described in [24, 52, 54].
+
+flow vector, denoted by %Outlier, over pixels with valid ground-truth data and at least one input event. Qualitative results of our best performing networks on this dataset are shown in Fig. 3. For the sake of completeness, as in [33, 42] we also evaluate our architectures on the ECD [29] and HQF [42] datasets. The details and results of this evaluation can be found in Appendix C. Due to the lack of ground-truth data in these datasets, we assess the quality of the estimated optical flow based on metrics derived from the contrast maximization framework [14, 15]. Regarding the SNN variants, the results in Table 1, Fig. 3 and Appendix C correspond to networks whose neuronal parameters (i.e., leaks, thresholds, adaptive mechanisms) were also optimized when applicable. See Appendix E for an ablation study on the learnable parameters; further details regarding parameter settings and initialization are given in Appendix G.
+4.1 Evaluation of the ANN and SNN architectures Firstly, the quantitative results in Table 1 confirm the validity of the proposed SSL framework for event-based optical flow estimation with recurrent networks. As shown, our base architectures EV-
+7
+
+indoor_flying2 indoor_flying1
+
+Ground truth
+
+EV-FlowNet
+
+LIF-EV-FlowNet
+
+FireNet
+
+PLIF-FireNet
+
+Figure 3: Qualitative evaluation of our best performing ANNs and SNNs on sequences from the MVSEC dataset [53]. The optical flow color-coding scheme can be found in Appendix C.
+
+FlowNet and FireNet perform on par with the current state-of-the-art, even though these non-recurrent networks from literature encode explicit temporal information in their input event representations, and were trained on other very similar sequences from MVSEC [53] to prevent the input statistics from deviating from the training distribution during inference [24, 52, 54]. Since we train on a very different dataset [12], this on-par performance also confirm the generalizability of our ANNs and SNNs to distinctly different scenes and distributions of optical flow vectors. This claim is further supported by qualitative results in Fig. 3 and additional results in Appendix C. Secondly, from the comparison between our base ANN architectures and their spiking counterparts without adaptation mechanisms (i.e., LIF-EV-FlowNet and LIF-FireNet), we can conclude that, although there is a general increase in the AEE and the percentage of outliers when going spiking, the proposed SNNs are still able to produce high quality event-based optical flow estimates. In fact, according to Table 1, the main drop in accuracy does not come from the incorporation of the spiking function (and the selection of aTan as surrogate gradient), but mainly from the use of vanilla convolutional recurrent layers instead of gated recurrent units. As shown, our spiking LIF architectures perform very close to their RNN and leaky counterparts, despite the latter being ANNs. This highlights the important need for more powerful convolutional recurrent units for SNNs, similar to ConvLSTMs [45] and ConvGRUs [3] for ANNs, as this would narrow the performance gap between these two processing modalities according to our observations. Interestingly, a previous comparison of the performance of recurrent ANNs and SNNs for event-based classification [20] suggested similar improvements to SNN units.
+4.2 Impact of adaptive mechanisms for spiking neurons Table 1 and Appendix C also allow us to draw conclusions about the effectiveness of the adaptive mechanisms for spiking neurons introduced in Section 3.3. For both EV-FlowNet and FireNet, we observe that threshold adaptation based on postsynaptic activity (i.e., the ALIF model) performs worse compared to other models. The loss curves in Appendix F support this observation. While the ALIF model was shown to be effective for learning long temporal dependencies from relatively low-dimensional data as in [4, 5, 47], the adaptation delay introduced by relying on a postsynaptic signal seems detrimental when working with fast-changing, high-dimensional event data. This is in line with suggestions by Paredes-Vallés et al. in [34], who use presynaptic adaptation for this reason. Our own results with presynaptic adaptation (i.e., PLIF and XLIF models) are somewhat inconclusive. While PLIF performs better in the case of FireNet, this is not the case for EV-FlowNet. On the other hand, XLIF's performance is very similar to the LIF model for both FireNet and EV-FlowNet architectures. Based on these observations, we think that adaptivity based on presynaptic activity should be considered for further development. In this regard, the XLIF model has the advantage that it is able to generate activity (leading to gradient flow, and thus learning) even for very small inputs, whereas PLIF is incapable of this for a given threshold (because P is always positive). A more detailed comparison of activity levels for the different variants is given in Appendix I.
+8
+
+4.3 Further lessons on training deep SNNs Multiple problems arise when training deep SNNs for a regression task that involves sparse data, as is done here. Regarding learning, we find that gradient vanishing poses the main issue. Even considering dense inputs/loss and a shallow (in timesteps or in layers) SNN, sufficient gradient flow is a result of wide enough (in our case, covering at least |U - |  ) and properly scaled (i.e.,  1) surrogate gradients [23, 47, 49], and parameter initializations that lead to non-negligible amounts of spiking activity [49]. Sparse data and deep networks make finding the proper settings more difficult, and for this reason, we have tried to increase the robustness of various of these hyperparameter settings. First, we looked at the learning performance and gradient flow of networks with various surrogate gradient shapes and widths. Compared to the aTan surrogate specified in Section 3.3, SuperSpike [48] with  = 10 and  = 100 (both narrower) show little learning due to negligible gradient flow (see Appendix H for more details). One way of reducing the effect of a too narrow surrogate gradient would be to trigger spiking activity through regularization terms in the loss function, as done in, e.g., [5, 49]. These form a direct connection between loss and the neuron in question, bypassing most of the gradient vanishing that would happen in later layers. We tried the variant proposed in [49], which is aimed at achieving at least a certain fraction of neurons to be active at any given time. With this fraction set to 5%, we saw that for SuperSpike with  = 10 there was some learning happening, while for  = 100 there was no effect. Plots of the loss curves and gradient magnitudes are available in Appendix H. Of course, more research into these and other regularization methods is necessary. Alternatively, as done in [23], batch normalization (or other presynaptic normalization mechanisms) could be used to ensure proper activity and gradient flow. Regarding the network output, there seems to be an intuitive gap between classification and regression tasks, with the latter requiring a higher resolution to be solved successfully. In our view, there are two aspects to this that might pose an issue to SNNs. First, given the single prediction layer that the here-presented SNNs have to go from binary to real-valued activations, one could expect a loss in output resolution compared to equivalent ANN architectures. Second, even for moderate activity levels, the outputs of a spiking layer can be much larger in magnitude than an equivalent ANN layer, even for comparable parameter initializations. Intuitive solutions to these shortcomings are (i) to increase the number of channels to increase the resolution, and (ii) to initialize the weights of the non-spiking prediction layer as to have a smaller magnitude. While increasing the number of output channels in E5 (LIF-FireNet, see Fig. 2) did not lead to significantly improved performance or learning speed, decreasing the initialization magnitude of the weights in layer P did. As the loss curves in Appendix H show, the improved initialization leads to faster convergence and less variability across neuron models and the selection of learnable parameters.
+5 Conclusion
+In this article, we presented the first set of deep SNNs to successfully solve the real-world large-scale problem of event-based optical flow estimation. To achieve this, we first reformulated the state-of-theart training pipeline for ANNs to shorten the time windows presented to the networks, approximating the way in which SNNs would receive spikes directly from the event camera. Additionally, we reformulated the state-of-the-art self-supervised loss function to improve its convexity. Prior to their training with this framework, we augmented several ANN architectures from literature with explicit and/or implicit recurrency, besides the addition of the spiking behavior. Extensive quantitative and qualitative evaluations were conducted on multiple datasets. Results confirm not only the validity of our training pipeline, but also the on-par performance of the proposed set of recurrent ANNs and SNNs with the self-supervised state-of-the-art. To the best of our knowledge, and especially due to the addition of explicit recurrent connections, the proposed SNNs correspond to the most complex spiking networks in the computer vision literature, architecturally speaking. For the SNNs, we also conducted several additional studies and (i) concluded that parameter initialization and the width of the surrogate gradient have a significant impact on learning: smaller weights in the prediction layer speed up convergence, while a too narrow surrogate gradient prevents learning altogether; and (ii) observed that adaptive mechanisms based on presynaptic activity outperform those based on postsynaptic activity, and perform similarly or better than the baseline without adaptation. Overall, we believe this article sets the groundwork for future research on neuromorphic processing for not only the event-based structure-from-motion problem, but also for other, similarly complex computer vision applications. For example, our results suggest the need for more powerful recurrent units for
+9
+
+SNNs. On another note, future work should also focus on the implementation of these deep SNNs on neuromorphic hardware, as it is there where these architectures excel due to the power efficiency that their sparse and asynchronous nature brings.
+References
+[1] Mohammed Almatrafi, Raymond Baldwin, Kiyoharu Aizawa, and Keigo Hirakawa. Distance surface for event-based optical flow. IEEE Trans. Pattern Anal. and Mach. Intell., 42(7):1547­1556, 2020.
+[2] Arnon Amir, Brian Taba, David Berg, Timothy Melano, Jeffrey McKinstry, Carmelo Di Nolfo, Tapan Nayak, Alexander Andreopoulos, Guillaume Garreau, Marcela Mendoza, et al. A low power, fully event-based gesture recognition system. In IEEE Conf. Comput. Vis. Pattern Recog., pages 7243­7252, 2017.
+[3] Nicolas Ballas, Li Yao, Chris Pal, and Aaron Courville. Delving deeper into convolutional networks for learning video representations. Int. Conf. Learn. Representations, 2015.
+[4] Guillaume Bellec, Darjan Salaj, Anand Subramoney, Robert Legenstein, and Wolfgang Maass. Long shortterm memory and learning-to-learn in networks of spiking neurons. In Advances in Neural Information Process. Syst., volume 31, pages 787­797, 2018.
+[5] Guillaume Bellec, Franz Scherr, Anand Subramoney, Elias Hajek, Darjan Salaj, Robert Legenstein, and Wolfgang Maass. A solution to the learning dilemma for recurrent networks of spiking neurons. Nature Commun., 11(1):3625, 2020.
+[6] Ryad Benosman, Charles Clercq, Xavier Lagorce, Sio-Hoi Ieng, and Chiara Bartolozzi. Event-based visual flow. IEEE Trans. Neural Netw. Learn. Syst., 25(2):407­417, 2013.
+[7] Christian Brandli, Raphael Berner, Minhao Yang, Shih-Chii Liu, and Tobi Delbruck. A 240×180 130 dB 3µs latency global shutter spatiotemporal vision sensor. IEEE J. Solid-State Circuits, 49(10):2333­2341, 2014.
+[8] Tobias Brosch, Stephan Tschechne, and Heiko Neumann. On event-based optical flow detection. Frontiers in Neuroscience, 9:137, 2015.
+[9] Pierre Charbonnier, Laure Blanc-Feraud, Gilles Aubert, and Michel Barlaud. Two deterministic halfquadratic regularization algorithms for computed imaging. In IEEE Int. Conf. Image Process., volume 2, pages 168­172, 1994.
+[10] Loïc Cordone, Benoît Miramond, and Sonia Ferrante. Learning from event cameras with sparse spiking convolutional neural networks. arXiv:2104.12579, 2021.
+[11] Mike Davies, Andreas Wild, Garrick Orchard, Yulia Sandamirskaya, Gabriel A. Fonseca Guerra, Prasad Joshi, Philipp Plank, and Sumedh R. Risbud. Advancing neuromorphic computing with Loihi: A survey of results and outlook. IEEE Proc., pages 1­24, 2021.
+[12] Jeffrey Delmerico, Titus Cieslewski, Henri Rebecq, Matthias Faessler, and Davide Scaramuzza. Are we ready for autonomous drone racing? The UZH-FPV drone racing dataset. In IEEE Int. Conf. Robot. Autom., pages 6713­6719, 2019.
+[13] Wei Fang, Zhaofei Yu, Yanqi Chen, Timothee Masquelier, Tiejun Huang, and Yonghong Tian. Incorporating learnable membrane time constant to enhance learning of spiking neural networks. arXiv:2007.05785, 2020.
+[14] Guillermo Gallego, Henri Rebecq, and Davide Scaramuzza. A unifying contrast maximization framework for event cameras, with applications to motion, depth, and optical flow estimation. In IEEE Conf. Comput. Vis. Pattern Recog., pages 3867­3876, 2018.
+[15] Guillermo Gallego, Mathias Gehrig, and Davide Scaramuzza. Focus is all you need: Loss functions for event-based vis. In IEEE Conf. Comput. Vis. Pattern Recog., pages 12280­12289, 2019.
+[16] Guillermo Gallego, Tobi Delbruck, Garrick Orchard, Chiara Bartolozzi, Brian Taba, Andrea Censi, Stefan Leutenegger, Andrew Davison, Jörg Conradt, Kostas Daniilidis, et al. Event-based vision: A survey. IEEE Trans. Pattern Anal. and Mach. Intell., 2020.
+[17] M. Gehrig, S. B. Shrestha, D. Mouritzen, and D. Scaramuzza. Event-based angular velocity regression with spiking networks. In IEEE Int. Conf. Robot. Autom., pages 4195­4202, 2020.
+10
+
+[18] Germain Haessig, Andrew Cassidy, Rodrigo Alvarez, Ryad Benosman, and Garrick Orchard. Spiking optical flow for event-based sensors using ibm's truenorth neurosynaptic system. IEEE Trans. Biomed. Circuits Syst., 12(4):860­870, 2018.
+[19] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In IEEE Conf. Comput. Vis. Pattern Recog., pages 770­778, 2016.
+[20] Weihua He, YuJie Wu, Lei Deng, Guoqi Li, Haoyu Wang, Yang Tian, Wei Ding, Wenhui Wang, and Yuan Xie. Comparing SNNs and RNNs on neuromorphic vision datasets: Similarities and differences. Neural Networks, 132:108­120, 2020.
+[21] Donald O. Hebb. The organization of behavior: A neuropsychological theory. Wiley, 1952. [22] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. Int. Conf. Learn.
+Representations, 2014. [23] Eimantas Ledinauskas, Julius Ruseckas, Alfonsas Jursenas, and Giedrius Buracas. Training deep spiking
+neural networks. arXiv:2006.04436, 2020. [24] Chankyu Lee, Adarsh Kumar Kosta, Alex Z. Zhu, Kenneth Chaney, Kostas Daniilidis, and Kaushik Roy.
+Spike-FlowNet: Event-based optical flow estimation with energy-efficient hybrid neural networks. In European Conf. Comput. Vis., pages 366­382, 2020. [25] Chankyu Lee, Adarsh Kumar Kosta, and Kaushik Roy. Fusion-FlowNet: Energy-efficient optical flow estimation using sensor fusion and deep fused spiking-analog network architectures. arXiv:2103.10592, 2021. [26] Zhuoyan Li, Jiawei Shen, and Ruitao Liu. A lightweight network to learn optical flow from event data. In Int. Conf. on Pattern Recog., pages 1­7, 2021. [27] Paul A. Merolla, John V. Arthur, Rodrigo Alvarez-Icaza, Andrew S. Cassidy, Jun Sawada, Filipp Akopyan, Bryan L. Jackson, Nabil Imam, Chen Guo, Yutaka Nakamura, et al. A million spiking-neuron integrated circuit with a scalable communication network and interface. Science, 345(6197):668­673, 2014. [28] Anton Mitrokhin, Cornelia Fermüller, Chethan Parameshwara, and Yiannis Aloimonos. Event-based moving object detection and tracking. In IEEE/RSJ Int. Conf. Intell. Robots and Syst., 2018. [29] Elias Mueggler, Henri Rebecq, Guillermo Gallego, Tobi Delbruck, and Davide Scaramuzza. The eventcamera dataset and simulator: Event-based data for pose estimation, visual odometry, and SLAM. Int. J. Robot. Research, 36(2):142­149, 2017. [30] Emre O. Neftci, Hesham Mostafa, and Friedemann Zenke. Surrogate gradient learning in spiking neural networks: Bringing the power of gradient-based optimization to spiking neural networks. IEEE Signal Process. Magazine, 36(6):51­63, 2019. [31] Garrick Orchard, Ajinkya Jayawant, Gregory K Cohen, and Nitish Thakor. Converting static image datasets to spiking neuromorphic datasets using saccades. Frontiers in Neuroscience, 9:437, 2015. [32] Chethan M. Parameshwara, Simin Li, Cornelia Fermüller, Nitin J. Sanket, Matthew S. Evanusa, and Yiannis Aloimonos. SpikeMS: Deep spiking neural network for motion segmentation. arXiv:2105.06562, 2021. [33] Federico Paredes-Vallés and Guido C. H. E. de Croon. Back to event basics: Self-supervised learning of image reconstruction for event cameras via photometric constancy. In IEEE Conf. Comput. Vis. Pattern Recog., 2021. [34] Federico Paredes-Vallés, Kirk Y. W. Scheper, and Guido C. H. E. De Croon. Unsupervised learning of a hierarchical spiking neural network for optical flow estimation: From events to global motion perception. IEEE Trans. Pattern Anal. and Mach. Intell., 42(8):2051­2064, 2020. [35] Nicolas Perez-Nieves and Dan F. M. Goodman. Sparse Spiking Gradient Descent. arXiv:2105.08810, 2021. [36] Nicolas Perez-Nieves, Vincent C. H. Leung, Pier Luigi Dragotti, and Dan F. M. Goodman. Neural heterogeneity promotes robust learning. bioRxiv, page 2020.12.18.423468, 2021. [37] Henri Rebecq, Daniel Gehrig, and Davide Scaramuzza. ESIM: An open event camera simulator. In Conf. Robot Learn., pages 969­982, 2018.
+11
+
+[38] Cedric Scheerlinck, Henri Rebecq, Daniel Gehrig, Nick Barnes, Robert Mahony, and Davide Scaramuzza. Fast image reconstruction with an event camera. In IEEE Winter Conf. Appl. Comput. Vis., pages 156­163, 2020.
+[39] Sumit B. Shrestha and Garrick Orchard. Slayer: Spike layer error reassignment in time. In Advances in Neural Information Process. Syst., 2018.
+[40] Christoph Stöckl and Wolfgang Maass. Optimized spiking neurons can classify images with high accuracy through temporal coding with two spikes. Nature Mach. Intell., pages 1­9, 2021.
+[41] Timo Stoffregen and Lindsay Kleeman. Event cameras, contrast maximization and reward functions: An analysis. In IEEE Conf. Comput. Vis. Pattern Recog., pages 12300­12308, 2019.
+[42] Timo Stoffregen, Cedric Scheerlinck, Davide Scaramuzza, Tom Drummond, Nick Barnes, Lindsay Kleeman, and Robert Mahony. Reducing the sim-to-real gap for event cameras. In European Conf. Comput. Vis., 2020.
+[43] Yujie Wu, Lei Deng, Guoqi Li, Jun Zhu, and Luping Shi. Spatio-temporal backpropagation for training high-performance spiking neural networks. Frontiers in Neuroscience, 12, 2018.
+[44] Yannan Xing, Gaetano Di Caterina, and John Soraghan. A new spiking convolutional recurrent neural network (SCRNN) with applications to event-based hand gesture recognition. Frontiers in Neuroscience, 14, 2020.
+[45] Shi Xingjian, Zhourong Chen, Hao Wang, Dit-Yan Yeung, Wai-Kin Wong, and Wang-Chun Woo. Convolutional LSTM network: A machine learning approach for precipitation nowcasting. In Advances in Neural Information Process. Syst., pages 802­810, 2015.
+[46] Chengxi Ye, Anton Mitrokhin, Cornelia Fermüller, James A. Yorke, and Yiannis Aloimonos. Unsupervised learning of dense optical flow, depth and egomotion from sparse event data. arXiv:1809.08625, 2018.
+[47] Bojian Yin, Federico Corradi, and Sander M. Bohte. Accurate and efficient time-domain classification with adaptive spiking recurrent neural networks. arXiv:2103.12593, 2021.
+[48] Friedemann Zenke and Surya Ganguli. SuperSpike: Supervised learning in multilayer spiking neural networks. Neural Computation, 30(6):1514­1541, 2018.
+[49] Friedemann Zenke and Tim P. Vogels. The remarkable robustness of surrogate gradient learning for instilling complex function in spiking neural networks. Neural Computation, pages 1­27, 2021.
+[50] Friedemann Zenke, Sander M. Bohté, Claudia Clopath, Iulia M. Coms¸a, Julian Göltz, Wolfgang Maass, Timothée Masquelier, Richard Naud, Emre O. Neftci, Mihai A. Petrovici, Franz Scherr, and Dan F. M. Goodman. Visualizing a joint future of neuroscience and neuromorphic engineering. Neuron, 109(4): 571­575, 2021.
+[51] Hanle Zheng, Yujie Wu, Lei Deng, Yifan Hu, and Guoqi Li. Going deeper with directly-trained larger spiking neural networks. arXiv:2011.05280, 2020.
+[52] Alex Z. Zhu and Liangzhe Yuan. EV-FlowNet: Self-supervised optical flow estimation for event-based cameras. In Robot.: Science and Syst., 2018.
+[53] Alex Z. Zhu, Dinesh Thakur, Tolga Özaslan, Bernd Pfrommer, Vijay Kumar, and Kostas Daniilidis. The multivehicle stereo event camera dataset: An event camera dataset for 3D perception. IEEE Robot. and Autom. Lett., 3(3):2032­2039, 2018.
+[54] Alex Z. Zhu, Liangzhe Yuan, Kenneth Chaney, and Kostas Daniilidis. Unsupervised event-based learning of optical flow, depth, and egomotion. In IEEE Conf. Comput. Vis. Pattern Recog., pages 989­997, 2019.
+12
+
+A Convexity of the self-supervised loss function
+
+To evaluate the convexity of the self-supervised loss function for event-based optical flow estimation from [54] and the adaptation that we propose in this work, we conducted an experiment with two partitions of 40k events from the ECD dataset [29]. In this experiment, for the selected partitions, we computed the value of Eq. 4 (with and without the scaling) for four sets of optical flow vectors given by:
+
+us(d) = {(u : u = g(i, d), v : v = g(j, d)), i  {0, 1, ..., 128}, j  {0, 1, ..., 128}}
+
+(13)
+
+g(x,
+
+d)
+
+=
+
+2xd 128
+
+-
+
+d
+
+(14)
+
+where d denotes the per-axis maximum displacement, which is drawn from the set D = {128, 256, 512, 1024}. This is equivalent to performing a grid search for the lowest Lcontrast over an optical flow space ranging from (-d, -d) to (d, d) with 128 samples for each axis. Fig. 4 highlights the main difference between the original and our adapted formulation. Although for the smaller values of d the two normalized losses look qualitatively similar, for larger values it is possible to discern that the original Lcontrast is not convex, and that its optimal solution is to throw events out of the image space during the warping process so they do not contribute to the computation of the loss. On the contrary, the scaling that we propose in Section 3.2 fixes this issue, and results in a convex loss function for any value of d.
+
+128 px.
+1.0
+
+256 px.
+
+512 px.
+
+1024 px.
+
+Original Lcontrast
+
+0.8
+
+0.6
+
+Scaled Lcontrast
+
+0.4
+
+u
+
+v
+
+0.2
+
+0.0
+
+(a) Sequence: poster_6dof.
+
+128 px.
+1.0
+
+256 px.
+
+512 px.
+
+1024 px.
+
+Original Lcontrast
+
+0.8
+
+0.6
+
+Scaled Lcontrast
+
+0.4
+
+u
+
+v
+
+0.2
+
+0.0
+(b) Sequence: shapes_6dof. Figure 4: Illustration of the effect of scaling Lcontrast for different optical flow vectors for two event partitions from the Event-Camera Dataset [29]. Numbers on top indicate the maximum per-axis pixel displacement for each column.
+
+B Clarifications on implicit and explicit recurrency
+The definition of the implicit temporal dynamics of the leaky, non-spiking variants of our EV-FlowNet and FireNet base architectures closely resembles that of the membrane potential for spiking neurons
+13
+
+(see Eq. 6) but without the reset mechanism. With ReLU as non-linearity, the activation Y of a leaky neuron is given by:
+
+Yik = ReLU Yik-1 + (1 - ) Wifjf Iik
+
+(15)
+
+j
+
+where j and i denote presynaptic and postsynaptic neurons respectively,  is the decay or leak of the neuron, k the timestep, and W ff the feedforward weights multiplying the input signal I.
+
+Regarding explicit recurrency, there is a slight difference between the vanilla ConvRNN layers used in our SNN and ANN architectures. On the one hand, the ConvRNNs that we use in our SNNs are defined through Eqs. 6 and 7 with two convolutional gates, one for the input and one for the recurrent signal, followed by the spiking function. On the other hand, the ConvRNNs in our ANNs are characterized by the same two convolutional gates but in this case followed by a TanH activation, and thereafter by a third output gate with ReLU activation. This augmentation was introduced to improve the convergence of the RNN and leaky variants of the base ANN architectures. From the results in Table 1 and Appendix C, we can observe that, despite this small difference, our SNNs perform on-par with their RNN and leaky counterparts.
+
+C Self-supervised evaluation and additional qualitative results
+
+Apart from the quantitative and qualitative evaluation on the MVSEC dataset [53] included in Section 4, we also evaluate our architectures on the ECD [29] and HQD [42] datasets, as in [33, 42]. Since these datasets lack ground-truth data, we use the Flow Warp Loss (FWL) [42], which measures the sharpness of the IWE relative to that of the original event partition using the variance as a measure of the contrast of the event images [15]. In addition to FWL, we propose the Ratio of the Squared Average Timestamps (RSAT) as a novel, alternative metric to measure the quality of the optical flow without ground-truth data. Contrary to FWL, RSAT makes use of Eq. 3 to measure the contrast of the event images and is defined as:
+
+RSAT
+
+=.
+
+Lcontrast(tfrwef|u) Lcontrast(tfrwef|0)
+
+(16)
+
+where RSAT < 1 implies that the predicted optical flow is better than a baseline consisting of null vectors. Since both FWL and RSAT are sensitive to the number of input events [34], we set N = 15k events for all sequences in this evaluation. Quantitative results of this evaluation can be found in Table 2, while qualitative results on these datasets can are shown in Fig. 6. The optical flow color-coding scheme is given in Fig. 5.
+
+Figure 5: Optical flow colorcoding scheme. Direction is encoded in color hue, and speed in color brightness.
+
+Table 2: Quantitative evaluation on the ECD [29] and HQF [42] datasets. For each dataset, we report the mean FWL [42] (higher is better, ) and RSAT (). Best in bold, runner up underlined.
+
+EV-FlowNet RNN-EV-FlowNet Leaky-EV-FlowNet LIF-EV-FlowNet ALIF-EV-FlowNet PLIF-EV-FlowNet XLIF-EV-FlowNet FireNet RNN-FireNet Leaky-FireNet LIF-FireNet ALIF-FireNet PLIF-FireNet XLIF-FireNet
+
+ECD FWL RSAT
+1.31 0.94 1.36 0.95 1.34 0.95 1.21 0.95 1.17 0.98 1.24 0.95 1.23 0.95 1.43 0.99 1.34 0.99 1.40 0.99 1.28 0.99 1.35 1.00 1.30 0.97 1.29 0.99
+
+HQF FWL RSAT
+1.37 0.92 1.45 0.93 1.39 0.93 1.24 0.94 1.21 0.98 1.28 0.93 1.25 0.93 1.57 0.99 1.42 0.99 1.52 0.99 1.34 1.00 1.49 1.00 1.35 0.98 1.39 0.99
+
+14
+
+boxes_6dof
+
+dynamic_6dof
+
+poster_6dof
+
+engpionseteerrisng_
+
+reflective_ materials
+
+still_life
+
+EV-FlowNet
+
+LIF-EV-FlowNet
+
+FireNet
+
+PLIF-FireNet
+
+Figure 6: Additional qualitative results of our best performing ANNs and SNNs on sequences from the ECD [29] (top three) and HQF [42] (bottom three) datasets.
+
+Apart from further confirming the generalizability of our architectures to other datasets and the on-par performance of our SNNs with respect to the recurrent ANNs (and thus to the state-of-the-art), results from this evaluation reveal the lack of robustness of the self-supervised FWL metric from Stoffregen and Scheerlinck et al. [42] in capturing the quality of the learned event-based optical flow. As shown in Table 2, FWL results do not correlate with the AEEs reported in Table 1. For instance, FireNet variants are characterized by higher values (thus better, according to [42]) than their computationally more powerful EV-FlowNet counterparts overall, while, according to Table 1, it should be the opposite. On the other hand, according to its correlation with the reported AEEs in Table 1, RSAT, which is based on our reformulation of the self-supervised loss function from [54], is a more reliable metric to assess the quality of event-based optical flow without ground-truth data.
+D Ablation study on recurrent connections
+In this ablation study, we evaluate the importance of explicit recurrent connections for event-based optical flow estimation with ANNs and SNNs when using our input event representation (see Section 3.1) and training settings (see Section 4). To do this, we use the base FireNet architecture and its leaky and LIF variants (as introduced Section 3.4), and compare their performance on MVSEC
+15
+
+Ground truth
+
+FireNet
+
+Leaky-FireNet
+
+LIF-FireNet
+
+indoor_flying3
+
+FireFlowNet
+
+Leaky-FireFlowNet LIF-FireFlowNet
+
+Figure 7: Qualitative results of FireNet and FireFlowNet variants on a sequence from MVSEC [53].
+
+Table 3: Quantitative evaluation of FireNet and FireFlowNet variants on MVSEC [53]. For each sequence, we report the AEE () in pixels and the percentage of outliers, %Outlier (). Best in bold, runner up underlined.
+
+dt = 1
+FireNet Leaky-FireNet LIF-FireNet FireFlowNet Leaky-FireFlowNet LIF-FireFlowNet
+dt = 4
+FireNet Leaky-FireNet LIF-FireNet FireFlowNet Leaky-FireFlowNet LIF-FireFlowNet
+
+outdoor_day1 AEE %Outlier 0.55 0.35 0.52 0.41 0.57 0.40 1.02 1.62 0.61 0.56 0.84 1.15
+2.04 20.93 1.96 18.26 2.12 21.00 3.88 55.47 2.29 24.22 3.24 43.08
+
+indoor_flying1 AEE %Outlier 0.89 1.93 0.90 2.66 0.98 2.48 1.37 6.86 0.97 2.71 1.22 5.55
+3.35 42.50 3.42 42.03 3.72 48.27 5.29 68.37 3.68 47.12 4.67 60.34
+
+indoor_flying2 AEE %Outlier 1.62 14.65 1.67 16.09 1.77 16.40 2.24 25.74 1.76 17.68 2.06 22.25
+5.71 61.03 5.92 58.80 6.27 64.16 8.26 79.42 6.29 62.30 7.54 74.68
+
+indoor_flying3 AEE %Outlier 1.35 10.64 1.43 13.16 1.50 12.81 2.00 21.09 1.52 14.16 1.80 18.13
+4.68 53.42 4.98 52.57 5.23 58.43 7.33 78.69 5.37 58.29 6.54 71.45
+
+[53] to their non-recurrent counterparts. As in [33], the non-recurrent version of FireNet that we use, which substitutes the ConvGRUs with convolutional encoders, is further referred to as FireFlowNet. The qualitative and quantitative results for this ablation study are shown in Fig. 7 and Table 3, respectively. Firstly, from these results, we can conclude that stateless ANNs (such as FireFlowNet) are not capable of learning to estimate optical flow using our input event representation and training pipeline. This observation confirms the claim made in Section 3.1 about the fact that our event representation minimizes the amount of temporal information encoded in the input to the networks. Secondly, these results also confirm that, in order to successfully learn optical flow, the networks need to be able to build an internal (hidden) state through explicit recurrent connections and/or neuronal dynamics. As shown, the only architecture that is not able to learn optical flow is FireFlowNet. If this network is augmented with recurrent connections (i.e., FireNet), neuronal dynamics (i.e., Leaky-FireFlowNet, LIF-FireFlowNet), or both (i.e., Leaky-FireNet, LIF-FireNet), optical flow can be learned with our proposed pipeline and event representation. However, from the quantitative results in Table 3,
+16
+
+0.84 0.8
+0.76
+
+FireNet Leaky-FireNet LIF-FireNet FireFlowNet Leaky-FireFlowNet LIF-FireFlowNet
+
+Lflow
+
+0.72
+
+0.68
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+Epoch
+
+Figure 8: Training loss curves of FireNet and FireFlowNet variants.
+
+we can observe that learning optical flow through neuronal dynamics without explicit recurrent connections (i.e., Leaky-FireFlowNet, LIF-FireFlowNet), although possible, is quite complex and results in networks with lower accuracy. For this reason, we conclude that recurrent connections are an important driver for learning accurate event-based optical flow with our training pipeline, and hence, we use them in ANNs and SNNs that we propose in this work. Additionally, we plotted the training loss curves for the various architectures in Fig. 8. These do not paint the same picture as the quantitative evaluation results in Table 3: for instance, the AEEs of Leaky-FireFlowNet are worse than those of FireNet, but their training losses suggest otherwise. This could be caused by different networks focusing on different parts of the loss: without recurrent connections, decreasing Lcontrast may be more difficult, whereas focusing efforts on Lsmooth might still allow for decreasing the overall loss Lflow. While resulting in similar training losses, the latter approach does not lead (as much) to the actual learning of optical flow.
+E Ablation study on learnable parameters for SNNs
+Several works emphasize the importance of including neuronal parameters in the optimization [13, 36, 47, 50], agreeing that including the various decays or leaks is beneficial for performance. Some also argue and show that learning thresholds adds little value [13, 36], which makes intuitive sense given that the same effect can be achieved through scaling the synaptic weights. To confirm these observations, we perform an ablation study on the learning of per-channel leaks and thresholds for LIF-FireNet. All instances of a parameter are initialized to the same value, but can be adapted over time in the case of learning. Initialization details can be found in Appendix G. The results in Table 4 suggest that, for our task, learning at least the leaks is beneficial for performance. However,
+
+0.8 0.78 0.76
+
+Neither Only thresh Only leak Both
+
+Lflow
+
+0.74
+
+0.72
+
+0
+
+20
+
+40
+
+60
+
+80 100
+
+Epoch
+
+Figure 9: Training loss curves for LIF-FireNet variants with different sets of learnable parameters.
+
+Table 4: Ablation study on learnable parameters for SNNs on MVSEC [53] using variants of LIF-FireNet. We report the AEE () for dt = 1. Best in bold, runner up underlined.
+
+Learnable thresholds
+
+X
+
+X
+
+Learnable leaks
+
+XX
+
+outdoor_day1
+
+0.65 0.68 0.57 0.58
+
+indoor_flying1
+
+1.14 1.04 0.97 0.96
+
+indoor_flying2
+
+1.88 1.89 1.70 1.82
+
+indoor_flying3
+
+1.62 1.61 1.45 1.52
+
+17
+
+Count Count
+
+E1
+
+15
+
+G1
+
+E2
+
+E3
+
+10
+
+G2
+
+E4
+
+E5
+
+5
+
+E1
+
+G1
+
+15
+
+E2
+
+E3
+
+10
+
+G2 E4
+
+E5
+
+5
+
+0
+
+-5
+
+-4.5
+
+-4
+
+-3.5
+
+-3
+
+a (before sigmoid)
+
+0
+
+-5
+
+-4.5
+
+-4
+
+-3.5
+
+-3
+
+a (before sigmoid)
+
+(a) Variant with learnable leaks.
+
+(b) Variant with learnable leaks and thresholds.
+
+Figure
+
+10:
+
+LIF-FireNet
+
+distribution
+
+of
+
+learned
+
+leaks
+
+
+
+=
+
+1 1+exp(-a)
+
+,
+
+initialized
+
+at
+
+a
+
+=
+
+-4.
+
+despite these differences in AEE, the training loss curves for all variants, as shown in Fig. 9, do not vary a lot. For this we can follow the same explanation as in Appendix D: without the optimization of leaks, the network could focus on decreasing Lsmooth, which does not lead (as much) to the actual learning of optical flow.
+
+Looking at the learned leaks also gives us insight into how information is integrated throughout the
+
+network. Fig. 10 shows the distribution of the parameter a, from which the membrane potential
+
+leaks are a = -4;
+
+computed as  after learning,
+
+e=ar1li+eerxl1pa(y-ear)s,
+
+for the mostly
+
+LIF-FireNet end up with
+
+variants with learnable faster leaks (lower a),
+
+leaks. while
+
+Initially, all later layers
+
+end up with slower leaks (higher a). This intuitively makes sense: we want earlier layers to respond
+
+quickly to changing inputs, while we need later layers to (more slowly) integrate information over
+
+time and produce an optical flow estimate.
+
+F Training loss curves of adaptive SNNs
+To support the conclusions derived in Section 4.2, Fig. 11 presents the training loss curves for our EV-FlowNet and FireNet spiking architectures with the different adaptive mechanisms introduced in Section 3.3. As shown, while the curves for presynaptic adaptation (i.e., the PLIF and XLIF neuron models) are very similar to that of the LIF model, the loss curve of the ALIF model suggests the unsuitableness of postsynaptic adaptation when working with event data for optical flow estimation.
+
+Lflow Lflow
+
+0.82 0.8
+0.78
+
+LIF ALIF PLIF XLIF
+
+0.82 0.8
+0.78
+
+LIF ALIF PLIF XLIF
+
+0.76
+
+0.76
+
+0.74
+
+0.74
+
+0.72
+
+0.72
+
+0
+
+20
+
+40
+
+60
+
+80 100
+
+Epoch
+
+0
+
+20
+
+40
+
+60
+
+80 100
+
+Epoch
+
+(a) EV-FlowNet variants.
+
+(b) FireNet variants.
+
+Figure 11: Training loss curves of our SNNs with different adaptive mechanisms.
+
+G Hyperparameter and initialization details
+
+Wwietihgphts=andcbinia·ske1s
+
+of ANN modules follow the · k2, cin the number of input
+
+default Conv2d PyTorch initialization U channels and {k1, k2} the kernel sizes.
+
+(-1/p, For the
+
+1/p), SNN
+
+18
+
+modules, we take p = cin for the weights to ensure enough activity, and include no biases. In the case of SNNs, we also changed the weight initialization of the prediction layer P to U(-0.01, 0.01) in order to improve learning stability, as explained in Appendix H. The aTan surrogate gradient has width  = 10; also see Appendix H for a visualization.
+
+Table 5 gives the leak and threshold parameters of the SNNs for the performed experiments. Mem-
+
+brane leak , threshold leak , and trace addition/leak {0,1} are clamped through a sigmoid function,
+
+esi.gg.m, oid=fu1n+cetxi1po(n-aa)re,
+
+to a,
+
+prevent instability [13]. For n and p{0,1}, respectively.
+
+,  and {0,1} the (learnable) parameters in the Threshold  and the parameters of the adaptive
+
+threshold {0,1} are clamped to [0.01, ), [0.01, ) and [0, ), respectively.
+
+Table 5: SNN parameter initializations.
+
+Section / Appendix 4.1-4.3, C, D and H E
+
+a
+
+N (-4, 0.1)
+
+-4
+
+n
+
+N (-2, 0.1)
+
+-
+
+p0
+
+N (-2, 0.1)
+
+-
+
+p1
+
+N (-2, 0.1)
+
+-
+
+
+
+N (0.8, 0.1)
+
+0.8
+
+0
+
+N (0.3, 0.1)
+
+-
+
+1
+
+N (1, 0.1)
+
+-
+
+H Details on further lessons
+We looked at the effect of surrogate gradient width on learning performance by trying out three variants on LIF-FireNet: aTan with  = 10 (default), and SuperSpike [48] with   {10, 100}; see Fig. 12b for a comparison of their shapes. The resulting loss curves are plotted in Fig. 12a. The width of aTan -10 is such that there is sufficient gradient flow for learning; this is less so for SuperSpike-10, and not at all for SuperSpike-100. The plots of per-layer mean gradient magnitude in Fig. 13 confirm this: SuperSpike-10 only shows non-negligible gradient flow for the last two layers, while the mean gradients for SuperSpike-100 are practically zero.
+
+0.84
+
+aTan -10 aTan -10 + Lact
+
+SuperSpike-10 SuperSpike-10 + Lact
+
+SuperSpike-100 SuperSpike-100 + Lact
+
+Lflow S/U
+
+0.8 0.76
+
+1
+
+aTan -10
+
+SuperSpike-10
+
+SuperSpike-100
+
+0.5
+
+0.72
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+Epoch
+
+0 -6 -4 -2 0 2 4 6
+U -
+
+(a) Training loss curves belonging to LIF-FireNet.
+
+(b) Surrogate gradients.
+
+Figure 12: Impact of the choice of surrogate gradient  and activity regularization Lact. aTan -10 denotes  (x) = 1/(1 + 10x2), where x = U -; SuperSpike- [48] denotes  (x) = 1/(1 + |x|)2, with   {10, 100}.
+
+19
+
+Mean |L/W |
+
+·10-3
+
+6
+
+aTan -10
+
+4
+
+2
+
+0
+
+·10-3
+
+6
+
+aTan -10 + Lact
+
+4
+
+2
+
+3
+
+·10-3 SuperSpike-10
+
+·10-10
+
+SuperSpike-100
+
+E1ff
+
+2
+
+1
+
+G1ff G1rec
+
+1
+
+0.5
+
+E2ff E3ff
+
+0
+
+0
+
+G2ff G2rec
+
+3
+
+·10-3 SuperSpike-10 + Lact
+
+·10-4
+
+E4ff
+
+SuperSpike-100 + Lact
+
+E5ff
+
+2
+
+4
+
+1
+
+2
+
+Mean |L/W |
+
+0
+
+0
+
+0
+
+02468
+
+Step
+
+·104
+
+02468
+
+Step
+
+·104
+
+02468
+
+Step
+
+·104
+
+Figure 13: Per-layer mean of absolute gradient values during training of LIF-FireNet with various surrogate gradients, and activity regularization Lact. aTan -10 denotes  (x) = 1/(1 + 10x2), where x = U -; SuperSpike- [48] denotes  (x) = 1/(1 + |x|)2, with   {10, 100}. Data is smoothed with a 1000-step moving average and a stride of 100.
+
+As mentioned in Section 4.3, one possible way of mitigating gradient vanishing would be to connect each layer to the loss directly, through, e.g., a regularization term on minimum activity as in [49]:
+
+L
+
+Lact =
+
+max(0, fdesired - factual)2
+
+(17)
+
+l
+
+with L all spiking layers, fdesired the desired per-timestep fraction of active neurons, and factual the actual per-timestep fraction of active neurons. By taking the maximum, we ensure that Lact goes to zero as soon as the activity is above the desired level. The effect of adding activity regularization with fdesired = 0.05 can be observed in Fig. 12a. While the direct connection between each layer and the loss is able to start learning for SuperSpike-10, it has little effect for SuperSpike-100. The bottom row of Fig. 13 shows that the gradient flow for SuperSpike-10 becomes non-negligible for earlier layers after step 40,000 or so; for SuperSpike-100, the gradients have increased significantly, but are still not enough to allow learning. These results are in line with the recent SNN literature, which shows that SuperSpike-100 can enable learning for shallow networks [35, 49], but that it degrades performance as the number of layers increases beyond four [23], and that tuning of the surrogate width is necessary.
+
+1.6
+
+
+
+
+
+U (-1/ 32, 1/ 32)
+
+U (-0.01, 0.01)
+
+1.4
+
+1.2
+
+Lflow
+
+1
+
+0.8
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+Epoch
+
+Figure 14: Mean and inter-quartile range (shaded area) of training loss curves belonging to LIFFireNet variants with the PyTorch default weight initialization based on incoming channels and kernel size, or our initialization U(-0.01, 0.01), which gives much smaller weights.
+
+20
+
+Note that [23] also demonstrates learning with SuperSpike-10 for deeper networks, but this probably works because they use batch normalization.
+
+Additionally, we tried different weight initializations for the prediction layer P, based on the ob-
+
+servation that SNNs may need smaller weights than comparable ANNs to get to similar outputs.
+
+We the
+
+performed training runs with the LIF-FireNet parameter ablations
+
+({ALpIFp,eAndLixIFE, P) LwIiFth, X(iL) IUF(}--F1i/reN3e2t,v1a/ria3n2ts)
+
+(see Table 1) and (default PyTorch
+
+initialization), and (ii) U(-0.01, 0.01), which gives weights approximately 18x smaller. Fig. 14
+
+shows the inter-quartile range (IQR) and mean for both variants.
+
+wClietharUly(,-U1(/-03.021,,10/.013)2i)mfpariloevdestoccoonnvveergrgeencaet
+
+speed and all, hence
+
+decreases variability. In fact, ALIF-FireNet the mean deviating from the IQR. This was
+
+not a problem with the smaller weight initialization.
+
+I Comparison of activity levels for adaptive SNNs
+
+SNNs implemented in neuromorphic hardware consume less energy as their activity decreases [11], which makes it important to investigate how activity levels vary across spiking neuron models, and how they correlate with the outputs of the network: because spiking layers emit only binary spikes, in some cases more spikes would be needed for output values larger in magnitude. We recorded the activity (fraction of nonzero values) and AEE of the {LIF, ALIF, PLIF, XLIF}-FireNet variants during the indoor_flying1 sequence of MVSEC [53] with dt = 1, as well as the mean normalized output optical flow magnitude during the boxes_6dof sequence of the ECD dataset [29] with N = 15k input events. Fig. 15 shows the results. One observation we can make from Fig. 15a is that the neuron models with an adaptive threshold (ALIF, XLIF) are more active than those without, while achieving similar AEEs. While this excessive spiking could be the result of initializing the base threshold 0 too low, the similarity in AEE certainly suggests that these models spike too much for the performance they achieve, and that there is a certain redundancy in their activity. Looking at Fig. 15b, we again observe that the models with adaptive threshold are more active than those without. On the other hand, it seems that ALIF and XLIF are more consistent in their activity across the range of outputs (narrower, more vertically oriented clusters). Looking at the clusters of LIF and PLIF, we can see that they both have roughly the same shape, but the latter's average output is larger in magnitude. This indicates that presynaptic and postsynaptic adaptive mechanisms can both serve a purpose: the former helps in increasing the absolute output range, while the latter helps in keeping activity (and therefore energy consumption) constant across this range. This makes the XLIF model especially interesting to investigate further in future work.
+
+·10-2
+
+6
+
+1.2
+LIF ALIF PLIF XLIF
+
+1
+
+AEE Mean |^uk|
+
+4
+
+0.8
+
+0.6
+
+2
+
+0.4
+
+0 0
+
+0.1
+
+0.2
+
+0.3
+
+Mean activity
+
+0.2 0.1
+
+iknp
+0.15
+
+LIF ALIF PLIF XLIF
+0.2 0.25 0.3 Mean activity
+
+0.35
+
+(a) AEE against mean activity (over all spiking layers).
+
+(b) Mean (normalized) optical flow magnitude (over all pixels that have at least one event) against mean activity (over all spiking layers). The activity of the ipnloptuttedaikngpaiisnsitdtehnetiLcaIFl -fFoirreaNlletnoeutwtpourtk. s, but is here
+
+Figure 15: Recorded activity (fraction of nonzero values) of spiking FireNet variants during (a) indoor_flying1 of MVSEC [53] with dt = 1 and (b) boxes_6dof of the ECD dataset [29] with N = 15k events. Each marker represents one timestep.
+
+21
+
+

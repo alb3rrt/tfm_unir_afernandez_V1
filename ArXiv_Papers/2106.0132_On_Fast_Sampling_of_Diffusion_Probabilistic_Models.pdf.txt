@@ -1,0 +1,1495 @@
+On Fast Sampling of Diffusion Probabilistic Models
+
+arXiv:2106.00132v1 [cs.LG] 31 May 2021
+
+Zhifeng Kong Computer Science and Engineering
+UC San Diego z4kong@eng.ucsd.edu
+
+Wei Ping NVIDIA wping@nvidia.com
+
+Abstract
+In this work, we propose FastDPM, a unified framework for fast sampling in diffusion probabilistic models. FastDPM generalizes previous methods and gives rise to new algorithms with improved sample quality. We systematically investigate the fast sampling methods under this framework across different domains, on different datasets, and with different amount of conditional information provided for generation. We find the performance of a particular method depends on data domains (e.g., image or audio), the trade-off between sampling speed and sample quality, and the amount of conditional information. We further provide insights and recipes on the choice of methods for practitioners.
+1 Introduction
+Diffusion probabilistic models are a class of deep generative models that use Markov chains to gradually transform between a simple distribution (e.g., isotropic Gaussian) and the complex data distribution (Sohl-Dickstein et al., 2015; Ho et al., 2020). Most recently, these models have obtained the state-of-the-art results in several important domains, including image synthesis (Ho et al., 2020; Song et al., 2020b; Dhariwal and Nichol, 2021), audio synthesis (Kong et al., 2020b; Chen et al., 2020), and 3-D point cloud generation (Luo and Hu, 2021; Zhou et al., 2021). We will use "diffusion models" as shorthand to refer to this family of models.
+Diffusion models usually comprise: i) a parameter-free T -step Markov chain named the diffusion process, which gradually adds random noise into the data, and ii) a parameterized T -step Markov chain called the reverse or denoising process, which removes the added noise as a denoising function. The likelihood in diffusion models is intractable, but they can be efficiently trained by optimizing a variant of the variational lower bound. In particular, Ho et al. (2020) propose a certain parameterization called the denoising diffusion probabilistic model (DDPM) and show its connection with denoising score matching (Song and Ermon, 2019), so the reverse process can be viewed as sampling from a scorebased model using Langevin dynamics. DDPM can produce high-fidelity samples reliably with large model capacity and outperforms the state-of-the-art models in image and audio domains (Dhariwal and Nichol, 2021; Kong et al., 2020b). However, a noticeable limitation of diffusion models is their expensive denoising or sampling process. For example, DDPM requires a Markov chain with T = 1000 steps to generate high quality image samples (Ho et al., 2020), and DiffWave requires T = 200 to obtain high-fidelity audio synthesis (Kong et al., 2020b). In other words, one has to run the forward-pass of the neural network T times to generate a sample, which is much slower than the state-of-the-art GANs or flow-based models for image and audio synthesis (e.g., Karras et al., 2020; Kingma and Dhariwal, 2018; Kong et al., 2020a; Ping et al., 2020).
+To deal with this limitation, several methods have been proposed to reduce the length of the reverse process to S T steps. One class of methods compute continuous noise levels based on discrete diffusion steps and retrain a new model conditioned on these continuous noise levels (Song and Ermon, 2019; Chen et al., 2020; Okamoto et al., 2021; San-Roman et al., 2021). Then, a shorter reverse process can be obtained by carefully choosing a small set (size S) of noise levels. However,
+Preprint. Under review.
+
+these methods cannot reuse the pretrained diffusion models, because the state-of-the-art DDPM models are conditioned on discrete diffusion steps (Ho et al., 2020; Dhariwal and Nichol, 2021). It is also unclear the diffusion models conditioned on continuous noise levels can achieve comparable sample quality as the state-of-the-art DDPMs on challenging unconditional image and audio synthesis tasks (Dhariwal and Nichol, 2021; Kong et al., 2020b). Another class of methods directly approximate the original reverse process of DDPM models with shorter ones (of length S), which are conditioned on discrete diffusion steps (Song et al., 2020a; Kong et al., 2020b). Although both classes of methods have shown the trade-off between sampling speed and sample quality (i.e., larger S lead to higher sample quality), the fast sampling methods without retraining are more advantageous for fast iteration and deployment, while still keeping high-fidelity synthesis with small number of steps in the reverse process (e.g., S = 6 in Kong et al. (2020b)).
+In this work, we propose FastDPM, a unified framework of fast sampling methods for diffusion models without retraining. The core idea of FastDPM is to i) generalize discrete diffusion steps to continuous diffusion steps, and ii) design a bijective mapping between continuous diffusion steps and continuous noise levels. Then, we use this bijection to construct an approximate diffusion process and an approximate reverse process, both of which have length S T .
+FastDPM includes and generalizes the fast sampling algorithms from denoising diffusion implicit models (DDIM) (Song et al., 2020a) and DiffWave (Kong et al., 2020b). In detail, FastDPM offers two ways to construct the approximate diffusion process: selecting S steps in the original diffusion process, or more flexibly, choosing S variances. FastDPM also offers ways to construct the approximate reverse process: using the stochastic DDPM reverse process (DDPM-rev), or using the implicit (deterministic) DDIM reverse process (DDIM-rev). We can control the amount of stochasticity in the reverse process of FastDPM as in Song et al. (2020a).
+FastDPM gives rise to new algorithms with improved sample quality than previous methods when the length of the approximate reverse process S is small. We then extensively evaluate the family of FastDPM methods across image and audio domains. We find the deterministic DDIM-rev significantly outperforms the stochastic DDPM-rev in image generation tasks, but DDPM-rev significantly outperforms DDIM-rev in audio synthesis tasks. Finally, we investigate the performance of different methods by varying the amount of conditional information. We find with different amount of conditional information, we need different amount of stochasticity in the reverse process of FastDPM.
+In summary, we make the following contributions:
+1. FastDPM introduces the concept of continuous diffusion steps, and generalizes prior fast sampling algorithms without retraining (Song et al., 2020a; Kong et al., 2020b).
+2. FastDPM gives rise to new algorithms with improved sample quality when the length of the approximate reverse process S is small.
+3. We extensively evaluate FastDPM across image and audio domains, and provide insights and recipes on the choice of methods for practitioners.
+We organize the rest of the paper as follows. Section 2 discusses related work. We introduce the preliminaries of diffusion models in Section 3, and propose FastDPM in Section 4. We report experimental results in Section 5 and conclude the paper in Section 6.
+2 Related Work
+Diffusion models are a class of powerful deep generative models (Sohl-Dickstein et al., 2015; Ho et al., 2020; Goyal et al., 2017), which have received a lot of attention recently. These models have been applied to various domains, including image generation (Ho et al., 2020; Dhariwal and Nichol, 2021), audio synthesis (Kong et al., 2020b; Chen et al., 2020; Okamoto et al., 2021), image or audio super-resolution (Li et al., 2021; Lee and Han, 2021), text-to-speech (Jeong et al., 2021; Popov et al., 2021), music synthesis (Liu et al., 2021; Mittal et al., 2021), 3-D point cloud generation (Luo and Hu, 2021; Zhou et al., 2021), and language models (Hoogeboom et al., 2021). Diffusion models are connected with scored-based models (Song and Ermon, 2019, 2020; Song et al., 2020b), and there have been a series of research extending and improving diffusion models (Song et al., 2020b; Gao et al., 2020; Dhariwal and Nichol, 2021; San-Roman et al., 2021; Meng et al., 2021).
+There are two families of methods aiming for accelerating diffusion models at synthesis, which reduce the length of the reverse process from T to a much smaller S. One family of methods tackle
+2
+
+this problem at training. They retrain the network conditioned on continuous noise levels instead of discrete diffusion steps (Song and Ermon, 2019; Chen et al., 2020; Okamoto et al., 2021; San-Roman et al., 2021). Assuming that the corresponding network is able to predict added noise at any noise level, we can carefully choose only S T noise levels and construct a short reverse process just based on them. San-Roman et al. (2021) present a learning scheme that can step-by-step adjust those noise level parameters, for any given number of steps S. Another family of methods aim to directly approximate the original reverse process within the pretrained DDPM conditioned on discrete steps. In other words, no retraining is needed. Song et al. (2020a) introduce denoising diffusion implicit models (DDIM), which contain non-Markovian processes that lead to an equivalent training objective as DDPM. These non-Markovian processes naturally permit "jumping steps", or formally, using a subset of steps to form a short reverse process. However, compared to using continuous noise levels, selecting discrete steps offers less flexibility. Kong et al. (2020b) introduce a fast sampling algorithm by interpolating steps according to corresponding noise levels. This can be seen as an attempt to map continuous noise levels to discrete diffusion steps. However, it lacks both theoretical justification for the interpolation and extensive empirical studies.
+In this paper, we propose FastDPM, a method that approximates the original DDPM model. FastDPM constructs a bijective mapping between (continuous) diffusion steps and continuous noise levels. This allows us to take advantage of the flexibility of using these continuous noise levels. FastDPM generalizes Kong et al. (2020b) by using Gamma functions to compute noise levels, which naturally extends from discrete domain to continuous domain. FastDPM generalizes Song et al. (2020a) by providing a special set of noise levels that exactly correspond to integer steps.
+
+3 Diffusion Models
+
+Let d be the data dimension. Let pdata be the data distribution and platent = N (0, Id×d) be the latent distribution. Then, the denoising diffusion probabilistic model (DDPM, Sohl-Dickstein et al., 2015; Ho et al., 2020) is a deep generative model consisting two Markov chains called diffusion and reverse processes, respectively. The length of each Markov chain is T , which is called the number of diffusion or reverse steps. The diffusion process gradually adds Gaussian noise to the data distribution until the noisy data distribution is close to the latent distribution. Formally, the diffusion process from data x0  pdata to the latent variable xT is defined as:
+
+T
+
+q(x1, · · · , xT |x0) = q(xt|xt-1),
+
+(1)
+
+t=1
+ where each of q(xt|xt-1) = N (xt; 1 - txt-1, tI) for some small constant t > 0. The hyperparameters 1, · · · , T are called the variance schedule.
+
+The reverse process aims to eliminate the noise added in each diffusion step. Formally, the reverse process from xT  platent to x0 is defined as:
+
+T
+
+p(x0, · · · , xT -1|xT ) = p(xt-1|xt),
+
+(2)
+
+t=1
+
+where each of p(xt-1|xt) is defined as N (xt-1; µ(xt, t), t2I); the mean µ(xt, t) is parameterized through a neural network and the variance t is time-step dependent constant. Based on the reverse
+process, the sampling process is to first draw xT  N (0, I), then draw xt-1  p(xt-1|xt) for
+t = T, T - 1, · · · , 1, and finally outputs x0.
+
+The training objective of DDPM is based on the variational evidence lower bound (ELBO). Under a
+
+certain parameterization introduced by Ho et al. (2020), the objective can be largely simplified. One
+
+may first define constants t = 1 - t, ¯t =
+
+t i=1
+
+i,
+
+~t
+
+=
+
+ 1-¯t-1
+1-¯t t
+
+for
+
+t
+
+>
+
+1
+
+and ~1
+
+=
+
+1.
+
+Then,
+
+a noticeable property of diffusion model is that
+
+
+
+q(xt|x0) = N (xt; ¯tx0, (1 - ¯t)I),
+
+(3)
+
+thus one can directly sample xt given x0 (see derivation in Appendix A).
+
+Furthermore,
+
+one
+
+may
+
+parameterize
+
+µ(xt, t)
+
+=
+
+1 t
+
+xt
+
+-
+
+ t 1-¯t
+
+(xt, t)
+
+, where
+
+ is a neural
+
+network taking xt and the diffusion-step t as inputs. In addition, t is simply parameterized as ~t12
+
+3
+
+defined above. Ho et al. (2020) show that minimizing the following unweighted variant of the ELBO leads to higher generation quality:
+
+min
+
+
+Lunweighted()
+
+=
+
+Ex0,
+
+,t
+
+- (xt, t) 22,
+
+(4)
+
+
+
+
+
+where  N (0, I), x0  qdata, t is uniformly taken from 1, · · · , T , and xt = ¯t · x0 + 1 - ¯t ·
+
+from Eq. (3). One may simply interpret this objective as a mean-squared error loss between the true
+
+noise and the predicted noise (xt, t) at each time-step.
+
+4 FastDPM: A Unified Framework for Fast Sampling in Diffusion Models
+
+In order to achieve high-fidelity synthesis, the number of diffusion steps T in DDPM is set to be very large so that q(xT |x0) is close to platent. For example, T = 1000 in image synthesis (Ho et al., 2020) and T = 200 in audio synthesis (Kong et al., 2020b). Then, sampling from DDPM needs running through the network  for as many as T times, which can be very slow. In this section, we propose FastDPM, which approximates the pretrained DDPM via much shorter diffusion and reverse processes of length S T , thus it can generate a sample by only running the network S times. The core idea of FastDPM is to: i) generalize discrete diffusion steps to continuous diffusion steps and, then ii) design a bijective mapping between continuous diffusion steps and continuous noise levels, where these noise levels indicate the amount of noise in data. Finally, we use this bijective mapping to construct an approximate diffusion process and an approximate reverse process, respectively.
+
+4.1 Bijective mapping between Continuous Diffusion Steps and Noise Levels
+
+In this section, we generalize discrete (integer) diffusion steps to continuous (real-valued) diffusion steps. Then, we introduce a bijective mapping R and T = R-1 between continuous diffusion steps t
+and noise levels r: r = R(t) and t = T (r).
+
+ Define R. We start with an integer diffusion step t. From Eq. (3), one can observe xt = ¯t · x0 +
+
+1 - ¯t · where  N (0, I), thus sampling xt given x0 is equivalent to adding a Gaussian noise to x0. Based on this observation, we define the noise level at step t as R(t) = ¯t, which means xt
+
+is composed of R(t) fraction of the data x0 and (1 - R(t)) fraction of white noise. For example,
+
+R(t) = 0 means no noise and R(t) = 1 means pure white noise. Next, we extend the domain of R
+
+to real values. Assume that the variance schedule {t}Tt=1 is linear: i = 1 + (i - 1), where
+
+
+
+=
+
+T -1 T -1
+
+(Ho
+
+et
+
+al., 2020).
+
+We
+
+further
+
+define
+
+an
+
+auxiliary
+
+constant
+
+^
+
+=
+
+1-1 
+
+,
+
+which
+
+is
+
+T
+
+assuming that T 1.0. 1 Then, we have
+
+t
+
+t
+
+t-1
+
+¯t = (1 - i) = (1 - 1 - (i - 1)) = ()t ^ - i
+
+i=1
+
+i=1
+
+i=0
+
+(5)
+
+= ()t
+
+^ + 1
+
+
+
+^ - t + 1
+
+-1
+.
+
+Because the Gamma function  is well-defined on (0, ), Eq. (5) gives rise to a natural extension of ¯t for continuous diffusion steps t. As a result, for t  [0, ^), we define the noise level at t as:
+
+t
+R(t) = () 2 
+
+^ + 1
+
+1
+2
+
+^ - t + 1
+
+-
+
+1 2
+
+.
+
+(6)
+
+Define T . For any noise level r  (0, 1), its corresponding (continuous) diffusion step, T (r), is defined by inverting R:
+
+T (r) = R-1(r).
+
+(7)
+
+By Stirling's approximation to Gamma functions, we have
+
+2 log R(t) = t + ^ + 1 log ^ - ^ - t + 1 log(^ - t) - t
+
+2
+
+2
+
+1 +
+12
+
+11 ^ - ^ - t
+
++ O(T -2)
+
+(8)
+
+1E.g., 1 = 1 × 10-4, T = 0.02 in Ho et al. (2020); Kong et al. (2020b).
+
+4
+
+Given a noise level r = R(t), we numerically solvet = T (r) by applying a binary search based on Eq. (8). We have T (r)  [t, t + 1] for r  [ ¯t+1, ¯t], and this provides a good initialization to the binary search algorithm. Experimentally, we find the binary search algorithm converges with high precision in no more than 20 iterations.
+
+4.2 Approximate the Diffusion Process
+
+Let x^0  pdata. Given a sequence of noise levels 1 > r1 > r2 > · · · > rS > 0, we aim to construct each step in the approximate diffusion process as x^s  N (x^s; rsx^0, (1 - rs2)I). To achieve this goal, we define s = rs2/rs2-1, compute the corresponding variances as s = 1 - s = 1 - rs2/rs2-1, and then define the transition probability in the approximate diffusion process as
+
+q(x^s|x^s-1) = N (x^s;
+
+1 - sx^s-1, sI) = N
+
+x^s;
+
+rs rs-1
+
+x^s-1,
+
+1
+
+-
+
+rs2 rs2-1
+
+I
+
+.
+
+(9)
+
+One can see corresponds
+
+this by rewriting to ¯t. We then
+
+Eq. (3): propose
+
+s corresponds to the following two
+
+t = ways
+
+1 - t, s corresponds to t, and rs to schedule the noise levels {rs}Ss=1.
+
+Noise levels from compute s = 1 -
+
+variances (VAR).
+
+s and ¯s =
+
+s i=1
+
+We start from the i. The noise level at
+
+variance step s is
+
+schedule then rs =
+
+{s}Ss=1. ¯s.
+
+Next, we
+
+Noise levels from steps (STEP). We start froma subset of diffusion steps {s}Ss-1 in {1, · · · , T }. Then, the noise level at step s is rs = R(s) = ¯s .
+When s = 1 - ¯s /¯s-1 , we have ¯s = ¯s . Therefore, noise levels from steps can be regarded as a special case of noise levels from variances.
+
+4.3 Approximate the Reverse Process
+
+Given the same sequence of noise levels in Section 4.2, we aim to approximate the reverse process
+Eq. (2) in the original DDPM. To achieve this goal, we regard the model  as being trained on variances {s}Ss=1 instead of the original {t}Tt=1. Then, the transition probability in the approximate reverse process is
+
+p(x^s-1|x^s) = N
+
+1
+
+x^s-1;
+
+ s
+
+x^s
+
+-
+
+ s 1-
+
+¯s
+
+(x^s, T (rs))
+
+, ~sI
+
+,
+
+(10)
+
+where
+
+~s
+
+=
+
+ 1-¯s-1
+1-¯s s
+
+for
+
+s
+
+>
+
+1
+
+and
+
+~1
+
+=
+
+1.
+
+~s
+
+corresponds
+
+to
+
+the
+
+~t
+
+=
+
+t2
+
+term.
+
+There
+
+are
+
+two
+
+ways to sample from the approximate reverse process in Eq. (10). Let every ^s be i.i.d. standard
+
+Gaussians for 1  s  S.
+
+DDPM reverse process (DDPM-rev). The sampling procedure based on the DDPM reverse process is based on Eq. (10): that is, to first sample x^S  platent and then sample
+
+1 x^s-1 = s
+
+x^s
+
+-
+
+ s 1-
+
+¯s
+
+(x^s, T (rs))
+
++
+
+~s^s.
+
+(11)
+
+DDIM reverse process (DDIM-rev). Let   [0, 1] be a hyperparameter. 2 Then, the sampling procedure based on DDIM (Song et al., 2020a) is to first sample x^S  platent and then sample
+
+
+
+ x^s-1 = ¯s-1
+
+x^s -
+
+1 - ¯s (x^s, T (rs)) ¯s
+
++
+
+1 - ¯s-1 - 2~s (x^s, T (rs)) +  ~s^s.
+
+(12)
+
+2 is  in Song et al. (2020a).
+
+5
+
+When  = 1, the coefficient of the  term in the DDIM reverse process is
+
+
+
+- 1-s¯s +
+
+1
+
+-
+
+¯s-1
+
+-
+
+1 - ¯s-1 1 - ¯s
+
+s
+
+=-
+
+1 - ¯s + s(1 - ¯s)
+
+(s - ¯s)(1 - ¯s - s) s(1 - ¯s)
+
+= - 1 - ¯s + s - ¯s
+
+= - s(1s- ¯s) .
+
+s(1 - ¯s)
+
+s(1 - ¯s)
+
+(13)
+
+Therefore, the DDPM reverse process is a special case of the DDIM reverse process ( = 1).
+
+4.4 Connections with Previous Methods
+The DDIM (Song et al., 2020a) method is equivalent to selecting noise levels from steps and using DDIM-rev in FastDPM. The fast sampling algorithm by DiffWave (Kong et al., 2020b) is related to selecting noise levels from variances and using DDPM-rev in FastDPM. Compared with DiffWave, FastDPM offers an automatic way to select variances in different settings and a more natural way to compute noise levels.
+
+5 Experiments
+
+In this section, we aim to answer the following two questions for FastDPM: · Which approximate diffusion process, VAR or STEP, is better? · Which approximate reverse process, DDPM-rev or DDIM-rev, is better?
+We investigate these questions by conducting extensive experiments in both image and audio domains.
+
+5.1 Setup
+
+Image datasets. We conduct unconditional image generation experiments on three datasets: CIFAR10 (50k object images of resolution 32 × 32 (Krizhevsky et al., 2009)), CelebA (163k face images of resolution 64 × 64 (Liu et al., 2015)), and LSUN-bedroom (3M bedroom images of resolution 256 × 256 (Yu et al., 2015)).
+
+Audio datasets. We conduct unconditional and class-conditional audio synthesis experiments on the Speech Commands 0-9 (SC09) dataset, the spoken digit subset of the full Speech Commands dataset (Warden, 2018). SC09 contains 31k one-second long utterances of ten classes (0 through 9) with a sampling rate of 16kHz. We conduct neural vocoding experiments (audio synthesis conditioned on mel spectrogram) on the LJSpeech dataset (Ito, 2017). It contains 24 hours of audio (13k utterances from a female speaker) recorded in home environment with a sampling rate of 22.05kHz.
+
+Models. In all experiments, we use pretrained checkpoints in prior works. In detail, the pretrained models for CIFAR-10 and LSUN-bedroom are taken from DDPM (Ho et al., 2020; Esser, 2020), the pretrained model for CelebA is taken from DDIM (Song et al., 2020a). In these models, T is 1000. The pretrained models for SC09 and LJSpeech are taken from DiffWave (Kong et al., 2020b). In these models, T is 200. In all models, 1 = 10-4, T = 2 × 10-2, and all t's are linearly interpolated between 1 and T .
+Noise level schedules. For each of the approximate diffusion process in Section 4.2, we examine two schedules: linear and quadratic. For noise levels {s}Ss=1 from variances, the two schedules are:
+
+· Linear (VAR): s = (1 + cs) 0. · Quadratic (VAR): s = (1 + cs)2 0.
+
+We let 0 = 0 and the constant c satisfy
+
+S s=1
+
+(1
+
+-
+
+s)
+
+=
+
+¯T
+
+.
+
+The
+
+noise
+
+level
+
+at
+
+step
+
+s
+
+is
+
+rs
+
+=
+
+ ¯s.
+
+For noise levels {s}Ss=1 from steps, they are computed from selected steps {s}Ss=1 among {1, · · · , T } (Song et al., 2020a). The two schedules are:
+
+· Linear (STEP): s =
+
+cs
+
+, where c
+
+=
+
+T S
+
+.
+
+6
+
+· Quadratic (STEP): s =
+
+cs2
+
+, where c
+
+=
+
+4 5
+
+·
+
+T S2
+
+.
+
+
+
+Then, the noise level at step s is rs = R(s) = ¯s .
+
+In image generation experiments, we follow the same noise level schedules as in Song et al. (2020a): quadratic schedules for CIFAR-10 and linear schedules for CelebA and LSUN-bedroom. We use linear schedules in SC09 experiments and quadratic schedules in LJSpeech experiments; we find these schedules have better quality.
+
+Evaluations. In all unconditional generation experiments, we use the Fréchet Inception Distance (FID) (Heusel et al., 2017; Lang, 2020) to evaluate generated samples. For the training set Xt and the set of generated samples Xg, the FID between these two sets is defined as
+
+FID = µt - µg 2 + tr t + g - 2 tg ,
+
+(14)
+
+where µt, µg and t, g are the means and covariances of Xt, Xg after a feature transformation. In each image generation experiment, Xg is 50K generated images. The transformed feature is the 2048-dimensional vector output of the last layer of Inception-V3 (Szegedy et al., 2015). In each audio synthesis experiment, Xg is 5K generated utterances. The transformed feature is the 1024-dimensional vector output of the last layer of a ResNeXT classifier (Xu and Tuguldur, 2017), which achieves 99.06% accuracy on the training set and 98.76% accuracy on the test set. The FID is
+the smaller the better.
+
+In the class-conditional generation experiment on SC09, we evaluate with accuracy and the Inception Score (IS) (Salimans et al., 2016). 3 The accuracy is computed by matching the predictions of the
+
+ResNeXT classifier and the pre-specified labels in the dataset. The IS of generated samples Xg is defined as
+
+IS = exp ExXg KL(p(x) Ex Xg p(x )) ,
+
+(15)
+
+where p(x) is the logit vector of the ResNeXT classifier. The IS and accuracy are the larger the better.
+
+In the neural vocoding experiment on LJSpeech, we evaluate the speech quality with the crowdMOS tookit (Ribeiro et al., 2011), where the test utterances from all models were presented to Mechanical Turk workers. We report the 5-scale Mean Opinion Scores (MOS), and it is the larger the better.
+
+5.2 Results
+We report image generation results under different approximate diffusion processes, approximate reverse processes and S, the length of FastDPM. Evaluation results on CIFAR-10, CelebA, and LSUN-bedroom measured in FID are shown in Table 1, Table 2, and Table 3, respectively.
+We report audio synthesis results under different approximate diffusion processes, approximate reverse processes and S, the length of FastDPM. Evaluation results of unconditional generation on SC09 measured in FID and IS are shown in Table 4. Evaluation results of class-conditional generation on SC09 measured in accuracy and IS are shown in Table 5. Evaluation results of neural vocoding on LJSpeech measured in MOS are shown in Table 6.
+We display some generated samples of FastDPM, including image samples and mel-spectrogram of audio samples, in Appendix B. More audio samples can be found on the demo website. 4
+
+5.3 Observations and Insights
+We have the following observations and insights according to the above experimental results.
+VAR marginally outperforms STEP for small S. In the above experiments, the two approximate diffusion processes (STEP and VAR) generally match performances of each other. On CIFAR-10, VAR outperforms STEP when S = 10, and STEP slightly outperforms VAR when S  20. On CelebA, VAR slightly outperforms STEP when S  20, and they have similar results when S  50. On LSUN-bedroom, VAR slightly outperforms STEP when S  50, and STEP slightly outperforms VAR when S = 100. On SC09, VAR slightly outperforms STEP in most cases. On LJSpeech, VAR
+3Note that FID is not an appropriate metric for conditional generation. 4https://fastdpm.github.io
+
+7
+
+Table 1: CIFAR-10 image generation measured in FID. STEP means noise levels from steps and VAR means noise levels from variances. Both use quadratic schedules. S is the length of FastDPM. The standard DDPM (T = 1000) has FID = 3.03.
+
+Approx. Diffusion
+STEP VAR STEP VAR STEP VAR STEP VAR
+
+Approx. Reverse DDIM-rev ( = 0.0) DDIM-rev ( = 0.0) DDIM-rev ( = 0.2) DDIM-rev ( = 0.2) DDIM-rev ( = 0.5) DDIM-rev ( = 0.5) DDPM-rev DDPM-rev
+
+S = 10
+11.01 9.90 11.32 10.18 13.53 12.22 36.70 29.43
+
+FID () S = 20 S = 50
+5.05 3.20 5.22 3.41 5.16 3.27 5.32 3.50 6.14 3.61 6.55 3.86 14.82 5.79 15.27 6.74
+
+S = 100 2.86 3.01 2.87 3.04 3.05 3.15 4.03 4.58
+
+Table 2: CelebA image generation measured in FID. STEP means noise levels from steps and VAR means noise levels from variances. Both use linear schedules. S is the length of FastDPM. The standard DDPM (T = 1000) has FID = 7.00.
+
+Approx. Diffusion
+STEP VAR STEP VAR
+
+Approx. Reverse DDIM-rev ( = 0.0) DDIM-rev ( = 0.0) DDPM-rev DDPM-rev
+
+S = 10
+15.72 15.31 29.52 28.98
+
+FID () S = 20 S = 50 10.77 8.31 10.69 8.41 19.38 12.83 18.89 12.83
+
+S = 100 7.85 7.95 10.35 10.39
+
+Table 3: LSUN-bedroom image generation measured in FID. STEP means noise levels from steps and VAR means noise levels from variances. Both use linear schedules. S is the length of FastDPM.
+
+Approx. Diffusion
+STEP VAR STEP VAR
+
+Approx. Reverse DDIM-rev ( = 0.0) DDIM-rev ( = 0.0) DDPM-rev DDPM-rev
+
+S = 10 19.07 19.98 42.69 41.00
+
+FID () S = 20 S = 50
+9.95 8.43 9.86 8.37 20.97 10.24 20.12 10.12
+
+S = 100
+9.94 10.27 7.98 8.13
+
+Table 4: SC09 unconditional audio synthesis measured in FID and IS. STEP means noise levels from steps and VAR means noise levels from variances. Both use linear schedules. S is the length of FastDPM. The original DiffWave (T = 200) has FID = 1.29 and IS= 5.30.
+
+Approx. Diffusion
+STEP VAR STEP VAR STEP VAR
+
+Approx. Reverse DDIM-rev ( = 0.0) DDIM-rev ( = 0.0) DDIM-rev ( = 0.5) DDIM-rev ( = 0.5) DDPM-rev DDPM-rev
+
+S = 10
+4.72 4.74 2.60 2.67 1.75 1.69
+
+FID () S = 20
+5.31 4.88 2.52 2.49 1.40 1.38
+
+S = 50
+5.54 5.58 2.46 2.47 1.33 1.34
+
+S = 10
+2.46 2.49 3.94 3.94 4.03 4.06
+
+IS () S = 20
+2.27 2.42 4.17 4.20 4.57 4.63
+
+S = 50
+2.23 2.21 4.19 4.20 5.16 5.18
+
+slightly outperforms STEP when S = 5. Based on these results, we conclude that VAR marginally outperforms STEP for small S.
+Different reverse processes dominate in different domains. In the above experiments, the difference between DDPM and DDIM reverse processes is very clear. In image generation tasks, DDIM-rev significantly outperforms DDPM-rev except for the S = 100 case in the LSUN-bedroom experiment. When we reduce  from 1.0 to 0.0 (see Table 1), the quality of generated samples consistently improves. In contrast, in audio synthesis tasks, DDPM-rev significantly outperforms DDIM-rev. When we increase  from 0.0 to 1.0 (see Table 4), the quality of generated samples consistently
+8
+
+Table 5: SC09 class-conditional audio synthesis. The results are measured by accuracy and IS. STEP means noise levels from steps and VAR means noise levels from variances. Both use linear schedules. S is the length of FastDPM. The DiffWave (T = 200) has accuracy = 91.2% and IS = 6.63.
+
+Approx. Diffusion
+STEP VAR STEP VAR STEP VAR
+
+Approx. Reverse DDIM-rev ( = 0.0) DDIM-rev ( = 0.0) DDIM-rev ( = 0.5) DDIM-rev ( = 0.5) DDPM-rev DDPM-rev
+
+Accuracy () S = 10 S = 20 S = 50
+66.5% 68.3% 66.1% 66.6% 68.5% 66.1% 85.8% 88.4% 87.8% 86.0% 88.2% 88.0% 79.9% 82.7% 86.8% 81.0% 82.8% 87.0%
+
+S = 10 3.21 3.26 5.79 5.74 4.71 4.93
+
+IS () S = 20
+3.18 3.22 6.23 6.24 5.10 5.16
+
+S = 50 2.87 2.88 6.00 6.03 5.83 5.86
+
+Table 6: LJSpeech audio synthesis conditioned on mel spectrogram measured. The results are measured by 5-scale MOS with 95% confidence intervals. STEP means noise levels from steps and VAR means noise levels from variances. Both use quadratic schedules. S is the length of FastDPM.
+
+Approx. Diffusion Approx. Reverse S MOS ()
+
+STEP
+
+DDIM-rev ( = 0.0) 5 3.72 ± 0.11
+
+VAR
+
+DDIM-rev ( = 0.0) 5 3.75 ± 0.10
+
+STEP
+
+DDPM-rev
+
+5 4.28 ± 0.08
+
+VAR
+
+DDPM-rev
+
+5 4.31 ± 0.07
+
+DiffWave (T = 200)
+
+200 4.42 ± 0.10
+
+Ground truth
+
+­ 4.51 ± 0.07
+
+improves. This can also be observed from Figure 8: DDIM produces very noisy utterances while DDPM produces very clean utterances.
+The results indicate that in the image domain, DDIM-rev produces better quality whereas in the audio domain, DDPM-rev produces better quality. We speculate the reason behind the difference is that in the audio domain, waveforms naturally exhibit significant amount of stochasticity. The DDPM reverse process offers much stochasticity because at each reverse step s, x^s-1 is sampled from a Gaussian distribution. However, the DDIM reverse process ( = 0.0) is a deterministic mapping from latents to data, so it leads to degrade quality in the audio domain. This hypothesis is also aligned with previous result that the flow-based model with deterministic mapping was unable to generate intelligible speech unconditionally on SC09 (Ping, 2021).
+The amount of conditional information affects the choice of reverse processes. In audio synthesis experiments, we find the amount of conditional information affects the generation quality of methods with different reverse processes. In the unconditional generation experiment on SC09, DDPMrev (which corresponds to  = 1.0) has the best results. When there is slightly more conditional information in the class-conditional generation experiment on SC09, DDIM-rev with  = 0.5 has the best results and slightly outperforms DDPM-rev. In both experiments DDIM-rev with  = 0.0 has much worse results. When there is much more conditional information (mel spectrogram) in the neural vocoding experiments on LJSpeech, DDPM-rev is still better than DDIM-rev, but the difference between these two methods is reduced. We speculate that adding conditional information reduces the amount of stochasticity required. When there is no conditional information, we need a large amount of stochasticity ( = 1.0); when there is weak class information, we need moderate stochasticity ( = 0.5); and when there is strong mel-spectrogram information, even having no stochasticity ( = 0.0) is able to generate reasonable samples.
+6 Conclusion
+Diffusion models are a class of powerful deep generative models that produce superior quality samples on various generation tasks. In this paper, we introduce FastDPM, a unified framework for fast sampling in diffusion models without retraining. FastDPM generalizes prior methods and provides more flexibility. We extensively evaluate and analyze FastDPM in image and audio generation tasks. One limitation of FastDPM is that when S is small, there is still quality degradation compared to the original DDPM. We plan to study algorithms offering higher quality for extremely small S in future.
+9
+
+References
+N. Chen, Y. Zhang, H. Zen, R. J. Weiss, M. Norouzi, and W. Chan. WaveGrad: Estimating gradients for waveform generation. arXiv preprint arXiv:2009.00713, 2020.
+P. Dhariwal and A. Nichol. Diffusion models beat gans on image synthesis. arXiv preprint arXiv:2105.05233, 2021.
+P. Esser. Pytorch pretrained diffusion models. https://github.com/pesser/pytorch_ diffusion, 2020.
+R. Gao, Y. Song, B. Poole, Y. N. Wu, and D. P. Kingma. Learning energy-based models by diffusion recovery likelihood. arXiv preprint arXiv:2012.08125, 2020.
+A. Goyal, N. R. Ke, S. Ganguli, and Y. Bengio. Variational walkback: Learning a transition operator as a stochastic recurrent net. arXiv preprint arXiv:1711.02282, 2017.
+M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter. Gans trained by a two time-scale update rule converge to a local nash equilibrium. In Advances in neural information processing systems, pages 6626­6637, 2017.
+J. Ho, A. Jain, and P. Abbeel. Denoising diffusion probabilistic models. arXiv preprint arXiv:2006.11239, 2020.
+E. Hoogeboom, D. Nielsen, P. Jaini, P. Forré, and M. Welling. Argmax flows and multinomial diffusion: Towards non-autoregressive language models. arXiv preprint arXiv:2102.05379, 2021.
+K. Ito. The LJ speech dataset. 2017.
+M. Jeong, H. Kim, S. J. Cheon, B. J. Choi, and N. S. Kim. Diff-tts: A denoising diffusion model for text-to-speech. arXiv preprint arXiv:2104.01409, 2021.
+T. Karras, S. Laine, M. Aittala, J. Hellsten, J. Lehtinen, and T. Aila. Analyzing and improving the image quality of stylegan. In CVPR, pages 8110­8119, 2020.
+D. P. Kingma and P. Dhariwal. Glow: Generative flow with invertible 1x1 convolutions. In NeurIPS, 2018.
+J. Kong, J. Kim, and J. Bae. Hifi-gan: Generative adversarial networks for efficient and high fidelity speech synthesis. In NeurIPS, 2020a.
+Z. Kong, W. Ping, J. Huang, K. Zhao, and B. Catanzaro. DiffWave: A versatile diffusion model for audio synthesis. arXiv preprint arXiv:2009.09761, 2020b.
+A. Krizhevsky, G. Hinton, et al. Learning multiple layers of features from tiny images. 2009.
+S. Lang. Fid score for pytorch. https://github.com/mseitzer/pytorch-fid, 2020.
+J. Lee and S. Han. Nu-wave: A diffusion probabilistic model for neural audio upsampling. arXiv preprint arXiv:2104.02321, 2021.
+H. Li, Y. Yang, M. Chang, H. Feng, Z. Xu, Q. Li, and Y. Chen. Srdiff: Single image super-resolution with diffusion probabilistic models. arXiv preprint arXiv:2104.14951, 2021.
+J. Liu, C. Li, Y. Ren, F. Chen, P. Liu, and Z. Zhao. Diffsinger: Diffusion acoustic model for singing voice synthesis. arXiv preprint arXiv:2105.02446, 2021.
+Z. Liu, P. Luo, X. Wang, and X. Tang. Deep learning face attributes in the wild. In Proceedings of International Conference on Computer Vision (ICCV), December 2015.
+S. Luo and W. Hu. Diffusion probabilistic models for 3d point cloud generation. arXiv preprint arXiv:2103.01458, 2021.
+C. Meng, J. Song, Y. Song, S. Zhao, and S. Ermon. Improved autoregressive modeling with distribution smoothing. arXiv preprint arXiv:2103.15089, 2021.
+10
+
+G. Mittal, J. Engel, C. Hawthorne, and I. Simon. Symbolic music generation with diffusion models. arXiv preprint arXiv:2103.16091, 2021.
+T. Okamoto, T. Toda, Y. Shiga, and H. Kawai. Noise level limited sub-modeling for diffusion probabilistic vocoders. In ICASSP 2021-2021 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pages 6029­6033. IEEE, 2021.
+W. Ping. WaveFlow on SC09 for unconditional generation. https://openreview.net/forum? id=a-xFK8Ymz5J&noteId=P3ORiRE9C3, 2021.
+W. Ping, K. Peng, K. Zhao, and Z. Song. WaveFlow: A compact flow-based model for raw audio. In ICML, 2020.
+V. Popov, I. Vovk, V. Gogoryan, T. Sadekova, and M. Kudinov. Grad-tts: A diffusion probabilistic model for text-to-speech. arXiv preprint arXiv:2105.06337, 2021.
+F. Ribeiro, D. Florêncio, C. Zhang, and M. Seltzer. CrowdMOS: An approach for crowdsourcing mean opinion score studies. In ICASSP, 2011.
+T. Salimans, I. Goodfellow, W. Zaremba, V. Cheung, A. Radford, and X. Chen. Improved techniques for training gans. In Advances in neural information processing systems, pages 2234­2242, 2016.
+R. San-Roman, E. Nachmani, and L. Wolf. Noise estimation for generative diffusion models. arXiv preprint arXiv:2104.02600, 2021.
+J. Sohl-Dickstein, E. A. Weiss, N. Maheswaranathan, and S. Ganguli. Deep unsupervised learning using nonequilibrium thermodynamics. arXiv preprint arXiv:1503.03585, 2015.
+J. Song, C. Meng, and S. Ermon. Denoising diffusion implicit models. arXiv preprint arXiv:2010.02502, 2020a.
+Y. Song and S. Ermon. Generative modeling by estimating gradients of the data distribution. arXiv preprint arXiv:1907.05600, 2019.
+Y. Song and S. Ermon. Improved techniques for training score-based generative models. arXiv preprint arXiv:2006.09011, 2020.
+Y. Song, J. Sohl-Dickstein, D. P. Kingma, A. Kumar, S. Ermon, and B. Poole. Score-based generative modeling through stochastic differential equations. arXiv preprint arXiv:2011.13456, 2020b.
+C. Szegedy, V. Vanhoucke, S. Ioffe, J. Shlens, and Z. Wojna. Rethinking the inception architecture for computer vision. CoRR, abs/1512.00567, 2015. URL http://arxiv.org/abs/1512.00567.
+P. Warden. Speech commands: A dataset for limited-vocabulary speech recognition. arXiv preprint arXiv:1804.03209, 2018.
+Y. Xu and E.-O. Tuguldur. Convolutional neural networks for Google speech commands data set with PyTorch, 2017. https://github.com/tugstugi/pytorch-speech-commands.
+F. Yu, A. Seff, Y. Zhang, S. Song, T. Funkhouser, and J. Xiao. Lsun: Construction of a large-scale image dataset using deep learning with humans in the loop. arXiv preprint arXiv:1506.03365, 2015.
+L. Zhou, Y. Du, and J. Wu. 3d shape generation and completion through point-voxel diffusion. arXiv preprint arXiv:2104.03670, 2021.
+11
+
+A Derivations for Diffusion Model
+
+A.1 Derivation of q(xt|x0)
+
+According to the definition of diffusion process, we have
+
+
+
+xt = txt-1 + t t,
+
+(16)
+
+where each t is an i.i.d. standard Gaussian. Then, by recursion, we have
+
+xt
+
+= =
+
+tttt--11
+
+xt-2 + t-1xt-3
+
+ tt-1 t-1 + t t + tt-1t-2 t-2
+
++
+
+ tt-1 t-1 + t t
+
+...  = ¯tx0 +
+
+tt-1 · · · 21 1 + · · · +
+
+ tt-1 t-1 + t t.
+
+(17)
+
+ As a result, q(xt|x0) is still Gaussian. Its mean vector is ¯tx0, and its covariance matrix is
+
+(tt-1 · · · 21 + · · · + tt-1 + t)I = (1 - ¯t)I. Formally, we have
+
+
+
+q(xt|x0) = N (xt; ¯tx0, (1 - ¯t)I).
+
+(18)
+
+12
+
+B Generated Samples in Experiments
+B.1 Unconditional Generation on CIFAR-10
+
+S = 100
+
+STEP
+
+VAR
+
+S = 50
+
+S = 20
+
+S = 10
+Figure 1: Comparison of generated samples of FastDPM on CIFAR-10 among different S and approximate diffusion processes. The approximate reverse process is DDIM-rev ( = 0.0).
+
+DDPM-rev  = 0.5  = 0.2  = 0.0
+
+S = 10
+
+S = 20
+
+DDPM-rev
+
+S = 50
+
+S = 100
+
+ = 0.5
+
+ = 0.2
+
+ = 0.0
+Figure 2: Comparison of generated samples of FastDPM on CIFAR-10 among different S and approximate reverse processes. The approximate diffusion process is VAR.
+
+13
+
+B.2 Unconditional Generation on CelebA S = 100
+
+VAR STEP
+
+S = 50
+
+VAR STEP
+
+S = 20
+
+VAR STEP
+
+S = 10
+
+VAR STEP
+
+Figure 3: Comparison of generated samples of FastDPM on CelebA among different S and approximate diffusion processes. The approximate reverse process is DDIM-rev ( = 0.0).
+
+14
+
+B.3 Unconditional Generation on LSUN-bedroom VAR
+STEP Figure 4: Comparison of generated samples of FastDPM on LSUN bedroom among different approximate diffusion processes. The approximate reverse process is DDIM-rev ( = 0.0) and S = 100.
+15
+
+VAR
+STEP Figure 5: Comparison of generated samples of FastDPM on LSUN bedroom among different approximate diffusion processes. The approximate reverse process is DDIM-rev ( = 0.0) and S = 50.
+16
+
+VAR
+STEP Figure 6: Comparison of generated samples of FastDPM on LSUN bedroom among different approximate diffusion processes. The approximate reverse process is DDIM-rev ( = 0.0) and S = 20.
+17
+
+VAR
+STEP Figure 7: Comparison of generated samples of FastDPM on LSUN bedroom among different approximate diffusion processes. The approximate reverse process is DDIM-rev ( = 0.0) and S = 10.
+18
+
+B.4 Unconditional Generation on SC09
+
+Hz
+
+Hz
+
+= 0.0
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+= 0.5
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+= 1.0
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+10
+
+Time
+
+15
+
+10
+
+15
+
+Time
+
+10
+
+Time
+
+15
+
++0 dB
+
+-10 dB
+
+-20 dB 20
+-30 dB
+
+-40 dB
+
+-50 dB 20
+-60 dB
+
+-70 dB
+
+20
+
+-80 dB
+
+Hz
+
+(a) STEP + DDIM-rev ( = 0.0) (top) / DDIM-rev ( = 0.5) (middle) / DDPM-rev (bottom)
+
+Hz
+
+Hz
+
+= 0.0
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+= 0.5
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+= 1.0
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+10
+
+15
+
+Time
+
+10
+
+Time
+
+15
+
+10
+
+15
+
+Time
+
++0 dB
+
+-10 dB
+
+-20 dB 20
+-30 dB
+
+-40 dB
+
+-50 dB 20
+-60 dB
+
+-70 dB
+
+20
+
+-80 dB
+
+Hz
+
+(b) VAR + DDIM-rev ( = 0.0) (top) / DDIM-rev ( = 0.5) (middle) / DDPM-rev (bottom)
+Figure 8: Mel-spectrogram of 16 synthesized utterances (S = 50). We use linear noise level schedules from steps in (a) and variances in (b). In each subplot, the top row shows results of DDIM-rev ( = 0.0), the middle row shows results of DDIM-rev ( = 0.5), and the bottom row shows results of DDPM-rev. DDPM-rev produces the clearest utterances in these approximate reverse processes.
+
+19
+
+B.5 Conditional Generation on SC09
+
+Hz
+
+Hz
+
+= 0.0
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+= 0.5
+
+10
+
+Time 15
+
+20
+
+25
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+10
+
+15
+
+20
+
+25
+
+= 1.0
+
+Time
+
+4096 2048 1024 512
+00
+
+5
+
+10
+
+Time 15
+
+20
+
+25
+
++0 dB -10 dB -20 dB -30 dB -40 dB -50 dB -60 dB -70 dB -80 dB
+
+Hz
+
+(a) STEP + DDIM-rev ( = 0.0) (top) / DDIM-rev ( = 0.5) (middle) / DDPM-rev (bottom)
+
+Hz
+
+Hz
+
+= 0.0
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+10
+
+15
+
+20
+
+25
+
+= 0.5
+
+Time
+
+4096
+
+2048
+
+1024
+
+512
+
+00
+
+5
+
+= 1.0
+
+10
+
+Time 15
+
+20
+
+25
+
+4096 2048 1024 512
+00
+
+5
+
+10
+
+15
+
+20
+
+25
+
+Time
+
++0 dB -10 dB -20 dB -30 dB -40 dB -50 dB -60 dB -70 dB -80 dB
+
+Hz
+
+(b) VAR + DDIM-rev ( = 0.0) (top) / DDIM-rev ( = 0.5) (middle) / DDPM-rev (bottom)
+Figure 9: Mel-spectrogram of 20 synthesized utterances (S = 50). We use linear noise level schedules from steps in (a) and variances in (b). In each subplot, the top row shows results of DDIMrev ( = 0.0), the middle row shows results of DDIM-rev ( = 0.5), and the bottom row shows results of DDPM-rev. DDIM-rev ( = 0.5) produces the clearest utterances in these approximate reverse processes.
+
+20
+
+B.6 Neural Vocoding on LJSpeech
+
+Hz
+
+Hz
+
+LJ001-0001 ground truth
+
++0 dB
+
+4096
+
+2048
+
+-10 dB
+
+1024
+
+512
+
+00
+
+1
+
+= 0.0
+
+2
+
+3
+
+4
+
+Time 5
+
+6
+
+7
+
+8
+
+9
+
+4096
+
+-20 dB -30 dB
+
+2048
+-40 dB 1024
+
+512
+
+-50 dB
+
+00
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+= 1.0
+
+Time
+
+4096
+
+-60 dB
+
+2048
+
+1024
+
+-70 dB
+
+512
+
+00
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+Time
+
+-80 dB
+
+(a) Ground truth (top) / STEP + DDIM-rev (middle) / STEP + DDPM-rev (bottom)
+
+Hz
+
+Hz
+
+Hz
+
+LJ001-0001 ground truth
+
++0 dB
+
+4096
+
+2048
+
+-10 dB
+
+1024
+
+512
+
+00
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+= 0.0
+
+Time
+
+4096
+
+-20 dB -30 dB
+
+2048
+-40 dB 1024
+
+512
+
+-50 dB
+
+00
+
+1
+
+= 1.0
+
+2
+
+3
+
+4
+
+Time 5
+
+6
+
+7
+
+8
+
+9
+
+4096
+
+-60 dB
+
+2048
+
+1024
+
+-70 dB
+
+512
+
+00
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+Time
+
+-80 dB
+
+(b) Ground truth (top) / VAR + DDIM-rev (middle) / VAR + DDPM-rev (bottom)
+
+Hz
+
+Figure 10: Mel-spectrogram of ground truth and generated LJ001-0001 (S = 5, channel= 128). We use linear noise level schedules from steps in (a) and variances in (b). In each subplot, the top row shows ground truth, the middle row shows results of DDIM-rev ( = 0.0), and the bottom row shows results of DDPM-rev. Both DDPM-rev and DDIM-rev generate high quality speech.
+
+21
+
+

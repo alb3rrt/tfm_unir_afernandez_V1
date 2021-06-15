@@ -1,0 +1,2318 @@
+arXiv:2106.01510v1 [physics.flu-dyn] 2 Jun 2021
+
+Kernel Learning for Robust Dynamic Mode Decomposition:
+Linear and Nonlinear Disambiguation Optimization (LANDO)
+Peter J. Baddoo1, Benjamin Herrmann2,3, Beverley J. McKeon4, and Steven L. Brunton2
+1Department of Mathematics, Massachusetts Institute of Technology, Cambridge, MA 02139, USA 2Department of Mechanical Engineering, University of Washington, Seattle, WA 98195, USA
+3Institute of Fluid Mechanics, Technische Universita¨t Braunschweig, 38108 Braunschweig, Germany 4Graduate Aerospace Laboratories, California Institute of Technology, Pasadena CA 91125, USA
+Abstract Research in modern data-driven dynamical systems is typically focused on the three key challenges of high dimensionality, unknown dynamics, and nonlinearity. The dynamic mode decomposition (DMD) has emerged as a cornerstone for modeling high-dimensional systems from data. However, the quality of the linear DMD model is known to be fragile with respect to strong nonlinearity, which contaminates the model estimate. In contrast, sparse identification of nonlinear dynamics (SINDy) learns fully nonlinear models, disambiguating the linear and nonlinear effects, but is restricted to low-dimensional systems. In this work, we present a kernel method that learns interpretable data-driven models for high-dimensional, nonlinear systems. Our method performs kernel regression on a sparse dictionary of samples that appreciably contribute to the underlying dynamics. We show that this kernel method efficiently handles high-dimensional data and is flexible enough to incorporate partial knowledge of system physics. It is possible to accurately recover the linear model contribution with this approach, disambiguating the effects of the implicitly defined nonlinear terms, resulting in a DMD-like model that is robust to strongly nonlinear dynamics. We demonstrate our approach on data from a wide range of nonlinear ordinary and partial differential equations that arise in the physical sciences. This framework can be used for many practical engineering tasks such as model order reduction, diagnostics, prediction, control, and discovery of governing laws.
+1 Introduction
+Discovering interpretable patterns and models from high-dimensional data is one of the principal challenges of scientific machine learning, with the potential to transform our ability to predict and control complex physical systems [1]. The current surge in the quality and quantity of data, along with rapidly improving computational hardware, has motivated a wealth of machine learning techniques that uncover such patterns for dynamical systems. Successful recent methods include the dynamic mode decomposition (DMD) [2­5] and extended DMD [6, 7], sparse identification of nonlinear dynamics (SINDy) for ordinary and partial differential equations [8, 9], genetic programming for model discovery [10, 11], physics informed neural networks (PINNs) [12, 13], Lagrangian neural networks [14], time-lagged autoencoders [15], operator theoretic methods [16­19], and operator inference [20, 21]. Techniques based on generalized linear regression, such as DMD and SINDy, are widely used because they are computationally efficient, require less data than neural networks, are highly extensible, and provide interpretable models. However, these approaches are either challenged by nonlinearity (e.g., DMD) or don't scale to high-dimensional systems (e.g., SINDy). In this work, we present a machine learning algorithm that leverages sparse kernel regression to address both challenges, efficiently learning high-dimensional nonlinear models that admit interpretable spatio-temporal coherent structures and robust locally linear models.
+ Corresponding author (baddoo@mit.edu)
+1
+
+(a) best linear fit
+
+(b) best nonlinear fit
+
+local linear models
+Figure 1: Learning regr(eas)sion models in linear (a) and nonlinea(rb()b) feature spaces. Our approach disambiguates linear and nonlinear model contributions to accurately extract local linear models.
+
+A central goal of modern data-driven dynamical systems [1] is to identify a model
+
+d
+
+x = F (x) = Lx + N (x)
+
+(1)
+
+dt
+
+that describes the evolution of the state of the system, x. Here we explicitly indicate that the dynamics F have a linear L and nonlinear N contribution, although many techniques do not model these separately or explicitly. However, several approaches obtain interpretable and explicit models of this form. For example, DMD seeks a best-fit linear model of the dynamics, while SINDy directly identifies sparse nonlinear models of the form in (1).
+Our approach synthesizes favorable aspects of several approaches mentioned above; however, it most directly complements and addresses the challenges of DMD for strongly nonlinear systems. The dynamic mode decomposition was originally introduced by Schmid [2] in the fluid dynamics community as a method for extracting spatio-temporal coherent structures from highdimensional data, resulting in a low-rank representation of the best-fit linear operator that maps the data forward in time [4, 5]. The resulting linear DMD models have been used to characterize many systems in fluid mechanics, where complex flows admit dominant modal decompositions [22­25] and linear control is commonly used [26­29]. DMD has also been adopted in a wide range of fields beyond fluid mechanics, and much of its success stems from the formulation of DMD as a linear regression problem [4], based entirely on measurement data, resulting in several powerful extensions [5]. However, because DMD uses least-squares regression to find a best-fit linear model dx/dt  Ax to the data, the presence of measurement noise [30­33], control inputs [34], and nonlinearity bias the regression. Mathematically, the noise, control inputs, and nonlinearity may all be lumped into a forcing b:
+
+d
+
+x = Lx + b  Ax. dt
+
+(2)
+
+The forcing b contaminates the linear model estimate, so A from DMD does not approximate the true linear contribution from L. It was recognized early that the DMD algorithm was highly sensitive to noise [30­32], resulting in noise-robust variants, including forward backward DMD [31], total least-squares DMD [32], optimized DMD [33], consistent DMD [35], and DMD based on robust PCA [36]. Similarly, DMD with control (DMDc) [34] was introduced to disambiguate the effect of the linear dynamics from actuation. For statistically stationary systems with stochastic inputs, the spectral proper orthogonal decomposition (SPOD) [22] produces an optimal basis of modes to describe the variability in an ensemble of DMD modes [24]. The bias due to nonlinearity, shown in Fig. 1(a), has been less thoroughly explored and is the topic of the present work.
+Despite these challenges, DMD is frequently applied to strongly nonlinear systems, with theoretical motivation from Koopman operator theory [3, 5, 16, 19]. However, DMD typically only yields accurate models for periodic or quasiperiodic systems, and is fundamentally unable to
+
+2
+
+capture nonlinear transients, multiple fixed points or periodic orbits, or other more complicated attractors [37]. Williams et al. [6] developed the extended DMD (eDMD), which augments the original state with nonlinear functions of the state to better approximate the nonlinear eigenfunctions of the Koopman operator for nonlinear systems. Further, a kernel version of eDMD was introduced for high-dimensional systems [7]. However, because this approach still fundamentally results in a linear model (in the augmented state), it also suffers from the same issues of not being able to handle multiple fixed points or attracting structures, and it also typically suffers from closure issues related to the irrepresentability of Koopman eigenfunctions. The sparse identification of nonlinear dynamics [8] algorithm is a related regression approach to model discovery, which identifies a fully nonlinear model as a sparse linear combination of candidate terms in a library. While SINDy is able to effectively disambiguate the linear and nonlinear dynamics in (1), resulting in the ability to obtain de-biased locally linear models as in Fig. 1(b), it only applies to relatively low-dimensional systems because of poor scaling of the library with state dimension.
+1.1 Contributions of this work
+In this work, we develop a custom kernel regression algorithm to learn accurate, efficient, and interpretable data-driven models for strongly nonlinear, high-dimensional dynamical systems. This approach scales to very high-dimensions, unlike SINDy, yet still accurately disambiguates the linear part of the model from the implicitly defined nonlinear dynamics. Thus, it is possible to obtain linear DMD models, local to a given base state, that are robust to strongly nonlinear dynamics. Our approach, referred to as the linear and nonlinear disambiguation optimization (LANDO) algorithm, may be viewed as a generalisation of DMD that enables a robust disambiguation of the underlying linear operator from nonlinear forcings. The learning framework is illustrated in Fig. 2, and open-source code is available at www.github.com/baddoo/LANDO.
+To achieve this robust learning, we improve upon several leading kernel and system identification algorithms. Recent works have successfully applied kernel methods [38, 39] to study data-driven dynamical systems [7, 40­48]. A key contribution, and an inspiration for the present work, is kernel DMD (kDMD, [7]), which seeks to approximate the infinite-dimensional Koopman operator as a large square matrix evolving nonlinear functions of the original state. An essential difference between kDMD and the present work is that our goal is to implicitly model the (nonsquare) nonlinear dynamics in (1) in terms of the original state x, enabling the robust extraction of the linear component L, as opposed to analysing the Koopman operator over measurement functions. In our work, we present a modified kernel recursive least-squares algorithm (KRLS, [49]) to learn a nonlinear model that best characterizes the observed data. To reduce the training cost, which typically scales with the cube of the number of training samples for kernel methods, we use dictionary learning to iteratively identify samples that contribute to the dynamics. This dictionary learning approach may be seen as a sparsity promoting regulariser, significantly reducing the high condition number that is common with kernel methods, improving robustness to noise. We introduce an iterative Cholesky update to construct the dictionary in a numerically stable manner, significantly reducing the training cost while also mitigating overfitting. Similarly to KRLS, our model has the option of operating online by parsing data in a streaming fashion and exploiting rank-one matrix updates to revise the model. Therefore, our approach is also suitable for model order reduction in practical applications where data become available "on-the-fly". Further, we show how to incorporate partially known physics, or uncover unknown physics, by designing or testing tailored kernels, much as with the SINDy framework [8, 50].
+We demonstrate our proposed kernel learning approach on a range of complex dynamical systems that arise in the physical sciences. As an illustrative example, we first explore the chaotic
+3
+
+1) collect data pairs
+
+2) organize as data matrices 3) define kernel function linear:
+polynomial:
+
+or 4) build sparse dictionary
+
+time
+5) perform regression
+
+Gaussian: 6) extract model
+
+spans the largest subspace in the feature space defined by k
+
+linear operator nonlinear forcing
+
+spectrum
+
+prediction
+
+Optional: learn dictionary and model online from streaming data
+
+Figure 2: The Linear and Nonlinear Disambiguation Optimization (LANDO) framework. Training data in the form of snapshot pairs are collected from either simulation or experiment in 1). The data are organised into data matrices in 2). In 3) an appropriate kernel is defined, which can be informed by expert knowledge of the underlying physics of the system or through a cross-validation procedure. In 4) a sparse dictionary of basis elements is constructed from the training samples, and in 5) the regression problem is solved. Finally, in 6) an interpretable model is extracted.
+
+Lorenz system. We also consider partial differential equations, using the LANDO framework to uncover the linear and nonlinear components of the nonlinear Burgers', Korteweg-De Vries, and Kuramoto­Sivashinsky equations using only nonlinear measurement data. The algorithm accurately recovers the spectrum of the linear operator for these systems, enabling linearised analyses, such as linear stability, transient growth, and resolvent analyses [51­54], in a purely data-driven manner [55], even for strongly nonlinear systems. We also demonstrate the approach on a highdimensional system of coupled nonlinear Kuramoto oscillators.
+The remainder of the work is organized as follows. Section 2 provides a mathematical background overview of the DMD and kernel methods. Section 3 introduces our kernel learning procedure for dynamical systems, including the sparse dictionary learning with Cholesky updates. We demonstrate how to extract interpretable structures from these kernel models, such as robust linear DMD models, in Section 4. Results on a variety of nonlinear dynamical systems are presented in Section 5. Finally, Section 6 concludes with a discussion of limitations and suggested extensions of the method, providing a comparison with the related DMD, eDMD/kDMD, and SINDy approaches, also summarised in Fig. 4. In the appendices we explicate the connection between our method and DMD, demonstrate how one can incorporate the effects of control, present the equations for online updating, and investigate the sensitivity of the algorithm to noise.
+
+4
+
+2 Problem statement and mathematical background
+
+In this section we will define our machine learning problem and review some relevant mathematical ideas related to DMD (Sec. 2.1) and kernel methods (Sec. 2.2).
+We consider dynamical systems describing the evolution of an n-dimensional vector x  Rn that characterizes the state of the system. We will consider both continuous-time and discrete-time dynamics in this work. The dynamics may be expressed either in continuous time as
+d x(t) = F (x(t))
+dt
+or in discrete time as
+
+xj+1 = F (xj).
+
+For a given physical system, the continuous-time and discrete-time representations of the dynamics will correspond to different functions F , although we use the same function above for notational simplicity. In general, the dynamics may also vary in time and depend on control inputs u and parameters ; however, for simplicity, we begin with the autonomous dynamics above.
+Our goal is to learn a tractable representation of the dynamical system F : Rn  Rn that is both accurate and interpretable, informing tasks such as physical understanding, diagnostics, prediction, and control. We suppose that we have access to a training set of data pairs {(xj, yj)  Rn × Rn | j = 1, . . . , m}, which are connected through the dynamics by
+
+yj = F (xj).
+
+(3)
+
+If the dynamics continuous in time, yj = x j, where the dot denotes differentiation in time, and if the dynamics are expressed in discrete time yj = xj+1. The discrete-time formulation is more common, as data from simulations and experiments is often sampled or generated at a fixed sampling interval t, so xj = x(jt). However, this work applies to both discrete and continuous systems, and the only practical difference arises in the eigenvalues of linearized models.
+The training data correspond to m snapshots in time of a simulation or experiment. For ease of notation, it is typical to arrange the samples into snapshot data matrices of the form
+
+| |
+
+|
+
+| |
+
+|
+
+X = x1 x2 · · · xm , Y = y1 y2 · · · ym .
+
+(4)
+
+||
+
+|
+
+||
+
+|
+
+In many applications the state dimension is much larger than the number of snapshots, so m n. For example, the state may correspond to a fluid velocity field sampled on a discretized grid.
+Our machine learning problem consists of finding a function f that suitably maps the training data given certain generalisability, interpretability, and regularity qualifications. In our notation, F is the true function that generated the data whereas f is our model for F ; it is hoped that F and f share some meaningful properties. The function f is typically restricted to a given class of models (e.g., linear, polynomial, etc.), so that it may be written as the expansion
+
+N
+
+f (x)  jj(x) = f (x)  (x).
+
+(5)
+
+j=1
+
+Here,  describes the feature library of N candidate terms that may describe the dynamics, and  contains the coefficients that determine which model terms are active and in what proportions.
+
+5
+
+explicit model
+
+implicit kernel model
+
+dictionary-based kernel model
+
+Figure 3: Schematic relationships between different models for N n, m m~ . An explicit model (e.g. SINDy) produces explicit weights that connect N features to n outputs. A kernel model uses fewer weights but the relationships between variables are stored implicitly. The dictionary-based kernel model selects the most active samples and therefore uses fewer weights still.
+
+Mathematically, the optimisation problem to be solved is
+
+argmin Y - (X) F + R()
+
+(6)
+
+
+
+where · F is the Frobenius (Hilbert­Schmidt) norm. The first term in (6) corresponds to the error between training samples and our model prediction, whereas the second term R() is a regularizer. For example, in SINDy, the feature library  will typically include linear and nonlinear terms, and the regularizer will involve the number of nonzero elements  0, which may be relaxed to the 1-norm  1. In DMD, the features  will simply contain the state x,  will be the DMD matrix A, and instead of a regularizer R(), the minimization is constrained so that the rank of A =  is equal to r. Similarly, in extended DMD, the feature  will include nonlinear functions of the state, and the minimization is modified to argmin (Y ) - (X) F + R(), resulting in a  that is a large square matrix evolving the nonlinear feature space forward in time.
+For even moderate state dimensions n and feature complexity, such as the order of monomials d, the feature library of  becomes prohibitively large and the optimization in (6) is intractable. This scaling issue is the primary challenge in applying SINDy to high-dimensional systems. Instead, it is possible to rewrite the expansion (5) in terms of an appropriate kernel function k as
+
+m
+
+f i(x)  wijk(xj, x) = f (x)  W k(X, x).
+
+(7)
+
+j=1
+
+In this case, the sum is over the number of snapshots m instead of the number of library elements p, dramatically improving the scaling. The optimization in (6) now becomes
+
+argmin Y - W k(X, X) F + R(W ).
+
+(8)
+
+W
+
+We will show that it is possible to improve the scaling further by using a kernel defined on a sparse dictionary X~ . Figure 3 shows our dictionary-based kernel modeling procedure, where the explicit model on the left is a SINDy model, and the compact model on the right is our kernel model. Thus, our kernel learning approach may be viewed as a kernelized SINDy without sparsity promotion.
+Based on the implicit LANDO model, it is possible to efficiently extract the linear component L of the dynamics, along with a matrix for the nonlinear forcing:
+
+Y = LX + N
+
+(9)
+
+6
+
+Figure 4: A comparison of methods for model discovery, including DMD [2, 3], extended/kernel DMD [6, 7]), SINDy [8], and the proposed LANDO framework.
+
+where here N = N (x1) N (x2) · · · N (xm) is a nonlinear snapshot matrix, where each column is the nonlinear component of the dynamics at that instant in time. Although this is not an explicit expression for the nonlinear dynamics, as in SINDy, knowing the linear model and nonlinear forcing will enable data-driven resolvent analysis [55], even for strongly nonlinear systems. Technically, (9) may be centered at any base point x¯, resulting in
+
+yj = L xj + N (xj)
+
+(10)
+
+where x = x - x¯. We will also show that the linear model L may be represented efficiently without being explicitly constructed, as in DMD.
+Figure 4 compares the proposed LANDO architecture with the leading data-driven model regression techniques it builds upon: DMD, extended/kernel DMD, and SINDy. The extended DMD algorithm has already been kernelized [6, 7], enabling efficient approximations to the Koopman operator with very large feature spaces. Although it is related to the present work, the goal of eDMD/kDMD is to obtain a square representation of the dynamics of measurement functions in a Hilbert space or feature space (x), rather than a closed representation of the dynamics in the original state x. In this way, our approach more closely resembles the SINDy procedure, but kernelized to scale to arbitrarily large problems. We will also show that even though the representation of the dynamics is implicit, it is possible to extract explicit model structures, such as the linear component and other relevant quantities, from the kernel representation.
+In the following subsections, we will outline the DMD, eDMD, and SINDy algorithms and provide an introduction to kernel methods that will be used throughout this work.
+
+7
+
+2.1 Dynamic mode decomposition
+
+The original dynamic mode decomposition (DMD) algorithm of [2] was developed as a datadriven method for decomposing high-dimensional snapshot data into a set of coherent spatial modes, along with a low-dimensional model for how these mode amplitudes evolve linearly in time. As such, DMD may be viewed as a hybrid algorithm combining principal component analysis (PCA) in space and the discrete-time Fourier transform (DFT) in time [56]. DMD has been adopted in a wide range of fields beyond fluid mechanics, including epidemiology [57], neuroscience [58], video processing [59, 60], robotics [61­64], finance [65], power grids [66, 67], and plasma physics [68, 69]. Much of this success stems from the formulation of DMD as a linear regression problem [4], based entirely on measurement data, resulting in several powerful extensions [5], including for control [34], sparsity promoting DMD [70], recursive DMD [71], multiresolution analysis [72], streaming data [73], for non-sequential time-series [4, 33] and for data that is under-resolved in space [74, 75] or time [76].
+The original algorithm was refined by [4] who phrased DMD in terms of the Moore­Penrose pseudoinverse thereby allowing snapshots that are not equally spaced in time; this variant is called exact DMD and will be the main form of DMD used in this paper. In appendix D we will show that exact DMD may be viewed as a special case of our new method.
+As mentioned in the previous section, it is assumed that each xj and yj are connected by a dynamical system of the form yj = F (xj). The aim of DMD is to learn information about F by approximating it as a linear operator and then performing diagnostics on that approximation. In particular, DMD seeks the linear operator A that best maps the sets {xj} and {yj} into one another:
+
+yj  Axj
+
+for j = 1, . . . , m.
+
+(11)
+
+Expressed in terms of the snapshot matrices in (4), (11) becomes
+
+Y  AX,
+
+(12)
+
+and the minimum norm solution (without regularisation) is
+
+A = argmin Y - AX F = Y X
+
+(13)
+
+A
+
+where  indicates the Moore­Penrose pseudoinverse [77]. If X has the singular value decomposi-
+
+tion
+
+X = U V 
+
+(14)
+
+then
+
+A = Y V U .
+
+(15)
+
+Note that A is an n × n matrix so may be extremely large in practical scenarios where n 1. Thus, it is common to use a rank-r approximation for A, denoted by A^ , where r n. To construct A^ , we construct a rank r approximation for X using the truncated singular value decomposition: X  U rrV r. This approximation is optimal according to the Eckart­Young theorem [78]. The
+matrix A is then projected onto the column space of Xr as
+
+A^
+
+=
+
+U
+
+ r
+
+AU
+
+r
+
+=
+
+U rY
+
+V
+
+r-r 1.
+
+(16)
+
+Since A^ is an r × r matrix, it is now feasible to compute its eigendecomposition as
+
+A^ ^ = ^ .
+
+(17)
+
+8
+
+It was proved by [4] that the eigenvectors of the full matrix A can be approximated from the
+
+reduced eigenvectors  by
+
+ = Y V -1^ .
+
+(18)
+
+This eigendecomposition has many favourable properties. Firstly, it is an approximation to the spectrum of the underlying Koopman operator of the system [3]. Secondly, if the snapshots are equally spaced in time and yj = xj+1 then the data can be reconstructed in terms of the eigenvectors and eigenvalues as
+
+xj = j-1a
+
+(19)
+
+where the vector a contains the mode amplitudes often computed as a = x1. The above provides a clear physical interpretation of the modes: the eigenvectors  are the spatial modes whereas the eigenvectors  correspond to the temporal component.
+
+2.1.1 Sparse identification of nonlinear dynamics
+The SINDy algorithm [8] was developed based on the observation that many complex dynamical systems may be expressed as systems of differential equations with only a few terms, so that they are sparse in the feature space (x). Thus, it is possible to solve for an expansion of the dynamics in (5) with only a few nonzero entries in , corresponding to the active terms in the (x) that are present in the dynamics. Solving for the sparse vector of coefficients, and therefore the dynamical system, is achieved through the following optimization
+
+argmin Y - (X) F +   0.
+
+(20)
+
+
+
+The · 0 term is not convex, although there are several relaxations that yield accurate sparse models. The SINDy algorithm has also been extended to include partially known physics [50], such as conservation laws and symmetries, dramatically improving the ability to learn accurate models with less data. It is also possible with SINDy to disambiguate the linear and nonlinear model contributions, enabling linear stability analyses, even for strongly nonlinear systems. However, the feature library (x) scales poorly with the state dimension n, so SINDy is typically only applied to relatively low-dimensional systems. A recent tensor extension to SINDy [46] provides the ability to handle much larger libraries, which is very promising. In the present work, we use kernel representations to obtain tractable implicit models that may be queried to extract structure, such as the disambiguated linear terms.
+
+2.1.2 Extended DMD
+
+The extended DMD [6] was developed to improve the approximation of the Koopman operator by augmenting the DMD vector x with nonlinear functions of the state, similar to the feature vector (x) above. However, instead of modeling xk+1 as a function of (xk), as in SINDy, eDMD models the evolution of (xk+1), which results in a much larger regression problem.
+
+argmin (Y ) - (X) F .
+
+(21)
+
+
+
+This approach was then kernelized [7] to make the algorithm computationally tractable.
+
+9
+
+2.2 Kernel methods
+
+Kernel methods are a class of statistical machine learning algorithms that perform efficient com-
+putations with high-dimensional nonlinear features [38, 39]. Kernel methods have found appli-
+cations in adaptive filtering [79, 80], nonlinear principal component analysis [81, 82], nonlinear
+regression [49], classification [83, 84], and support vector machines [85]. The broad success of ker-
+nel machines stems from their ability to efficiently compute inner products in a high-dimensional,
+or even infinite-dimensional, nonlinear feature space. Thus, if a conventional linear algorithm
+can be phrased exclusively in terms of inner products then it can be "kernelised" and adapted for
+nonlinear problems. This "kernel trick" has been used to great effect in the above applications. Kernels are continuous functions k : Rn × Rn  R, and a kernel is a Mercer kernel if it is posi-
+tive definite; i.e. for any collection of vectors xj  Rn, the matrix K defined by [K]i,j = k(xi, xj) is positive definite. By Mercer's Theorem [86] it follows that there exists a Hilbert space Hk and a mapping  : Rn  Hk such that k(x, x ) = (x), (x ) . In other words, every Mercer kernel can be interpreted as an inner product in the Hilbert space Hk, which may be of an otherwise inaccessible dimension. Every element g  Hk can be expressed as a linear combination
+
+M
+
+g(x) = jk(xj, x)
+
+(22)
+
+j=1
+
+for some M  N, i  Rn and xj  Rn. We drop the word 'Mercer in the remainder of the article, and assume that all kernels are Mercer kernels.
+An important result in the theory of kernel learning is the representation theorem. First proved by [87] and then generalised by [88], the representation theorem provides very general conditions where kernel methods can be used to solve machine learning problems. For the purposes of the present work, the representation theorem may be stated thus: for a set of pairs of m training samples, (x1, y1), . . . , (xm, ym), the solution to the minimisation problem
+
+argmin Y - f (X) F + R(f )
+
+(23)
+
+f Hk
+
+may be expressed as
+
+m
+
+f (x) = wjk(xj, x)
+
+(24)
+
+j=1
+
+for vectors wj  Rn. One important consequence of the representation theorem is that the solution to the optimisation problem (23) can be expressed as a linear combination of kernel functions whose first arguments are the training data. Contrast this with the general representation of members of Hk in (22) where the parameters xj are not known. The representation theorem allows us to avoid an exhaustive search for the optimal parameters, thereby reducing the problem to a (linear) search for the weights wj. In the above,  > 0 is a regularisation parameter and the regulariser on f is to be interpreted as the norm associated with k:
+
+2
+
+m
+
+mm
+
+R(f ) = f 2 =
+
+wjk(xj, ·) =
+
+wj wik(xj, xi).
+
+(25)
+
+j=1
+
+i=1 j=1
+
+10
+
+2.2.1 An illustrative example
+
+The discussion of kernels has thus far been rather abstract; we now make the theory concrete by illustrating an application of the usefulness of kernel methods. This simple example is often used in kernel tutorials [7, 38].
+Consider a three-dimensional state, x  R3, upon which we want to perform some machine learning task such as regression or classification. Suppose that we know ­ from either physical intuition, empirical data, or experience ­ that the system is governed by pairwise quadratic interactions between the state variables. Thus, our machine learning model should operate in the nonlinear feature space defined by
+
+(x) = x1x2 x1x3 x2x3 x21 x22 x23 T  R6.
+
+(26)
+
+Almost every machine learning algorithm uses inner products to measure correlations between
+
+samples. Computing inner products in a feature space of dimension N costs 2N - 1 operations:
+
+N products and N - 1 summations. Thus, in this example, computing inner products in the
+
+nonlinear feature space would usually require 11 operations. However, we still need to form the
+
+feature vector (x), which costs a further 6 products, raising the total count to 17 operations.
+
+Equivalently, we could build our model in the slightly rescaled feature space:
+
+ (x) = 2x1x2
+
+ 2x1x3
+
+ 2x2x3
+
+x21
+
+x22
+
+x23
+
+T
+.
+
+(27)
+
+Now note that inner products in this feature space may be expressed as
+
+(x), (x ) = 2x1x1x2x2 + 2x1x1x3x3 + 2x2x2x3x3 + x21(x1)2 + x22(x2)2 + x23(x3)2
+
+= x1x1 + x2x2 + x3x3 2
+
+= x, x 2 .
+
+(28)
+
+Thus, we can compute the inner product (x), (x ) in merely 6 operations by computing the inner product x, x and then squaring the result. In other words, computing the inner product amounted to evaluating the kernel k(u, v) = (uT v)2. Moreover, while computing the inner product with the kernel, we never explicitly formed the feature space, and therefore did not need to store  in memory. In summary, if we use expression (28) then the cost of computing inner products falls from 17 operations to 6 operations.
+This may seem a modest saving but the cost of computations in feature space explodes as the state dimension or degree of nonlinearity increase. For a state of dimension n, the number of degree d monomial features is1
+
+n + d - 1 (n + d - 1)!
+
+N=
+
+=
+
+.
+
+d
+
+d! (n - 1)!
+
+(29)
+
+Thus, explicitly forming vectors in this feature space is extremely expensive, as is computing inner products. For example, for an n-dimensional state, the number of possible quadratic interactions between states is n(n - 1)/2. This scaling of the feature vector is the prime limitation of SINDy.
+Instead of explicitly forming this vast feature space we instead work with suitably chosen kernels. The feature space of degree d monomials can be represented using the polynomial kernel
+
+k(u, v) = (uT v)d.
+
+(30)
+
+Thus, using the kernel (30) to compute inner products reduces the operation count from 2N - 1 to 2n, which is significant when the state space is large and the nonlinearity is quadratic or higher.
+1This can be thought of as the number of ways of distributing d unlabelled balls into n labelled urns.
+
+11
+
+3 Learning kernel models with sparse dictionaries
+
+We now develop the main learning method presented by this paper. The procedure is based on the kernel recursive least squares (KRLS) algorithm of [49] but is more stable and allows further interpretation and analysis of the learned model. We specifically tailor this approach to learn dynamical systems in a robust and interpretable framework. Recall that we are solving the optimization problem defined in (6) for a nonlinear function f that approximates the dynamics. By the representer theorem, we may express the dynamical system approximation f from (5) in the kernelized form (24) as:
+
+p
+
+m
+
+f (x)  jj(x) = wjk(xj, x).
+
+(31)
+
+j=1
+
+j=1
+
+Arranging the column vectors wj into a matrix W allows us to write f (x) = W k(X, x) so the optimisation problem is
+
+argmin Y - W k(X, X) F + R(f ).
+
+(32)
+
+W
+
+Theoretically, a solution to (32), in the absence of regularisation, is provided by the Moore­Penrose pseudoinverse:
+
+W = Y k(X, X).
+
+(33)
+
+As noted by [49], there are three practical problems with the above solution:
+· NNuummeerriiccaall ccoonnddiittiioonniinngg: even though the kernel matrix may formally have full rank, it will usually have a very large condition number since the samples can be almost linearly dependent in the feature space. When the condition number is large, the condition number of the pseudoinverse will also be large and W will amplify noise by a corresponding amount.
+
+· OOvveerrfifittttiinngg: The weight matrix W has mn entries, which is equal to the number of constraining equations in (32). Thus, there is a risk of overfitting, which can limit the generalisability of the model and make it sensitive to noise.
+
+· CCoommppuuttaattiioonnaall ccoommpplleexxiittyy: In nonlinear system identification we usually need a large number of samples to adequately learn the system. When there are m 1 samples, constructing the pseudoinverse k(X, X) requires O(m3) operations to construct and O(m2) space in memory, which can become prohibitively expensive. Additionally, evaluating the model f for prediction or reconstruction requires multiplying the m×n weight matrix by the m-vector of kernel evaluations, which will also become expensive for large sample sets.
+
+To address these issues, Engel et al. [49] proposed an online form of dimensionality reduction that iteratively constructs a dictionary of samples that capture the salient features of the underlying dynamics. The key idea is that the model f defined in (24) can be approximated by
+
+f (x)  W~ k(X~ , x)
+
+(34)
+
+for a suitable choice of X~ known as the dictionary; in this paper the tilde symbol indicates that a quantity is connected to the dictionary. Then, the optimisation (32) may be approximated as
+
+argmin Y - W~ k(X~ , X) + R(f ).
+
+(35)
+
+W~
+
+F
+
+12
+
+The dictionary is constructed by considering each sample and determining whether they should be included in the dictionary. Membership of a sample in the dictionary is decided by checking if the sample can be approximated in the feature space using the current dictionary. This scheme is called the `almost linearly dependent' (ALD) test: if a sample is approximately linearly dependent on the current dictionary then it is not added, otherwise the dictionary must be updated with the current sample. Thus, the dictionary is a sparse2 subset of samples that spans the largest subspace in the data. Usually, the size of the dictionary is much smaller than the number of samples.
+The dictionary learning procedure searches the high-dimensional feature space for a lowdimensional subspace where most of the dynamics take place. This approach is similar to kernel principal component analysis (KPCA, [81]), though we argue that ALD dictionary learning is more physically interpretable. KPCA conflates the feature space representations of samples, and the result usually has no interpretation in the original physical space. For example, if the feature space is (x) = [x1 x2 x1x2]T then certain datasets could produce a principal component of ^ = [1 1 0]T . However, such a vector is unrealisable in the original physical space because if the x1x2 component is zero then at least one of x1 and x2 must also be zero. Thus, there is no clear interpretation of the principal components in the original state space; indeed, as we have demonstrated, the principal components may be mathematically inconsistent. The problem of identifying the state space vector that is closest to a given principal component in the feature space is known as the pre-image problem [82, 89] and is usually solved via an iterative optimisation procedure. It was shown in [49] that ALD dictionary learning may be viewed as an approximate form of KPCA. Additionally, the dictionary has a clear physical interpretation since every member it contains is simply the state vector system at a specific time. Thus, ALD dictionary learning may be preferable to KPCA when studying physically motivated problems.
+
+3.1 Sparse dictionary learning
+
+The dictionary at time t is defined as a collection of m~ t vectors, Dt = {x~j | j = 1, · · · , m~ t}, and is initialised with D1 = {x1}. We write
+
+| |
+
+|
+
+| |
+
+|
+
+Xt = x1 x2 · · · xt, Y t = y1 y2 · · · yt
+
+(36)
+
+||
+
+|
+
+||
+
+|
+
+to represent data matrices including all samples up to snapshot t. We may also represent the dictionary in terms of data matrices as
+
+| |
+
+|
+
+X~ t = x~1 x~2 · · · x~m~ t,
+
+(37)
+
+||
+
+|
+
+and in feature space as
+
+|
+
+|
+
+|
+
+~ t =  (x~1)  (x~2) · · ·  (x~m~ t).
+
+(38)
+
+|
+
+|
+
+|
+
+When a new element is introduced, we determine how much new information it could add to our model. In other words, how well can the new element be approximated using the members
+2We use the term `sparse' carefully here. The dictionary is actually a dense matrix but consists of a small number of the total samples. This is the terminology used in the original work of [49].
+
+13
+
+of the current dictionary. The degree to which the current sample can be well-represented by the dictionary in feature space is quantified by
+
+t = min
+
+(xt) - ~ t-1t
+
+2
+.
+
+(39)
+
+t
+
+2
+
+The number t represents the minimum distance between the current sample and the span of the current dictionary and t specifies the linear combination of dictionary elements that minimises this distance. Having calculated t, detailed below, we compare it to a user-defined sparsification threshold . If t   then the new sample xt can be approximated in the feature space using linear combinations of members of the dictionary. Thus, the new sample is ALD on the dictionary elements in the implicit feature space. If t >  then the new sample cannot be well-approximated by the current dictionary. Thus, the new sample contributes meaningful information that was not already present in the dictionary and the dictionary should be updated with the current sample.
+By expanding the norm and using properties of kernels, we can show that
+
+t = ktt - k~t-1t
+
+(40)
+
+where the minimiser is
+
+t
+
+=
+
+K~
+
+-1 t-1
+
+k~ t-1
+
+(41)
+
+and
+
+ktt = k(xt, xt),
+
+k~t-1 = k(X~ t-1, xt)  Rm~ t-1 .
+
+(42)
+
+The
+
+kernel
+
+matrix
+
+K~
+
+-1 t-1
+
+and
+
+its
+
+inverse
+
+should
+
+be
+
+updated
+
+whenever
+
+an
+
+element
+
+is
+
+added
+
+to
+
+the
+
+dictionary. The update equations are respectively
+
+K~ t-1 K~ t =  k~t-1
+
+k~ t-1  ,
+ktt
+
+K~
+
+-1 t
+
+=
+
+K~ -t-11 
+
++
+
+tt /t
+
+-t /t
+
+ -t/t
+.
+1/t
+
+(43)
+
+The
+
+above
+
+expression
+
+for
+
+K~
+
+-1 t
+
+is
+
+mathematically
+
+correct
+
+but
+
+numerically
+
+unstable.
+
+This
+
+is
+
+a
+
+source
+
+of rounding errors when working with the polynomial kernels that we use in practice. This insta-
+
+bility arises through the large condition number of the matrix K~ t. This issue is typical of kernel
+
+methods, which are often plagued with problems of numerical stability due to the large condition
+
+numbers associated with kernel matrices. This seems to not be an issue for the Gaussian kernels
+
+that were used in the original KRLS formulation of [49], but it becomes important when work-
+
+ing with the polynomial kernels that arise in physical applications. To circumvent these issues,
+
+we
+
+avoid
+
+constructing
+
+the
+
+ill-conditioned
+
+matrices
+
+K~ t
+
+and
+
+K~
+
+-1 t
+
+explicitly.
+
+In
+
+particular,
+
+as
+
+K~ t
+
+is
+
+positive
+
+definite
+
+it
+
+admits
+
+a
+
+unique
+
+Cholesky
+
+decomposition
+
+K~ t
+
+=
+
+C
+
+tC
+
+ t
+
+where
+
+Ct
+
+is
+
+a
+
+lower-
+
+triangular m~ t × m~ t matrix [77]. Instead of updating K~ t according to (43), we instead update and
+
+store its Cholesky factor. The Cholesky factor is initialised as C1 = k11 and the update rule is
+
+
+
+
+
+Ct-1 0
+
+Ct = 
+
+
+
+(44)
+
+st ct
+
+where st = C-t-11k~t can be formed in O(m~ 2t ) operations by backsubstitution and ct = ktt - st st. Rounding errors can still accumulate and produce an imaginary value for ct, so in practice one
+
+14
+
+KRLS mis-identifies dictionary elements
+
+distance from dictionary, dictionary size,
+
+Cholesky and batch methods agree
+
+benchmark (batch)
+unmodified KRLS
+proposed Cholesky update method
+
+current sample, t
+
+current sample, t
+
+(a)
+
+(b)
+
+Figure 5: Comparing the ALD dictionaries computed by the original KRLS algorithm, the
+
+Cholesky updating variant and a batch offline algorithm when applied to a solution of the viscous
+
+Burgers' equation. The kernel here is quadratic and the sparsity parameter is  = 0.1. Figure (a)
+
+shows the computed distance of each sample from the span of the current dictionary, which deter-
+
+mines whether the current sample should be added to the dictionary. Figure (b) plots the growth
+
+the dictionary as more samples are considered. The original KRLS algorithm mis-idenfities dictio-
+
+nary elements and the corresponding dictionary is larger than necessary.
+
+can use ct = max 0,
+
+ktt - st st .
+
+In
+
+summary,
+
+multiplication
+
+by
+
+the
+
+inverse
+
+K~
+
+-1 t
+
+should
+
+be
+
+interpreted and implemented as solving a linear system with two back substitutions of Ct. Thus,
+
+we can compute the distance of a sample from the dictionary (40) without ever forming the illconditioned matrices K~ t and K~ -t 1. The full dictionary can be learned in O(mm~ 2 + nmm~ ) time.
+Updated Cholesky factors significantly improve dictionary learning. Figure 5 illustrates the
+
+improvement by comparing three methods of dictionary learning. We evaluate the efficacy of
+
+each method by their accuracy in computing t for each sample, which represent the algorithm's
+
+estimate of the distance of sample t from the current dictionary. Recall that t determines whether
+
+the current sample should be included in the dictionary so accurate computation of t is essential.
+
+The first method is the original KRLS formulation, which uses (43) to compute t with (41). The
+
+second method is the Cholesky updating formulation presented here, which uses (44) to compute
+
+t
+
+as
+
+opposed
+
+to
+
+constructing
+
+K~ t
+
+or
+
+K~
+
+-1 t
+
+explicitly.
+
+The third method is a batch method that
+
+computes
+
+K~
+
+-1 t-1
+
+from
+
+scratch
+
+at
+
+each
+
+iteration
+
+and
+
+doesn't
+
+use
+
+the
+
+estimates
+
+of
+
+K~
+
+-1 t
+
+or
+
+Ct
+
+at
+
+the
+
+previous iteration. We take the batch method to be the ground truth, although there will still be
+
+some numerical instability associated with the large condition number of K~ t. Although accurate,
+
+the batch method is also prohibitively expensive at large scales, with each iteration costing O(m~ 3)
+
+as opposed to the updating methods which cost merely O(m~ 2). The data here are chronologically
+
+ordered samples from a simulation of the viscous Burgers' equation (see Sec. 5.3), and we use a
+
+quadratic kernel with sparsity threshold  = 0.1. Figure 5a indicates that the first seven samples
+
+are all added to the dictionary. After this transient period, most new samples are well-represented
+
+by the current dictionary and are therefore excluded. Occasionally, the data drift sufficiently far
+
+away from the dictionary that a new sample must be included. This is illustrated by the spikes
+
+appearing in the batch method and the Cholesky updating method in figure 5a. Physically, this
+
+indicates that the solution of the PDE has departed from what can be adequately described by
+
+the dictionary of previous samples. The results indicate that the batch method and Cholesky
+
+update method select identical dictionaries, whereas the KRLS dictionary learning algorithm mis-
+
+15
+
+Algorithm 1 Sparse ALD dictionary learning with Cholesky updates The operation count for each step is included on the right
+Inputs: data matrix X, kernel k, sparsification tolerance  Output: the sparse dictionary X~
+for t = 1  m do Select new sample xt Compute k~t-1 with (42) Compute t with backsubstitution (41) Compute t using (40) if t   (almost linearly dependent) then Maintain the dictionary: Dt = Dt-1 else if t >  (not almost linearly dependent) then Update the dictionary: Dt = Dt-1  {xt} Update the Cholesky factor Ct using (44) end if
+end for
+
+O(nm~ t) O(m~ 2t ) O(m~ t)
+O(m~ 2t )
+O(m~ 2t )
+
+identifies a large number of dictionary elements. Moreover, figure 5b shows that the KRLS dictionary is more than twice the size of the correct dictionary. In summary, figure 5 indicates that the Cholesky factor method significantly improves the accuracy of the learned dictionaries.
+In the feature space, we may express all the samples up to time t as
+
+t = ~ tt + rt es
+
+(45)
+
+where
+
+| |
+
+|
+
+t = 1 2 · · · t  Rm~ t×t
+
+(46)
+
+||
+
+|
+
+maps the m~ t dictionary elements into the t feature vectors with small residual error rtes. By causality, the lower triangular elements of t are zero. Only the online version of the algorithm (see appendix B) uses t explicitly, and only requires t at time t. Thus, t can be overwritten at each iteration to save memory. Pseudocode for the procedure may be found in algorithm 1.
+Alternatives to this proposed dictionary learning procedure include randomised methods [90, 91] and the recent method in [46].
+
+3.2 Batch regression learning
+
+Once the dictionary has been learned, the optimisation becomes the tractable problem defined in (35). There are many methods available to find the weights W~ from (35); in the absense of further regularisation on W~ , we use the Moore­Penrose pseudoinverse:
+
+W~ = Y k(X~ , X).
+
+(47)
+
+The computation of the pseudoinverse is far cheaper than the full solution (33) and avoids the issues described earlier. Thus, we are left with two quantities that together define the nonlinear model in (34): the final dictionary matrix X~ with m~ columns and the final set of weights W~ .
+The model may also be learned in a purely online fashion (see appendix B), which is useful when working with streaming data. The algorithm is also applicable to situations where the system is forced by an exogenous control variable: details are provided in appendix C.
+
+16
+
+4 Extracting and enforcing physical structure with kernel machines
+Having calculated the kernel weights W~ , we may now construct our model f (x) = W~ k(X~ , x) from (34). This kernel model is implicit: without further analysis we cannot interpret the model and understand the physical relationships that the model has learned. In this section we present techniques that extract physically interpretable structures from the kernel model f .
+
+4.1 Extracting structure from kernel machines: the linear operator
+
+One means of providing insight and interpretability is to analyze the linear component of f relative to some state. In particular, suppose we consider perturbations (not necessarily of small amplitude) about a base state x which may correspond to the mean of the data, an equilibrium solution, or simply the zero vector. We define the perturbations about the base state as x so that x = x + x . A typical approach is to seek a representation of our model of the form
+
+f (x) = c + Lx + N (x )
+
+(48)
+
+where L is a linear transformation, c is a constant, and and N is a nonlinear operator such that
+
+lim N (x ) 2 = 0.
+
+(49)
+
+x 20 x 2
+
+In words, condition (49) restricts N so that it is purely nonlinear with respect to the base state x. If L and c are known, then rearranging (48) obtains the nonlinear fluctuations as N (x ) = f (x) - L(x ) - c.
+Numerically computing the linear component of a high-dimensional nonlinear operator can be computationally expensive. For example, neural networks use stochastic gradient descent to estimate the local slopes of high-dimensional functions for optimization. By virtue of our use of kernels, we can extract the linear component analytically. We will illustrate this first with a simple kernel, and then provide the formulas for more general kernels.
+First, suppose that the implicit feature space is of the form
+
+a
+
+(x) =  Dx 
+
+(50)
+
+(x)
+
+where a is a constant (possibly zero), D is a diagonal transformation that scales the data, and  is a nonlinear function that satisfies (49). Such feature spaces arise when using polynomial kernels (73). An alternative but equivalent representation of the model (34) is
+
+f (x) = W~ ~  (x).
+
+(51)
+
+Thus, f may be expressed as
+
+f (x) = W~ a1
+
+DX~ 
+
+a (X~ )  Dx  = W~
+
+a21 +
+
+DX~  Dx + (X~ )(x)
+
+(52)
+
+(x)
+
+where 1 is column vector of m~ ones. Simply reading off the term proportional to x gives L and the constant term gives c as
+
+L = W~ X~ D2, c = a2W~ 1.
+
+(53)
+
+17
+
+The constant c is the sum of the rows of W~ multiplied by a2. For example, in the case of the
+
+quadratic kernel k(x, y) = (1 + xy)2, the feature space is
+
+(x) = 1
+
+ 2x1
+
+ 2x2
+
+...
+
+ 2xn
+
+x21
+
+ 2x1x2
+
+ 2x1x3
+
+...
+
+x22
+
+ 2x2x3
+
+...
+
+x2n  .
+
+(54)
+
+so a = 1,
+
+ D = 2I,
+
+(x) = x21
+
+ 2x1x2
+
+ 2x1x3
+
+...
+
+x22
+
+ 2x2x3
+
+...
+
+x2n  .
+
+(55)
+
+The above analysis is valid for a specific type of kernel and the base state x = 0. Nevertheless, the underlying idea can be generalised to arbitrary kernels and base states x by considering the Taylor expansion of f about x:
+
+f (x) = f (x) + f (x)|x=x x + higher-order terms.
+
+(56)
+
+Thus, f (x) can be expressed in the form (48) where
+
+c = f (x), L = f (x)|x=x ,
+
+N (x ) = f (x) - f (x) - f (x)|x=x x .
+
+Accordingly, to compute c, L, and N we need only compute f and f . Since our model consists of linear combinations of kernels (34), the gradient is simply
+
+f (x) = W~ k(X~ , x).
+
+(57)
+
+The gradient k can usually be computed analytically in a straightforward manner. For example, for polynomial kernels (73) we have
+
+k(X~ , x) = X~ d
+
+diag[c + X~ x]
+
+d-1
+.
+
+(58)
+
+The special case in (53) is recovered by taking d = 2, c = 1, and x = 0. For Gaussian kernels (74), the gradient is
+
+k(X~ , x)
+
+=
+
+-1 2
+
+X~
+
+
+
+diag
+
+x~j - x
+
+2
+
+exp
+
+-
+
+x~j - x
+
+2 2
+
+/(22)
+
+.
+
+(59)
+
+Similar expressions can be derived for any kernel function or any combination of kernels. Note that the gradients (53), (58), and (59) all take the form k = X~ S where S is a diagonal
+m~ × m~ matrix. Indeed, a straightforward application of the chain rule shows that k takes this form for any nonlinear combination of distance kernels and inner product kernels (defined in section 4.4). Thus, for this extremely broad class of kernels, the linear operator may be expressed in the general form
+
+L = W~ X~ S
+
+(60)
+
+where S is a diagonal matrix that depends only the choice of kernel and base state. In the case m~ n, the expression (60) is computationally attractive since L need not be stored
+explicitly; instead of storing a large n × n matrix it is sufficient to store two n × m~ matrices and a diagonal m~ × m~ matrix. Additionally, the potentially expensive matrix multiplications involved in forming L can be avoided in most practical scenarios. For example, it is not necessary to form L explicitly if all that is required is its eigendecomposition, as with DMD.
+
+18
+
+4.2 Extracting structure from kernel machines: the dynamic mode decomposition
+
+We can exploit the factorisation in (60) to perform a dynamic mode decomposition of the linear operator L. This step can be computationally expensive as L is an n×n matrix so the eigendecomposition costs O(n3) operations. However, we can obtain the leading eigenvectors and eigenvalues by computing the eigendecomposition of a much smaller matrix that is (at most) m~ × m~ . This idea is formalised in the following lemma.
+
+Lemma 1: DDyynnaammiicc mmooddee ddeeccoommppoossiittiioonn ooff tthhee lliinneeaarr ooppeerraattoorr.
+Let SX~ = U V  be the (economy) singular value decomposition of the rescaled dictionary and L^ = U LU be the projection of L from (60) onto the columns of U . If L^ ^ = ^ with  = 0 then
+
+ = 1 W~ V ^ 
+
+(61)
+
+is an eigenvector of L with eigenvalue . Additionally, all non-zero eigenvalues of L are eigenvalues of L^ .
+The operator L^ represents the projection of the full linear operator L onto the principal components (proper orthogonal decomposition modes) of the rescaled dictionary SX~ . These principal
+components can be computed via a batch SVD or computed online in parallel with the dictionary
+and regression through a series of rank-one updates [92, 93]. This lemma is significant since it im-
+plies that every non-zero eigenvalue of L can be obtained by computing the eigendecomposition of the smaller matrix L^ . Furthermore, the eigendecomposition produces an eigenvector of L that
+corresponds to each eigenvalue.
+We now prove the lemma using similar arguments to those used in theorem 1 of [4].
+
+Proof. We first show that the pair (, ) is indeed an eigenvector/eigenvalue pair. Assume that L^ ^ = ^ for  = 0 and define
+
+G = W~ V 
+
+(62)
+
+so
+
+that
+
+
+
+=
+
+1 
+
+G^ .
+
+By
+
+(60)
+
+and
+
+the
+
+economy
+
+SVD
+
+of
+
+X~ ,
+
+we
+
+may
+
+write
+
+L
+
+as
+
+L = W~ (U V ) = W~ V U  = GU .
+
+(63)
+
+Similarly,
+
+L^ = U  W~ (U V ) U = U W~ V  = U G.
+
+(64)
+
+Thus,
+
+L = 1 (GU ) G^ = 1 GL^ ^ = G^ = 
+
+
+
+
+
+(65)
+
+as required. We will now prove that every non-zero eigenvalue of L is also an eigenvalue of L^ . Let (, )
+be an eigenvector/eigenvalue pair and define u = U . Then
+
+L^ u = U GU  = U L = U  = u.
+
+(66)
+
+Note also that u is not the zero vector. If it were, then L = GU  = Gu = 0 and therefore  = 0
+which contradicts our assumption that  = 0. Combining this observation with (66) shows that  is also an eigenvalue of L^ .
+
+Pseudocode for extracting the linear operator and computing the dynamic mode decomposition is available in algorithm 2. In appendix D we demonstrate that we recover the exact DMD formulation [4] in the special case of a linear kernel.
+
+19
+
+Algorithm 2 Learning the model and analysing the linear component Inputs: data matrices X and Y , kernel k, dictionary tolerance  Outputs: model f , constant c, linear component L, nonlinear component N , eigenvectors , and eigenvalues 
+Build the dictionary X~ according to algorithm 1 Solve argminW~ Y - W~ k(X~ , X) F (for example, W~ = Y k(X~ , X)) Define S according to (60) Form the model as f (x) = W~ k(X~ , x) Form c, L, and N according to section 4.1 and a choice of base state Compute the eigendecomposition of L^ according to lemma 1 Form the eigenvectors  and eigenvalues  according to (61)
+4.3 Extracting structure from kernel machines: querying nonlinear relationships
+The analysis of section 4.1 showed that we can extract linear relationships from otherwise opaque kernel machines. This section demonstrates that we can also extract specific nonlinear relationships between the input and output states.
+Suppose that we know that the implicit feature space consists of a specific nonlinear scalar feature of interest labelled j(x). For example, we may be interested in the effect of quadratic interactions between two states: j(x) = x1x2. To `query' j(x) is to determine the n-dimensional vector that represents the effect of the nonlinearity j(x) on the elements of the output vector f (x). Without loss of generality, we can decompose the implicit feature vector (x) into j(x) and  (x), where  (x) is the original feature vector with the j(x) element removed. Applying (51) allows us to write
+y = f (x) = W~ (j(X~ ))j(x) + ( (X~ )) (x) .
+Thus, the effect of the features j(x) on f (x) can be determined by simply reading off its coefficient as W~ (j(X~ )). The result corresponds to the j-th column of the explicit  matrix of coefficients from (5).
+4.4 Using partial knowledge of system physics to design kernels
+An informed choice of kernel is critical to the success of kernel machines. Prior knowledge about the physical properties of a system can ­ and should ­ be considered when designing the kernel used for learning. This physical knowledge may include specific symmetries, invariants, and conservation laws that are known to exist in the system under consideration. Similarly, knowledge of the specific partial differential equation governing the dynamics, such as the Navier­Stokes equations for fluids or the nonlinear Schro¨ dinger equation for lasers, may inform candidate terms that should be captured by the kernel. The ability to enforce this type of partial knowledge of the physics is one of the key strengths of the SINDy regression [50], resulting in more accurate and stable models with less training data. Moreover, in addition to enforcing known physics, it is possible to uncover these physical properties when they are unknown based on which kernel functions provide the best validated performance. For example, the success of symmetric kernels suggests a deeper underlying symmetry in the system that generated the training data. In the next section, we will also see that it is possible to test several kernels, and by choosing the kernel with the best validated performance gain insight into what terms might be present in the governing equations.
+20
+
+The choice of kernel has many different perspectives as outlined in chapter 13 of [38]; the most useful perspective in this work is that the kernel defines the function space used by our model. For example, the kernel chosen in section 2.2.1 corresponded to the function space of quadratic monomials. Thus, that kernel can be used to model systems that are dominated by quadratic interactions between the states.
+There are several strategies that can be used to design suitable kernels for a given physical problem. Useful references are chapter 13 of [38] and chapter 3 of [39]. Kernels can be combined to obtain new kernels, which affords significant flexibility when constructing kernels for a given problem. For example, the set of (Mercer) kernels forms a convex cone: for kernels k1 and k2, the conical combination
+
+k(u, v) = 12k1(u, v) + 22k2(u, v)
+
+(67)
+
+is also a kernel. When two kernels are combined in this way, their feature space representations are
+
+scaled and stacked. If the kernels k1,2 induce feature spaces 1,2 then the feature space induced
+
+by k in (67) is
+
+1 1 2 2
+
+.
+
+This construction is useful when designing kernels for a given physical
+
+problem. For example, we may know that a system is dominated by linear and cubic interac-
+
+tions between its states. Thus, we may propose a kernel consisting of conical combinations of
+
+appropriate monomial kernels:
+
+k(u, v) = 12uT v + 32(uT v)3.
+
+(68)
+
+This kernel induces a feature space consisting of purely linear and cubic terms:
+
+(x) = 1x1
+
+···
+
+ 1xn 3x31 33x21x1
+
+···
+
+ 63xn-1xn-2xn-3
+
+3x3n
+
+T
+.
+
+(69)
+
+The constants 1,2 represent the relative importance of the linear and cubic terms and can be chosen through physical intuition or cross validation.
+Another useful result is that kernels are closed under direct sums. If k1 : X1 × X1  R and k2 : X2 × X2  R are kernels then then their direct sum
+
+(k1  k2) (u, u , v, v ) = k1(u, v) + k2(u , v )
+
+(70)
+
+is a kernel on (X1 × X2) × (X1 × X2). This fact can be exploited to design kernels where the inputs
+
+have different meanings or known physics implies different governing laws for the different states.
+
+For example, we could have a state space consisting of two types of measurements so x =
+
+x(1) x(2)
+
+where x(j) are n(j)-dimensional vectors. Suppose also that it is known that the system is governed
+
+by a linear response to x(1) and quadratic interactions of x(2). An appropriate kernel for our model
+
+would then be
+
+k(u, v) = 12 u(1)T v(1) + 22 u(2)T v(2) 2
+
+(71)
+
+which induces the feature space
+
+(x) = 1x(11)
+
+···
+
+1x(n1()1)
+
+2 x(12) 2
+
+ 22
+
+x(12)
+
+x(22)
+
+···
+
+2
+
+x(n2()2)
+
+2T
+.
+
+(72)
+
+Thus far we have only explained how to design kernels for purely polynomial models. Nonpolynomial terms play an important role in many nonlinear systems [94], and these can easily be
+
+21
+
+incorporated into kernel design. For example, l may represent a vector of pointwise trigonometric
+functions that we wish to incorporate into our feature space. The corresponding kernel is simply k(u, v) = l(u)T l(v), which can be combined with any other kernel to supplement the feature
+space with the non-polynomial nonlinearities l.
+Two classes of kernels have received significant attention in applications. Inner product kernels take the form k(u, v) = (uT v) where  is a scalar function. Inhomogeneous polynomial
+kernels are inner product kernels that take the form
+
+k(u, v) = (c + uT v)d
+
+(73)
+
+where c is a constant and d  N is the degree of polynomial. These inhomogenous polynomial kernels are linear combinations of the monomial kernels in (30). The special case c = 0 and d = 1 corresponds to a linear feature space.
+Distance kernels are another important class of kernels and take the form k(u, v) = ( u - v 2). A popular example that is used in several applications is the Gaussian kernel, which is expressed as
+
+k(u, v) = exp
+
+-
+
+u-v
+
+2 2
+
+/(22)
+
+(74)
+
+where  is a constant. The Gaussian kernel is a similarity measure of the state space, and the
+
+induced feature space is infinite dimensional [95].
+
+Supplementing the feature space with a constant can be achieved by combining a kernel with a
+
+constant, such as k = 02 + 12k1, so that the feature space becomes
+
+0 1 1
+
+. Additionally, pointwise
+
+products of kernels (k = k1k2) are also kernels and the corresponding features are the products of
+
+all pairs of features from the first and second feature space.
+
+Kernels can also be designed to respect known physical invariances or symmetries [96]. For
+
+example, Klus et al. [97] recently derived analogues of the Gaussian and polynomial kernels that
+
+respect the symmetries of quantum physics. Models that respect such invariances and symmetries
+
+are highly desirable as they usually require less training data and are less prone to overfitting.
+
+Techniques for incorporating invariances into kernel machines are available in chapter 11 of [38]
+
+and [96, 98].
+
+To summarise this section, we have demonstrated that
+
+1. kernels can efficiently compute dense polynomial interactions between states that would otherwise be combinatorially complex,
+
+2. kernels can be combined to generate a range of feature spaces,
+
+3. if the features have different physical meanings or governing laws then one can construct separate models and combine the kernels using a direct sum,
+
+4. non-polynomial and constant terms can be incorporated into kernels, and,
+
+5. kernels can be designed to respect symmetries and invariances.
+
+These observations indicate that there is significant flexibility for incorporating known partially known physics into our models through a suitable choice of kernel. Similarly, the validated performance of a handful of candidate kernels may provide insight into underlying physics, such as symmetries and terms in the governing equations.
+
+22
+
+System Lorenz `63
+
+Data
+
+DMD linear part
+
+Exact linear part
+
+LANDO linear part
+
+Exact
+
+LANDO
+
+nonlinear forcing nonlinear forcing
+
+9D Lorenz (Reiterer et al. 1998)
+Burgers' equation
+KdV equation
+KS equation
+Figure 6: A comparison of learned linear operators for dynamical systems and PDEs. In the linear operators, red represents positive quantities whereas blue represents negative quantities.
+5 Results
+We now demonstrate our approach on a range of physically-relevant systems. We will consider both dynamical systems and high-dimensional discretised PDEs. The results of LANDO applied to these systems is summarized in Fig. 6. It can be seen that the true linear and nonlinear forcing components are accurately recovered by LANDO, while DMD fails to identify the correct linear model. For the dynamical systems considered, the linear operators are known exactly; for the PDEs, we express the `true' linear operators as the appropriate spectral differentiation matrices. In addition to the Lorenz system (5.1), the viscous Burgers' equation (section 5.3) and the KS equation (section 5.4), we also consider two other systems: the Korteweg­De Vries (KdV) equation for modeling waves on shallow water surfaces and a 9D analogue of the Lorenz system [99]. Reiterer et al. derived this analogue by modeling dissipative Rayleigh­Benard convection in a threedimensional cell and applying a triple Fourier expansion to the associated Bousinnesq­Oberbeck equations. The resulting analogue exhibits similar asymptotic behaviour to the original Lorenz system, including a low-dimensional chaotic attractor and a period-doubling cascade. We do not repeat the equations here for the sake of brevity, but they are analogous to the original Lorenz system and can be found in equation 18 of [99]. In particular, the equations consist of a linear operator and quadratic interactions between the states. We observe in figure 6 that we recover the linear component of the operator to a high degree of accuracy.
+23
+
+5.1 Implicit learning of the chaotic Lorenz system
+
+We first illustrate our approach on the Lorenz system [100], which is a prototypical example of chaos and is often used in demonstrations of nonlinear system identification [8]:
+
+x = (y - x),
+
+y = x( - z) - y,
+
+(75)
+
+z = xy - z,
+
+where , , and  are constants that parametrise the system. Both the state dimension of the system (n = 3) and the order of polynomial nonlinearity (d = 2) are relatively small, so the benefits of kernel methods here are limited. As such, the system is considered here only for demonstration.
+We take the standard parameter values  = 10,  = 28, and  = 8/3 and initial condition x = -8, y = 8, and z = 27. The system (75) is integrated from t = 0 to t = 10 and the solution is sampled at time intervals of t = 10-3 resulting in 10,000 samples. The data matrix X comprises snapshots of the solution at each time step so that xj = [x(jt) y(jt) z(jt)]T , and the columns of Y are the derivatives at each time: yj = x j. The order of the samples is randomly permuted so that the sparse dictionary is as rich as possible. The data use in this example are free of noise, and we demonstrate that the algorithm can be made robust to noise in appendix E.
+The results of our kernel learning algorithm are illustrated in figure 7. We consider three types of kernels: linear (k(u, v) = uT v), quadratic (k(u, v) = (1 + uT v)2), and Gaussian (k(u, v) = exp - u - v 22/(22) with  = 1.1). These kernels are not optimised, and the best kernel parameters may be chosen through cross-validation. The top row of figure 7 illustrates the reconstructions achieved by each model on the same initial condition used for training. Each reconstruction is created by integrating the learned kernel model x = f (x). The linear model performs poorly and reconstructs a decaying spiral. In contrast, the quadratic and Gaussian models accurately capture the behaviour of the underlying system. The quadratic model has a training error of O(10-12). Higher-order polynomial kernels produce similar training errors to the quadratic model.
+This example also illustrates the value of a sparse dictionary: applying a standard kernel regression to this problem would require inverting a large 10, 000 × 10, 000 matrix. Instead, the dictionary sizes are m~ = 3, 7, and 84 for the linear, quadratic, and Gaussian kernels, respectively.
+We also present the trajectories predicted by our models with the different initial condition of x = 10, y = 14, and z = 10. The linear model prediction is poor and decays to the origin, while the Gaussian kernel model reproduces a trajectory that is rougly similar to the Lorenz system. Finally, the quadratic kernel model generates an excellent prediction, which indicates the generalizability of the model to trajectories away from the initial data. Given the form of the Lorenz system (75), it is unsurprising that the quadratic kernel is the most accurate. However, the Gaussian kernel also performed well without any prior knowledge of the system form. Thus, Gaussian kernels can be a good choice of model when partial knowledge of the underlying system is unavailable.
+We now extract meaningful physical information from the kernel models. Specifically, we extract linear models near the equilibrium x = [- ( - 1) - ( - 1)  - 1]T , indicated by a square in the top row of figure 7. Note that x is not included in the training data. Nevertheless, the quadratic and Gaussian models both identify x as an equilibrium since f (x) is close to zero for both models. Moreover, applying the results of section 4.1 to each model generates local linear models for the behaviour near x. The true linearized model and the learned local linear models are reported in the third row of figure 7. All models capture the first row of the linearization, where the true system is also linear. However, the linear kernel model fails to estimate the rest of the linearization, while the quadratic and Gaussian kernel models provide excellent agreement; the local linear model learned by the quadratic kernel is correct to O(10-4).
+
+24
+
+true system
+
+linear kernel
+
+Gaussian kernel
+
+quadratic kernel
+
+training data and reconstructions
+
+predicted trajectory
+
+and eigenvalues
+
+linear models at :
+
+0
+
+5.34
+
+10­3
+
+10­12
+
+-10
+
+10
+
+0
+
+1
+
+-1
+
+8.485
+
+-8.485 -8.485 -2.667
+
+-10.00 10.00 0.000 -12.45 9.317 0.235
+0.227 0.117 -0.038
+
+-9.947 9.981 0.025 1.000 -0.794 8.334
+-8.216 -8.639 -2.559
+
+-10.00 10.00 0.000 1.000 -1.000 8.485
+-8.485 -8.485 -2.666
+
+­13.9, 0.09±10.2i
+
+­0.33, ­0.35±5.60i
+
+­13.5, 0.09±10.2i
+
+­13.9, 0.09±10.2i
+
+bias,
+
+Figure 7: Kernel learning of the Lorenz system. We compare the learned models and predicted
+trajectories for for linear, quadratic and Gaussian kernels. The training data are discrete time snapshots of the state [x y z]T and the corresponding velocity measurements. The top row shows the
+models' reconstructions of the training data, the middle row shows the predicted trajectory from
+a different initial conditions, and the bottom row shows the learned linear model near the equilibrium point x = [- ( - 1) - ( - 1)  - 1]T , which is indicated by . The parameter
+values are  = 10,  = 28 and  = 8/3 and the initial conditions are represented by .
+
+5.2 Extracting natural frequencies from densely coupled oscillators
+
+We now use our framework to study systems of coupled oscillators from a data-driven perspective. The Kuramoto model is a prototypical model of coupling and synchronisation, and has been applied to biological, chemical, physical, and social systems [101]. We consider a forced Kuramoto model of n coupled oscillators of the form
+
+ i
+
+=
+
+i
+
++
+
+1 n
+
+n
+
+aij sin(j - i) + h sin(j),
+
+i = 1, . . . , n,
+
+(76)
+
+j=1
+
+where {i(t)} are the phases, {i} are the natural frequencies, h is a forcing constant, and ai,j are constants representing the nonlinear coupling between the i-th and j-th oscillators. This example is inspired by similar recent studies of [102] and [103], who sought to learn predictive models for the Kuramoto system. Instead, our aim here is to extract structural model information from the system. In particular, we wish to learn the natural frequencies of each oscillator, i.
+
+25
+
+Kuramoto synchronisation model:
+training data (2,000 coupled oscillators; 500 snapshots)
+
+exact vs learned natural frequencies (LANDO average error <1%)
+
+natural frequencies,
+
+time, t
+
+exact DMD LANDO
+oscillator number, i
+
+Figure 8: Learning the natural frequencies of coupled oscillators. The training data is generated from a forced Kuramoto model and is illustrated on the left panel. The LANDO framework extracts the natural frequencies of the model. These learned natural frequencies are compared to the true natural frequencies on the right panel and the frequencies learned by a linear (DMD) model; because there are 2, 000 oscillators, only a handful of frequencies are plotted.
+
+To train our model, we follow [102] and use the kernel
+
+k(u, v) =
+
+sin(u)  sin(v) c + cos(u) cos(v)
+
+2
+,
+
+(77)
+
+producing a feature space consisting of constant, linear, and quadratic trigonometric terms. This is an example of a kernel with non-polynomial terms, as was discussed in section 4.4. We seek f that defines the dynamical system 76 such that x = f (x). The natural frequencies are the constant term in (76) so, by section 4.1, the natural frequencies are approximated by   f (0).
+We consider a system of 2,000 coupled oscillators with state vector x = [1, · · · , 2,000]T . The data is plotted in figure 8. The feature space, which is implicitly defined by (77), has over 2 × 106 elements, which is prohibitively expensive to work with explicitly. We consider a strongly coupled system and randomly sample the coupling constants aij from a normal distribution with mean 15 and variance 5. We take a forcing value of h = 2, and randomly sample i from a uniform distribution on the interval [0, 10]. The system is integrated to t = 2, and we consider only a single simulation.
+
+5.3 Learning the spectrum of the viscous Burgers' equation
+We now apply our learning framework to study a partial differential equation. The Burgers' equation is a simplified version of the Navier­Stokes equations and is a prototypical nonlinear hyperbolic PDE. The one-dimensional Burgers' equation takes the form
+
+ut = uxx - uux
+
+(78)
+
+26
+
+where u(x, t) is the velocity at position x  [-1, 1] and time t  0, and  is the kinematic viscosity. We simulate (78) with periodic boundary conditions using the spin operator in the Chebfun
+package (www.chebfun.org, [104]). The solver uses exponential time differencing with fourthorder stiff time-stepping (ETDRK4, [105]); a survey and comparison of these methods is available from [106]. The same method is used to solve the other PDEs in this paper. The kinematic viscosity is  = 0.01 and we use initial conditions
+u(x, 0) = 3A1sech2(3 sin((x - 2s1))) + 5A2sech2(3 sin((x - 2s2)))
+where A1,2 and s1,2 are constants randomly distributed in the interval [0, 1]. We perform 20 simulations and integrate to t = 1; a typical simulation is shown in the left panel of figure 9.
+We train our model on the state vector defined by the solution u sampled at spatial grid points separated by x at time intervals of t so that
+xj = u(-1, jt) u(-1 + x, jt) . . . u(1 - x, jt) T .
+We use 1024 spatial grid points and take t = 10-3. We learn a discrete-time flow map that advances the state vector forward in time by t, so yj = xj+1. The data are uncorrupted by noise; learning the Burgers' equation in the presence of noise is explored in section E.
+We use a quadratic kernel to learn a model of this system, and from this model extract a local linearization relative to the equilibrium base state x = 0. The analytical linear operator is simply the Laplacian operator Au = uxx. Since the boundary conditions are periodic, the eigenvalues are n = -n22 for n = 0, 1, 2, . . . . All non-zero eigenvalues have multiplicity two and the eigenfunctions are simply sines and cosines: n(x) = sin(nx), cos(nx).
+The analytical spectrum is compared to that learned by the kernel method in the right panels of figure 9. The eigenvalues are plotted on a square-root scale so that their spacing is uniform, and the results are compared to the spectrum learned by exact DMD [4]. The present algorithm accurately learns the true spectrum of the underlying linear operator whereas a na¨ive DMD implementation results in substantial errors. The accuracy is best for eigenvalues with larger real part that are associated with slower dynamics, and deteriorates for the eigenvalues associated to quickly dampened modes. Similarly, the kernel method accurately recovers the linear eigenfunctions. The DMD eigenfunctions are very inaccurate and are therefore omitted from the figure.
+This example is particularly challenging, as indicated by the poor performance of DMD. The choice of  = 0.01 makes the effect of the linear operator uxx small compared to the nonlinear component -uxu. As such, it is particularly difficult for the algorithm to extract the underlying linear operator that is buried beneath nonlinear mechanisms. Additionally, the choice of initial conditions did not provide a particularly rich set of data for the algorithm to work with.
+The relatively large size of the state space (103) and the high number of samples (104) emphasise the necessity of the dimensionality reduction techniques employed in this paper. The kernel trick means that the quadratic feature space need not be constructed explicitly. To do so would require O(106) operations which would result in significant training costs and severely limit the speed of predictions. Additionally, if we did not use a sparse dictionary then the kernel matrix would have O(104) rows and columns, which becomes costly to invert. The dictionary size of this system is approximately 100, which indicates that there are around 100 states that significantly contribute to the underlying dynamics in the high-dimensional feature space. These states are then selected to form the basis of the dynamical model.
+In summary, we have applied our learning framework to uncover the linear operator of the nonlinear Burgers' equation purely from data measurements. This example demonstrates that the algorithm can be used to uncover linear structure highly nonlinear PDEs. We now progress to a more challenging example.
+27
+
+training data 10 simulations,
+
+Burgers' equation:
+
+spectrum
+
+eigenfunctions
+
+analytical DMD LANDO
+
+Figure 9: Learning the spectrum of the viscous Burgers' equation. A typical simulation is illustrated on the left with the initial condition highlighted in green. The algorithm is trained on discrete time snapshots yj = xj+1; velocity measurements x are not used in the training set. The figures on the right indicate that the algorithm accurately learns the eigenvalues and eigenfunctions of the linearised operator at the state u  0.
+5.4 Learning the spectrum of the Kuramoto­Sivashinsky equation
+The Kuramoto­Sivashinsky (KS) equation is a PDE that is used to model a range of physical phenomena including turbulence, chemical reactions and flame fronts. The PDE is defined by
+1 ut = -uxx - uxxxx - 2 uux
+for x  [-L/2, L/2], periodic boundary conditions, and some given initial condition. Similar to Burgers equation, the nonlinear term (-uux/2) transfers energy from low to high wavenumbers. However, in the KS equation, the sign of the second derivative is reversed and is thus energy producing. Combining these features with the stabilising influence of the fourth derivative generates highly complex, sometimes chaotic behaviour. It has been described as the "simplest chaotic PDE" [107] and therefore represents a useful test case for our algorithm.
+We use our kernel learning algorithm to recover the spectrum of the underlying linear operator relative to the equilibrium state u = 0. The linearized operator is Af = -fxx -fxxxx. Again, we consider periodic boundary conditions, so the eigenvalues are n = (n)2 - (n)4 with eigenfunctions n = sin(nx), cos(nx). We simulate the KS equation using the ETDRK4 method described previously. The initial conditions are now taken to be random periodic functions: in particular, the initial conditions are finite Fourier series with distributed coefficients of equal variance [108]. Our numerical experiments indicate that this rich set of initial conditions is necessary to ensure the algorithm's accuracy. We define the box length as L = 14, which is sufficiently large to generate chaotic behaviour. A typical simulation is illustrated on the left panel of figure 10. The data matrices are constructed in a similar way to that of the Burgers' equation except we now use velocity
+28
+
+Kuramoto­Sivashinky equation: training data
+
+learned spectrum of linear operator
+
+analytical DMD LANDO
+
+Figure 10: Learning the spectrum of the Kuramoto­Sivashinsky equation. A typical simulation is illustrated on the left. The algorithm is trained on discrete time snapshots yj = x j. The figures on the right indicate that the algorithm accurately learns the eigenvalues of the linearized operator at the state u = 0. The size of the markers of the LANDO eigenvalues correspond to the average projection of the training data onto the associated eigenvectors.
+measurements in the training data so yj = x j. Again, we use 1024 spatial grid points and the samples are separated in time by t = 0.05. We integrate the PDE to t = 60 and use 25 different simulations in the training data set.
+The results of the learned spectrum are illustrated on the right panel of figure 10. The algorithm accurately learns the eigenvalues with the correct multiplicity. Similarly to the Burgers' equation, the recovery of the smallest eigenvalues is most accurate, but the accuracy decreases for eigenvalues with smaller (more negative) real part. The close-up figure also indicates that the algorithm recovers the intricate behaviour of the spectrum for small eigenvalues. Although they are not plotted, the eigenfunctions are also recovered to a high degree of accuracy.
+This example demonstrates that our implicit learning method can extract accurate information about the underlying linear operator of a chaotic PDE. This is performance is encouraging given our eventual goal of studying chaotic, turbulent fluid flows.
+The right panel of figure 8 reports the results of the learned natural frequencies. The average error of the estimates made by LANDO is less than 1%. The deviations of the predictions are slightly worse at the upper and lower ends of the spectrum; the cause of this may be that the oscillators synchronise on the average natural frequency, which is 5 here, and the model is more accurate for frequencies close to the average. We also compare the results on a DMD model trained on linear combinations of sin(), cos() and a constant vector. The learned natural frequencies of the linear model are very inaccurate, which illustrates the need of incorporating nonlinearities when attempting to learn the underlying natural frequencies.
+29
+
+6 Discussion
+We have presented a data-driven kernel method that robustly extracts dynamic modes from highdimensional, nonlinear data. The method may be viewed as a confluence of the dynamic mode decomposition, the sparse identification of nonlinear dynamics, and kernel methods. Specifically, we use a kernelized identification of nonlinear dynamics (INDy, i.e., SINDy without the sparsity promoting regularizer) to robustly disambiguate linear and nonlinear dynamics, enabling the extraction of an explicit linear DMD model and forcing snapshot matrix. Access to the disambiguated DMD model and forcing snapshot matrix opens up the possibility of performing datadriven resolvent analysis of strongly nonlinear flows [55]. Our approach is based on the kernel recursive least squares algorithm [49] and kernel dynamic mode decomposition [7] but introduces several innovations, including stabilised dictionary learning, improved interpretability, and extraction of locally-linear models and forcing. We have demonstrated our approach on a range of nonlinear dynamical systems and PDEs, and shown in each case that we can effectively disambiguate the roles of linearity and nonlinearity. The nature of kernel methods, along with the online learning variant, render our approach suitable for data that is high-dimensional in both space and time.
+6.1 Limitations of the method
+There is significant scope for modifications, improvements, and generalisations of our framework. In this section we outline a few key issues. The effects of noise are discussed in appendix E.
+In section 4.4 we provided principles for designing kernels that incorporate partially known physics. However, kernels invariably include some parameters that must be tuned. For example, the constant c in the polynomial kernel (73) and the bandwidth  in the Gaussian kernel (74). These parameters can be chosen via cross validation, an optimisation routine, a hierarchical Bayesian framework [109], or the recently proposed kernel flows [43].
+Nonlinear system identification is typically data intensive, and our algorithm is no exception. Experience indicates that learning an adequate approximation of the linear spectrum of a PDE usually requires a relatively large number of snapshots. For example, when learning the viscous Burgers' equation we used a space-discretized grid of 103 points and 104 snapshots. The relatively large data requirements could be ameliorated by enforcing known physics such as symmetries and invariances, as discussed in section 4.4. Alternatively, compressed sensing and random sampling techniques could be employed [9]. Note that these issues do not relate to computational complexity or memory ­ the sparse dictionary learning and online variant already address these issues [49] ­ but instead concern the data required to accurately learn the underlying model.
+The right choice of regulariser is essential to the success of any machine learning algorithm. In this work we used sparse dictionary selection as a regulariser to address the challenges described in section 3. However, there are many opportunities to include additional or alternative regularisers within our framework. For example, regularisation can be incorporated into the minimisation problem (35) in a number of ways. The simplest approaches involve modifying the pseudoinverse k(X~ , X) in the solution (22) to incorporate Tikhonov regularisation [77] or truncated-SVD regularisation [110]. It is also possible to incorporate an l1 regulariser as a surrogate for sparsity promotion using, for example, the kernel Lasso algorithm [111, 112]. However, sparsity in W~ does not necessarily produce sparsity in the nonlinear feature space, so the physical appeal of such an approach is limited.
+30
+
+6.2 Extensions and applications of the method
+In addition to the extensions outlined in the previous section (improving sensitivity to noise, alternative regularisers, learning kernel parameters), there are many other possible generalisations and applications of our method.
+This study began with the ultimate aim of performing resolvent analysis [51­53] of turbulent flows from a purely data-driven perspective. Over the past decades, advances in numerical methods [113­117] and the growing availability of computational power have enabled analysis of the linearised Navier­Stokes equations for flows of increasing complexity [118­120]. The authors recently proposed a `data-driven resolvent analysis' [55] based on the dynamic mode decomposition, but this approach is currently only applicable for linear flows because strong nonlinearity corrupts the linear DMD model. By separating the roles of linearity and nonlinearity, the present work opens the door to data-driven resolvent analysis of nonlinear and actively controlled PDEs. The ability to perform resolvent analysis in a completely equation-free and adjoint-free manner removes the need to have intrusive access to a numerical solver. We are currently pursuing this approach for low-dimensional PDEs, though we expect that significant modifications to our approach will be needed before we can consider fully turbulent flows.
+Models that are constrained to respect known physics require fewer training samples and are more robust to noise. Thus, an extension that incorporates physical laws into our framework ­ such as symmetries, invariances, and bifurcations ­ would be a significant improvement. In section 4.4 we explored incorporating partial physical knowledge to design the kernel k, but there is also scope to incorporate known physics into the weight matrix W . For example, the solution may be restricted to a physically consistent structure via constrained least-squares [50]. An alternative approach is to employ a physics-informed regulariser to penalise departures from known physics ­ this idea has been used to great effect in physics-informed neural networks [12, 13].
+The LANDO algorithm can be combined with the recently proposed lift and learn framework [21], which uses prior knowledge of a system's governing equations to construct a coordinate mapping where the dynamics are quadratic. These quadratic models can be efficiently represented with a quadratic kernel model, as demonstrated on the Burgers' and KS equations in sections 5.3 and 5.4. Since the kernel method scales well with high-dimensional nonlinearities, it is also possible to consider higher-order nonlinear functions of the mapped variables, which allows more complex models to be considered, and reduces the burden of choosing the correct coordinate mapping. The stabilised dictionary learning step of this work could also reduce the computational cost of the original kernel DMD algorithm as well [7]. It will be interesting to see whether the advances presented herein ­ of feature-space dictionary learning and interpretability ­ could be applied to improve computations of the spectrum of the Koopman operator.
+The online updating procedure (see appendix B, also [49]) could be modified for time-varying systems by including weighting, windowing, and forgetting factors (chapter 4, [80]). This approach has recently been developed for DMD [121]. One application of this approach is to resolventbased flow control [122].
+Acknowledgements
+This work was supported by U.S. Army Research Office (ARO W911NF-17-1-0306 and ARO W911NF19-1-0045), the U.S. Office of Naval Research (ONR N00014-17-1-3022) and by the PRIME programme of the German Academic Exchange Service (DAAD) with funds from the German Federal Ministry of Education and Research (BMBF). SLB would like to thank Bing Brunton, Nathan Kutz, Jean-Christophe Loiseau, and Isabel Scherl for valuable discussions.
+31
+
+A Glossary of terms
+
+Table 1 provides the nomenclature used throughout the paper. We have attempted to maintain consistency with DMD [4, 5], SINDy [8], and KRLS [49] where possible, although several changes were made to unify the notation. Importantly, the features are denoted by  in this work, whereas they are denoted by  in SINDy. Similarly, the kernel weights are denoted by W in this work, whereas they are denoted by  in KRLS.
+
+Table 1: A summary of terms used in the paper.
+
+Symbol
+
+Type
+
+n m N x y X Y F (x) f (x) c L N A k(·, ·) (·) t t  ~ m~ t K~ t C~ t m~
+
+number number number n-vector n-vector n × m matrix n × m matrix function function n-vector n × n matrix function n × n matrix function function continuous variable discrete index number
+tilde number m~ t × m~ t matrix m~ t × m~ t matrix number
+
+t
+
+m~ t × t matrix
+
+^
+
+hat
+
+x
+
+n-vector
+
+Meaning
+State dimension Total number of samples Dimension of nonlinear feature space
+State vector Model output (e.g. y = x or yk = xk+1)
+Right data matrix Left data matrix Underlying system Approximate learned model Constant shift in model Linear component of true operator Purely nonlinear component of operator DMD best-fit operator Kernel function Nonlinear (implicit) feature space
+time Snapshot number Dictionary sparsification parameter Indicates quantity is connected to the dictionary Number of samples in dictionary at time t Kernel matrix of dictionary elements at time t Cholesky decomposition of K~ t Final number of samples in the dictionary Matrix that approximately maps samples before time t onto the dictionary Indicates quantity is projected onto POD subspace Base state (e.g. statistical mean or equilibrium solution)
+
+32
+
+B Online learning variant
+
+In this section we derive the rank-one update equations used in the online regression algorithm. The derivation is equivalent to that presented in [49] except we consider vector-valued outputs and do not apply the inverted kernel matrix explicitly. A summary of the procedure may be found in the pseudocode in algorithm 3.
+The minimisation problem, without regularisation, at time t is
+
+argmin
+
+Y t - W~ t k(X~ t, Xt)
+
+2
+= argmin
+
+Y t - W~ t~ t t
+
+2
+.
+
+(79)
+
+W~ t
+
+F
+
+W~ t
+
+F
+
+The representation (45) allows us to approximate the above as
+
+argmin
+W~ t
+
+Y t - W~ t~ t ~ tt
+
+2
+
+= argmin
+
+F
+
+W~ t
+
+Y t - W~ tK~ tt
+
+2
+.
+F
+
+(80)
+
+The minimiser of the above is
+
+W~ t = Y t
+
+K~ tt
+
+
+
+=
+
+Y
+
+t
+
+t K~
+
+ t
+
+=
+
+Y
+
+tt
+
+(tt )-1
+
+K~ -t 1.
+
+(81)
+
+In the above, we have used the fact that, by construction, K~ t has full column rank and t has full row rank.
+When a new sample is considered, it falls into two cases as outlined in section 3.1. Either the sample is almost linearly dependent on the current dictionary elements, or it is not. The updating equations are different in each case and we derive them below. In what follows, it is convenient to define
+
+P t = (tt )-1
+
+(82)
+
+and
+
+ht
+
+=
+
+1
+
+t P t-1 + t P t-1
+
+t
+
+.
+
+(83)
+
+Case I: Almost linearly dependent
+
+If the new sample is almost linearly dependent on the dictionary elements then the dictionary is
+not updated: Dt = Dt-1. Since the dictionary doesn't change, neither does the kernel matrix so K~ t = K~ t-1. The update rule for  is simply
+
+t = t-1 t .
+
+(84)
+
+Thus, tt = t-1t-1 + tt , which corresponds to a rank-1 update. Accordingly, the matrix inversion lemma says that the update rule for P t is
+
+Pt
+
+=
+
+P t-1 -
+
+P t-1tt P t-1 1 + t P t-1t
+
+=
+
+P t-1 - P t-1tht.
+
+(85)
+
+We may now define the update rule for W~ t. Since
+
+Y tt = Y t-1t-1 + ytt ,
+
+(86)
+
+33
+
+applying (85) to (81) produces
+
+W~ t = Y tt P tK~ -t 1 = Y t-1t-1 + ytt (P t-1 - P t-1tht) K~ -t 1.
+
+(87)
+
+Expanding the brackets yields
+
+W~ t = Y t-1t-1P t-1 - Y t-1t-1P t-1tht + ytt P t K~ -t 1.
+
+(88)
+
+Since we are not adding an element to the dictionary, the kernel matrix and its inverse remain
+
+the same:
+
+K~
+
+-1 t
+
+=
+
+K~ -t-11.
+
+Additionally, from the regression in the previous iteration we have
+
+W~ t-1 = Y t-1t-1P t-1K~ -t-11. Thus, (88) can be expressed as
+
+W~ t = W~ t-1 + ytt P t - W~ t-1K~ t-1tht K~ -t 1.
+
+(89)
+
+Finally, on use of ht = t P t and (41), the update rule for W~ t is
+
+W~ t = W~ t-1 +
+
+yt - W~ t-1k~t-1
+
+ht
+
+K~
+
+-1 t
+
+.
+
+(90)
+
+As discussed in section 3.1, the product htK~ -t 1 should be computed with two backsubstitutions with the Cholesky factor Ct.
+
+Case II: Not almost linearly dependent
+
+In this case, the new vector is not almost linearly dependent. Accordingly, we must add xt to the dictionary: Dt = Dt-1  {xt}.
+The update rules for t and P t are simply
+
+t =
+
+t-1 0
+
+0 1
+
+and
+
+Pt =
+
+P t-1 0
+
+0 1
+
+.
+
+(91)
+
+The update rule for W~ t is
+
+W~ t = Y tt P tK~ -t 1 = Y t-1t-1P t-1 yt K~ -t 1.
+
+(92)
+
+Finally, (43) allows us to express the update rule as
+
+W~ t =
+
+W~ t-1 +
+
+W~ t-1k~t-1 - yt
+
+t t
+
+W~ t-1k~t-1 - yt
+
+1 t
+
+.
+
+(93)
+
+This completes the derivation of the equations for the online regression algorithm.
+
+C Learning control laws
+Our algorithm may also be used to simultaneously learn control laws and governing equations from data. An active control variable can significantly alter the behaviour of a dynamical system and thus further disguise the underlying dynamics [34, 123]. In many practical scenarios ­ such as epidemiological modeling of disease spread where the control variables could be the distribution of vaccinations ­ it is infeasible to gather data on the unforced system so the effects of control must be disambiguated from the data [57]. This strategy can be used to uncover the dynamics of the
+34
+
+Algorithm 3 Online learning algorithm The operation count for each step is included on the right
+
+Inputs: data matrices X and Y , kernel k, dictionary tolerance  Outputs: model f , constant c, linear component L, nonlinear component N , eigenvectors , and eigenvalues 
+
+for t = 1  m do
+Select new sample pair (xt, yt) Compute t according to algorithm 1 Compute t using (41) if t   (almost linearly dependent) then
+Maintain the dictionary: Dt = Dt-1 Update W~ t using (90) Compute ht using (83) Update P t using (85) else if t >  (not almost linearly dependent) then Update the dictionary: Dt = Dt-1  {xt} Update the Cholesky factor Ct using (44) Update P t using (91) Update W~ t using (93) Form the model f according to (34)
+end if
+end for
+Define S according to (60) Form L, c and N according to section 4.1 Compute the eigendecomposition of L^ according to lemma 1 Form the eigenvectors  and eigenvalues  according to (61)
+
+O(m~ 2t )
+O(nm~ t) O(m~ 2t ) O(m~ 2t )
+O(m~ 2t ) O(m~ t) O(nm~ t)
+
+unforced system, which can then inform design of effective control strategies. In such systems the underlying dynamics take the form
+
+y = F (x, u)
+
+(94)
+
+where u is the control variable. Similarly to x and y, the values of u are known at each snapshot
+
+time. As in dynamic mode decomposition with control (DMDc, [34]), we may write the supple-
+
+mented
+
+state
+
+vector
+
+as
+
+
+
+=
+
+[
+
+x u
+
+]
+
+so
+
+that
+
+(94)
+
+may
+
+be
+
+expressed
+
+as
+
+y = G().
+
+(95)
+
+Our task is now to learn a model g that approximates the underlying system defined by G. We can use ideas explained in section 4.4 to design a suitable kernel. In particular, we can
+exploit the fact that kernels are closed under direct sums (70). Unless we believe that there are nonlinear pairings between the control variable and the state space, we can assume a kernel of the form
+
+k(,  ) = kx(x, x ) + ku(u, u ).
+
+(96)
+
+For example, we may have reason to believe that y is generated by quadratic interactions between the states x whereas the control variable has only a linear effect. Then, the kernel
+
+k(,  ) = (xx )2 + (uu )
+
+(97)
+
+35
+
+induces the appropriate feature space. The algorithm of section 3 can then be applied with X
+
+replaced by the augmented data matrix  =
+
+X U
+
+to learn a model of the form
+
+g() = W~ k(~ , )
+
+(98)
+
+where ~ is the augmented dictionary matrix. If the kernel takes the form (96) then the reconstruction/prediction model is
+
+g() = W~ xkx(X~ , x) + W~ uku(U~ , u)
+
+(99)
+
+where ~ =
+
+X~ U~
+
+and W~ = [ W~ x W~ u ]. The unforced system can then be modeled by setting
+
+W~ u = 0. Furthermore, we can also compute local linear models (i.e., DMD models) of the un-
+
+forced system using the ideas of section 4.1. The analysis follows exactly except W~ k(X~ , x) in
+
+section 4.1 is replaced with W~ x kx(X~ , x). Note that if the kernel is taken to be
+
+k(,  ) =  = (xx ) + (uu )
+
+(100)
+
+then we recover the original DMDc formulation [34]. These ideas are also valid for kernels that don't take the form (96) but the algebra is slightly
+more involved and we therefore do not report the results here.
+
+D Connection to exact dynamic mode decomposition
+
+We now elucidate the connection between the present work and exact dynamic mode decomposition of [4] which was introduced in section 2.1. In particular, we demonstrate that exact DMD can be viewed as a special case of the present work when there is no sparsity promotion and the kernel is linear. The linear kernel is k(u, v) = uv, so the implicit feature space is simply (x) = x. As such, the full model is the linear map f (x) = Lx where L is (60)
+
+L = W~ X~ .
+
+(101)
+
+In exact DMD there is no sparsity promotion so the dictionary used in our algorithm is full:  = I and X~ = X. Moreover, W~ is given by (33) so
+
+L = Y k(X, X) X.
+
+(102)
+
+Expanding the kernel yields L = Y (XX) X = Y X(X)X = Y X
+
+(103)
+
+which is identical to the linear operator A from (13) defined by exact DMD. In (103) we used the identities for the Moore­Penrose pseudoinverse (M M ) = M (M ) and M (M )M  = M  for any matrix M .
+Similarly, the eigenmodes computed by exact DMD are equivalent to those defined in lemma 1 in the special case of a linear kernel without sparsity promotion.
+
+36
+
+Noisy measurements
+
+Learned model
+
+True model
+
+5% Gaussian noise, 50,000 snapshots
+Linear models at agree
+
+-9.947 9.981 0.025 1.000 -0.794 8.334
+-8.216 -8.639 -2.559
+
+-10
+
+10
+
+0
+
+1
+
+-1
+
+8.485
+
+-8.485 -8.485 -2.667
+
+Figure 11: Implicit learning of the Lorenz system in the presence of noise. Initial measurements are corrupted by 5% Gaussian noise. The velocity vector x is computed by differentiating the data measurements using total variation regularised differentiation [124]. The reconstruction captures the qualitative features of the original Lorenz system, and also accurately reproduces the local linear model at x. The trajectories are colored by the adaptive time step, with red indicating a smaller time step.
+
+E Sensitivity to noise
+All machine learning algorithms must be understood in the context of their sensitivity to noise. To explore the effects of noise, we applied our learning framework to noise-contaminated data generated by the Lorenz system from section 5.1. The data are contaminated with Gaussian noise of magnitude 5% of the variance of the original data; the noisy training data is visualised in the left panel of figure 11. We use the same parameters as section 5.1, but the system is now integrated to t = 50. Unlike section 5.1, we assume that we only have access to snapshot measurements of x and velocity measurements x are unavailable. Therefore, we approximate the derivative x from the noisy snapshot data with a total-variation regularisation scheme [124]. Then, we use the algorithm of section 3 to learn the Lorenz system with a quadratic kernel. The results of the learned model are illustrated in the middle panel of figure 11, along with the true local linear model, both evaluated at the equilibrium point x = - ( - 1) - ( - 1)  - 1 T . The reconstructed trajectory shows good qualitative agreement with the true model, and the local linear model is a good approximation to the true linearisation. The accuracy of these approximations usually improves as more samples are added.
+We also demonstrate the effect of noise on identifying the spectrum of the viscous Burgers' equation from section 5.3. Here, the kinematic viscosity is  = 0.1 and the equations are integrated to t = 4. The data are snapshots of the solution which are then corrupted by Gaussian noise of varying magnitude. No velocity measurements x are used and we do not de-noise the data. Figure 12 plots the first three (repeated) eigenvalues learned by the algorithm for 20 trials with a quadratic kernel. The first two eigenvalues are recovered accurately for small values of noise but the sensitivity to noise increases for eigenvalues of larger magnitude. Again, these approximations can be improved by adding more samples, or by a suitable de-noising.
+
+37
+
+clean data 5% noise
+
+1% noise 10% noise
+
+Figure 12: Identifying the spectrum of Burgers equation in the presence of noise over 20 trials. The first three eigenvalues are plotted in black circles  and their approximations are plotted in blue crosses ×.
+Further experiments indicate that, in the absence of de-noising, the algorithm is robust to noise in Y but relatively sensitive to noise in X. These observations can be explained through the linear algebra and statistics underlying our kernel learning framework. The impact of noise in X is felt in two forms. Firstly, noise may cause elements to be included in the dictionary which may otherwise have been excluded. The dictionary is independent of Y and is therefore unaffected by noise in Y . If the sparsification parameter is not chosen carefully then noise in X may cause the dictionary to become dense. Secondly, noise causes errors in the final regression, whether performed online or in batch. As is typical of least-squares regressions, our algorithm is an unbiased estimator when the noise is restricted to Y . This is because least-squares methods implicitly assume that there are no "errors in variables" [77]. This assumption becomes invalid when X is contaminated by noise. As such, when noise is present, the na¨ive pseudoinverse (47) solution may prove insufficient. For example, a similar issue arise in DMD when there is noise in X, and several approaches have been proposed to mitigate the effects of noise [30­33, 35, 36], for example solving the regression problem with total least squares (TLS) [32]. Experiments with TLS in our present setting were found to be unsuccessful, in part because the TLS problem is unstable [125] but also because our problem is nonlinear. In particular, TLS only guarantees the best solution to argminA AX - Y F only when the errors in X and Y are column-wise independent and identically distributed with zero mean and covariance matrix 2I [126, chapter 8]. Therefore, there are no guarantees of the effectiveness of TLS for our problem, which is argminW~ W~ k(X~ , X)-Y F . In the case of nonlinear dynamics, whether with SINDy or our kernel approach, the noise in X is stretched and transformed through the nonlinearity, adding nonlinear correlations.
+In summary, we have demonstrated that our algorithm can remain effective in the presence of noise. The Lorenz example in figure 11 indicates that the algorithm is effective when applied to derivatives computed from noisy data by total-variation regularisation. Additionally, experiments and theory suggest that the present framework is insensitive to noise in Y but moderately sensitive to noise in X. In addition to total-variation regularisation, there are several other methods that could be deployed to limit the effects of noise. For example, one technique could combine the KRLS algorithm with a Kalman filter, as explored in [127]. Another filtering approach would be to use the optimal hard threshold criterion for singular values of [128]. Fully addressing the challenge of noise is an area of active ongoing research and will be the focus of future work.
+38
+
+References
+[1] S. L. Brunton and J. N. Kutz, Data-Driven Science and Engineering: Machine Learning, Dynamical Systems, and Control. Cambridge University Press, 2019.
+[2] P. J. Schmid, "Dynamic mode decomposition of numerical and experimental data," J. Fluid Mech., vol. 656, pp. 5­28, 2010.
+[3] C. W. Rowley, I. Mezic´, S. Bagheri, P. Schlatter, and D. S. Henningson, "Spectral analysis of nonlinear flows," J. Fluid Mech., vol. 641, pp. 115­127, 2009.
+[4] J. H. Tu, C. W. Rowley, D. M. Luchtenburg, S. L. Brunton, and J. N. Kutz, "On dynamic mode decomposition: Theory and applications," J. Comput. Dyn., vol. 1, no. 2, pp. 391­421, 2014.
+[5] J. N. Kutz, S. L. Brunton, B. W. Brunton, and J. L. Proctor, Dynamic Mode Decomposition: Data-Driven Modeling of Complex Systems. SIAM, 2016.
+[6] M. O. Williams, I. G. Kevrekidis, C. W. Rowley, O. J. B. Matthew, and O. Williams, "A data-driven approximation of the Koopman operator: extending dynamic mode decomposition," J. Nonlinear Sci., vol. 25, no. 6, pp. 1307­1346, 2015.
+[7] M. O. Williams, C. W. Rowley, and I. G. Kevrekidis, "A kernel-based method for data-driven Koopman spectral analysis," J. Comput. Dyn., vol. 2, no. 2, pp. 247­265, 2015.
+[8] S. L. Brunton, J. L. Proctor, and J. N. Kutz, "Discovering governing equations from data by sparse identification of nonlinear dynamical systems," Proc. Natl. Acad. Sci., vol. 113, no. 15, pp. 3932­3937, 2016.
+[9] S. H. Rudy, S. L. Brunton, J. L. Proctor, and J. N. Kutz, "Data-driven discovery of partial differential equations," Sci. Adv., vol. 3, no. 4, p. e1602614, 2017.
+[10] J. Bongard and H. Lipson, "Automated reverse engineering of nonlinear dynamical systems," Proceedings of the National Academy of Sciences, vol. 104, no. 24, pp. 9943­9948, 2007.
+[11] M. Schmidt and H. Lipson, "Distilling free-form natural laws from experimental data," Science, vol. 324, no. 5923, pp. 81­85, 2009.
+[12] M. Raissi, P. Perdikaris, and G. E. Karniadakis, "Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations," J. Comput. Phys., vol. 378, pp. 686­707, 2019.
+[13] M. Raissi, A. Yazdani, and G. E. Karniadakis, "Hidden fluid mechanics: Learning velocity and pressure fields from flow visualizations," Science, vol. 367, no. 6481, pp. 1026­1030, 2020.
+[14] M. Cranmer, S. Greydanus, S. Hoyer, P. Battaglia, D. Spergel, and S. Ho, "Lagrangian neural networks," arXiv preprint arXiv:2003.04630, 2020.
+[15] C. Wehmeyer and F. Noe´, "Time-lagged autoencoders: Deep learning of slow collective variables for molecular kinetics," J. Chem. Phys., vol. 148, no. 24, p. 241703, 2018.
+[16] I. Mezic´, "Analysis of fluid flows via spectral properties of the Koopman operator," Ann. Rev. Fluid Mech., vol. 45, no. 1, pp. 357­378, 2013.
+[17] E. Kaiser, B. R. Noack, L. Cordier, A. Spohn, M. Segond, M. Abel, G. Daviller, J. Osth, S. Krajnovic, and R. K. Niven, "Cluster-based reduced-order modelling of a mixing layer," J. Fluid Mech., vol. 754, pp. 365­414, 2014.
+[18] S. Klus, F. Nu¨ ske, P. Koltai, H. Wu, I. Kevrekidis, C. Schu¨ tte, and F. Noe´, "Data-Driven Model Reduction and Transfer Operator Approximation," J. Nonlinear Sci., vol. 28, no. 3, pp. 985­1010, 2018.
+[19] S. L. Brunton, M. Budisic´, E. Kaiser, and J. N. Kutz, "Modern Koopman Theory for Dynamical Systems," arXiv preprint arXiv:2102.12086, 2021.
+[20] B. Peherstorfer and K. Willcox, "Data-driven operator inference for nonintrusive projection-based model reduction," Comput. Methods Appl. Mech. Eng., vol. 306, pp. 196­215, 2016.
+39
+
+[21] E. Qian, B. Kramer, B. Peherstorfer, and K. Willcox, "Lift & Learn: Physics-informed machine learning for large-scale nonlinear dynamical systems," Phys. D, vol. 406, p. 132401, 2020.
+[22] J. L. Lumley, Stochastic Tools in Turbulence. Academic Press, 1970.
+[23] K. Taira, S. L. Brunton, S. Dawson, C. W. Rowley, T. Colonius, B. J. McKeon, O. T. Schmidt, S. Gordeyev, V. Theofilis, and L. S. Ukeiley, "Modal analysis of fluid flows: An overview," AIAA Journal, vol. 55, no. 12, pp. 4013­4041, 2017.
+[24] A. Towne, O. T. Schmidt, and T. Colonius, "Spectral proper orthogonal decomposition and its relationship to dynamic mode decomposition and resolvent analysis," J. Fluid Mech., vol. 847, pp. 821­ 867, 2018.
+[25] K. Taira, M. S. Hemati, S. L. Brunton, Y. Sun, K. Duraisamy, S. Bagheri, S. T. M. Dawson, and C.-A. Yeh, "Modal Analysis of Fluid Flows: Applications and Outlook," AIAA Journal, vol. 0, pp. 1­36, 2019.
+[26] N. Fabbiane, O. Semeraro, S. Bagheri, and D. S. Henningson, "Adaptive and model-based control theory applied to convectively unstable flows," Applied Mechanics Reviews, vol. 66, no. 6, 2014.
+[27] S. L. Brunton and B. R. Noack, "Closed-loop turbulence control: Progress and challenges," Applied Mechanics Reviews, vol. 67, no. 5, 2015.
+[28] D. Sipp and P. J. Schmid, "Linear closed-loop control of fluid instabilities and noise-induced perturbations: A review of approaches and tools," Applied Mechanics Reviews, vol. 68, no. 2, 2016.
+[29] C. W. Rowley and S. T. Dawson, "Model reduction for flow analysis and control," Ann. Rev. Fluid Mech., vol. 49, pp. 387­417, 2017.
+[30] S. Bagheri, "Effects of weak noise on oscillating flows: Linking quality factor, Floquet modes, and Koopman spectrum," Physics of Fluids, vol. 26, no. 9, p. 094104, 2014.
+[31] S. T. Dawson, M. S. Hemati, M. O. Williams, and C. W. Rowley, "Characterizing and correcting for the effect of sensor noise in the dynamic mode decomposition," Exp. Fluids, vol. 57, no. 3, p. 42, 2016.
+[32] M. S. Hemati, C. W. Rowley, E. A. Deem, and L. N. Cattafesta, "De-biasing the dynamic mode decomposition for applied Koopman spectral analysis," TCFD, vol. 31, no. 4, pp. 349­368, 2017.
+[33] T. Askham and J. N. Kutz, "Variable projection methods for an optimized dynamic mode decomposition," SIAM J. Appl. Dyn. Syst., vol. 17, no. 1, pp. 380­416, 2018.
+[34] J. L. Proctor, S. L. Brunton, and J. N. Kutz, "Dynamic mode decomposition with control," SIAM J. Appl. Dyn. Syst., vol. 15, no. 1, pp. 142­161, 2016.
+[35] O. Azencot, W. Yin, and A. Bertozzi, "Consistent dynamic mode decomposition," SIAM J. Appl. Dyn. Syst., vol. 18, no. 3, pp. 1565­1585, 2019.
+[36] I. Scherl, B. Strom, J. K. Shang, O. Williams, B. L. Polagye, and S. L. Brunton, "Robust principal component analysis for particle image velocimetry," Physical Review Fluids, vol. 5, no. 054401, 2020.
+[37] S. L. Brunton, B. W. Brunton, J. L. Proctor, and J. N. Kutz, "Koopman invariant subspaces and finite linear representations of nonlinear dynamical systems for control," PLoS ONE, vol. 11, no. 2, p. e0150171, 2016.
+[38] B. Scho¨ lkopf and A. J. Smola, Learning with kernels: Support vector machines, regularization, optimization, and beyond. MIT Press, 2002.
+[39] J. Shawe-Taylor and N. Cristianini, Kernel Methods for Pattern Analysis. Cambridge University Press, 2004.
+[40] J. Bouvrie and B. Hamzi, "Kernel methods for the approximation of nonlinear systems," SIAM J. Control Optim., vol. 55, no. 4, pp. 2460­2492, 2017.
+[41] Y. Kawahara, "Dynamic mode decomposition with reproducing kernels for Koopman spectral analysis," in Adv. Neural Inf. Process. Syst., pp. 919­927, 2016.
+40
+
+[42] Q. Li, F. Dietrich, E. M. Bollt, and I. G. Kevrekidis, "Extended dynamic mode decomposition with dictionary learning: A data-driven adaptive spectral decomposition of the Koopman operator," Chaos: An Interdisciplinary Journal of Nonlinear Science, vol. 27, no. 10, p. 103111, 2017.
+[43] H. Owhadi and G. R. Yoo, "Kernel Flows: From learning kernels from data into the abyss," J. Comput. Phys., vol. 389, pp. 22­47, 2019.
+[44] D. Giannakis, "Data-driven spectral decomposition and forecasting of ergodic dynamical systems," Applied and Computational Harmonic Analysis, vol. 47, no. 2, pp. 338­396, 2019.
+[45] S. Das and D. Giannakis, "Koopman spectra in reproducing kernel Hilbert spaces," Applied and Computational Harmonic Analysis, vol. 49, no. 2, pp. 573­607, 2020.
+[46] P. Gelß, S. Klus, I. Schuster, and C. Schu¨ tte, "Feature space approximation for kernel-based supervised learning," tech. rep., 2020.
+[47] Z. Li, N. Kovachki, K. Azizzadenesheli, B. Liu, K. Bhattacharya, A. Stuart, and A. Anandkumar, "Neural operator: Graph kernel network for partial differential equations," arXiv preprint arXiv:2003.03485, 2020.
+[48] D. Burov, D. Giannakis, K. Manohar, and A. Stuart, "Kernel analog forecasting: Multiscale test problems," arXiv:2005.06623, 2020.
+[49] Y. Engel, S. Mannor, and R. Meir, "The kernel recursive least-squares algorithm," IEEE Trans. Signal Process., vol. 52, no. 8, pp. 2275­2285, 2004.
+[50] J. C. Loiseau and S. L. Brunton, "Constrained sparse Galerkin regression," J. Fluid Mech., vol. 838, pp. 42­67, 2018.
+[51] M. R. Jovanovic´ and B. Bamieh, "Componentwise energy amplification in channel flows," J. Fluid Mech., vol. 534, pp. 145­183, 2005.
+[52] B. J. McKeon and A. S. Sharma, "A critical-layer framework for turbulent pipe flow," J. Fluid Mech., vol. 658, pp. 336­382, 2010.
+[53] B. J. McKeon, "The engine behind (wall) turbulence: Perspectives on scale interactions," J. Fluid Mech., vol. 817, p. 1, 2017.
+[54] M. R. Jovanovic´, "From bypass transition to flow control and data-driven turbulence modeling: An input­output viewpoint," Ann. Rev. Fluid Mech., vol. 53, pp. 311­345, 2021.
+[55] B. Herrmann, P. J. Baddoo, R. Semaan, S. L. Brunton, and B. J. McKeon, "Data-driven resolvent analysis," J. Fluid Mech., vol. 918, p. A10, 2021.
+[56] K. K. Chen, J. H. Tu, and C. W. Rowley, "Variants of dynamic mode decomposition: Boundary condition, Koopman, and Fourier analyses," J. Nonlinear Sci., vol. 22, pp. 887­915, dec 2012.
+[57] J. L. Proctor and P. A. Eckhoff, "Discovering dynamic patterns from infectious disease data using dynamic mode decomposition," International health, vol. 7, no. 2, pp. 139­145, 2015.
+[58] B. W. Brunton, L. A. Johnson, J. G. Ojemann, and J. N. Kutz, "Extracting spatial­temporal coherent patterns in large-scale neural recordings using dynamic mode decomposition," Journal of Neuroscience Methods, vol. 258, pp. 1­15, 2016.
+[59] J. Grosek and J. N. Kutz, "Dynamic mode decomposition for real-time background/foreground separation in video," arXiv preprint arXiv:1404.7592, 2014.
+[60] N. B. Erichson, S. L. Brunton, and J. N. Kutz, "Compressed dynamic mode decomposition for realtime object detection," Journal of Real-Time Image Processing, 2016.
+[61] E. Berger, M. Sastuba, D. Vogt, B. Jung, and H. B. Amor, "Estimation of perturbations in robotic behavior using dynamic mode decomposition," Journal of Advanced Robotics, vol. 29, no. 5, pp. 331­ 343, 2015.
+[62] I. Abraham and T. D. Murphey, "Active learning of dynamics for data-driven control using Koopman
+41
+
+operators," IEEE Transactions on Robotics, vol. 35, no. 5, pp. 1071­1083, 2019.
+[63] D. Bruder, B. Gillespie, C. David Remy, and R. Vasudevan, "Modeling and control of soft robots using the Koopman operator and model predictive control," in Robotics: Science and Systems, (Freiburg im Breisgau, June22-26,2019), 2019.
+[64] X. T. G Mamakoukas, M Castano and T. Murphey, "Local Koopman operators for data-driven control of robotic systems," in Proceedings of "Robotics: Science and Systems 2019", Freiburg im Breisgau, June 22-26, 2019, IEEE, 2019.
+[65] J. Mann and J. N. Kutz, "Dynamic mode decomposition for financial trading strategies," Quantitative Finance, pp. 1­13, 2016.
+[66] Y. Susuki and I. Mezic, "Nonlinear Koopman Modes and Coherency Identification of Coupled Swing Dynamics," IEEE Transactions on Power Systems, vol. 26, pp. 1894­1904, Nov. 2011.
+[67] Y. Susuki, I. Mezic´, and T. Hikihara, "Coherent Swing Instability of Power Grids," Journal of Nonlinear Science, vol. 21, pp. 403­439, Feb. 2011.
+[68] R. Taylor, J. N. Kutz, K. Morgan, and B. Nelson, "Dynamic mode decomposition for plasma diagnostics and validation," arXiv preprint arXiv:1702.06871, 2017.
+[69] A. A. Kaptanoglu, K. D. Morgan, C. J. Hansen, and S. L. Brunton, "Characterizing magnetized plasmas with dynamic mode decomposition," Physics of Plasmas, vol. 27, p. 032108, 2020.
+[70] M. R. Jovanovic´, P. J. Schmid, and J. W. Nichols, "Sparsity-promoting dynamic mode decomposition," Phys. Fluids, vol. 26, no. 2, p. 024103, 2014.
+[71] B. R. Noack, W. Stankiewicz, M. Morzynski, and P. J. Schmid, "Recursive dynamic mode decomposition of a transient cylinder wake," J. Fluid Mech., vol. 809, pp. 843­872, 2016.
+[72] J. N. Kutz, X. Fu, and S. L. Brunton, "Multi-resolution dynamic mode decomposition," SIAM J. Appl. Dyn. Syst., vol. 15, no. 2, pp. 713­735, 2016.
+[73] M. S. Hemati, M. O. Williams, and C. W. Rowley, "Dynamic mode decomposition for large and streaming datasets," Physics of Fluids (1994-present), vol. 26, no. 11, p. 111701, 2014.
+[74] S. L. Brunton, J. L. Proctor, J. H. Tu, and J. N. Kutz, "Compressed sensing and dynamic mode decomposition," Journal of Computational Dynamics, vol. 2, no. 2, pp. 165­191, 2015.
+[75] F. Gueniat, L. Mathelin, and L. Pastur, "A dynamic mode decomposition approach for large and arbitrarily sampled systems," Physics of Fluids, vol. 27, no. 2, p. 025113, 2015.
+[76] J. H. Tu, C. W. Rowley, J. N. Kutz, and J. K. Shang, "Spectral analysis of fluid flows using sub-Nyquistrate PIV data," Experiments in Fluids, vol. 55, no. 9, pp. 1­13, 2014.
+[77] G. H. Golub and C. F. Van Loan, Matrix Computations, vol. 3. JHU Press, 2013.
+[78] C. Eckart and G. Young, "The approximation of one matrix by another of lower rank," Psychometrika, vol. 1, no. 3, pp. 211­218, 1936.
+[79] W. Liu, P. P. Pokharel, and J. C. Principe, "The kernel least-mean-square algorithm," IEEE Trans. Signal Process., vol. 56, no. 2, pp. 543­554, 2008.
+[80] W. Liu, J. C. Pr´incipe, and S. Haykin, Kernel Adaptive Filtering: A Comprehensive Introduction. Wiley, 2010.
+[81] B. Scho¨ lkopf, A. Smola, and K. R. Mu¨ ller, "Nonlinear component analysis as a kernel eigenvalue problem," Neural Comput., vol. 10, no. 5, pp. 1299­1319, 1998.
+[82] S. Mika, B. Scho¨ lkopf, A. Smola, K. R. Mu¨ ller, M. Scholz, and G. Ra¨tsch, "Kernel PCA and de-noising in feature spaces," in Adv. Neural Inf. Process. Syst., pp. 536­542, 1999.
+[83] R. Herbrich, Learning Kernel Classifiers: Theory and Algorithms. MIT Press, 2002.
+[84] G. Camps-Valls and L. Bruzzone, "Kernel-based methods for hyperspectral image classification," IEEE Trans. Geosci. Remote Sens., vol. 43, no. 6, pp. 1351­1362, 2005.
+42
+
+[85] N. Cristianini and J. Shawe-Taylor, An introduction to support vector machines and other kernel-based learning methods. Cambridge University Press, 2000.
+[86] J. Mercer, "XVI. Functions of positive and negative type, and their connection the theory of integral equations," Philos. Trans. R. Soc. London, vol. 209, no. 441-458, pp. 415­446, 1909.
+[87] G. Kimeldorf and G. Wahba, "Some results on Tchebycheffian spline functions," J. Math. Anal. Appl., vol. 33, no. 1, pp. 82­95, 1971.
+[88] B. Scho¨ lkopf, R. Herbrich, and A. J. Smola, "A generalized representer theorem," in Lect. Notes Comput. Sci., vol. 2111, pp. 416­426, 2001.
+[89] J. T. Y. Kwok and I. W. H. Tsang, "The pre-image problem in kernel methods," IEEE Trans. Neural Networks, vol. 15, no. 6, pp. 1517­1525, 2004.
+[90] C. K. Williams and M. Seeger, "Using the nystro¨ m method to speed up kernel machines," in Adv. Neural Inf. Process. Syst., 2001.
+[91] A. Rahimi and B. Recht, "Random features for large-scale kernel machines," NIPS, vol. 3, no. 4, p. 5, 2007.
+[92] J. R. Bunch and C. P. Nielsen, "Updating the singular value decomposition," Numer. Math., vol. 31, no. 2, pp. 111­129, 1978.
+[93] M. Brand, "Fast low-rank modifications of the thin singular value decomposition," Linear Algebra Appl., vol. 415, no. 1, pp. 20­30, 2006.
+[94] P. Benner, P. Goyal, B. Kramer, B. Peherstorfer, and K. Willcox, "Operator inference for non-intrusive model reduction of systems with non-polynomial nonlinear terms," Comput. Methods Appl. Mech. Eng., vol. 372, 2020.
+[95] I. Steinwart, D. Hush, and C. Scovel, "An explicit description of the reproducing Kernel Hilbert spaces of Gaussian RBF kernels," IEEE Trans. Inf. Theory, vol. 52, no. 10, pp. 4635­4643, 2006.
+[96] B. Haasdonk and H. Burkhardt, "Invariant kernel functions for pattern analysis and machine learning," Mach. Learn., vol. 68, no. 1, pp. 35­61, 2007.
+[97] S. Klus, P. Gelß, F. Nu¨ ske, and F. Noe´, "Symmetric and antisymmetric kernels for machine learning problems in quantum physics and chemistry," 2021.
+[98] D. Decoste and B. Scho¨ lkopf, "Training invariant support vector machines," Mach. Learn., vol. 46, no. 1-3, pp. 161­190, 2002.
+[99] P. Reiterer, C. Lainscsek, F. Schu¨ rrer, C. Letellier, and J. Maquet, "A nine-dimensional Lorenz system to study high-dimensional chaos," J. Phys. A. Math. Gen., vol. 31, no. 34, pp. 7121­7139, 1998.
+[100] E. N. Lorenz, "Deterministic nonperiodic flow," J. Atmos. Sci., vol. 20, no. 2, pp. 130­141, 1963.
+[101] J. A. Acebro´ n, L. L. Bonilla, C. J. Vicente, F. Ritort, and R. Spigler, "The Kuramoto model: A simple paradigm for synchronization phenomena," Rev. Mod. Phys., vol. 77, no. 1, pp. 137­185, 2005.
+[102] P. Gelß, S. Klus, J. Eisert, and C. Schu¨ tte, "Multidimensional Approximation of Nonlinear Dynamical Systems," J. Comput. Nonlinear Dyn., vol. 14, no. 6, 2019.
+[103] J. Snyder, J. L. Callaham, S. L. Brunton, and J. N. Kutz, "Data-driven stochastic modeling of coarsegrained dynamics with finite-size effects using Langevin regression," arXiv preprint arXiv:2103.16791, 2021.
+[104] T. A. Driscoll, N. Hale, and L. N. Trefethen, Chebfun Guide. Oxford: Pafnuty Publications, 2014.
+[105] S. M. Cox and P. C. Matthews, "Exponential time differencing for stiff systems," J. Comput. Phys., vol. 176, no. 2, pp. 430­455, 2002.
+[106] H. Montanelli and N. Bootland, "Solving periodic semilinear stiff PDEs in 1D, 2D and 3D with exponential integrators," Math. Comput. Simul., vol. 178, pp. 307­327, 2020.
+[107] C. D. Brummitt and J. C. Sprott, "A search for the simplest chaotic partial differential equation," Phys.
+43
+
+Lett. A, vol. 373, no. 31, pp. 2717­2721, 2009.
+[108] S. Filip, A. Javeed, and L. N. Trefethen, "Smooth random functions, random ODEs, and Gaussian processes," SIAM Review, vol. 61, no. 1, pp. 185­205, 2019.
+[109] A. Schwaighofer, V. Tresp, and K. Yu, "Learning Gaussian process kernels via hierarchical Bayes," in Adv. Neural Inf. Process. Syst., 2005.
+[110] P. C. Hansen, "The truncated SVD as a method for regularization," BIT, vol. 27, no. 4, pp. 534­553, 1987.
+[111] V. Roth, "The generalized LASSO," IEEE Trans. Neural Networks, vol. 15, no. 1, pp. 16­28, 2004.
+[112] G. Wang, D. Y. Yeung, and F. H. Lochovsky, "The kernel path in kernelized LASSO," in J. Mach. Learn. Res., vol. 2, pp. 580­587, 2007.
+[113] E. A° kervik, L. Brandt, D. S. Henningson, J. Hoepffner, O. Marxen, and P. Schlatter, "Steady solutions of the Navier-Stokes equations by selective frequency damping," Physics of Fluids, vol. 18, no. 6, p. 068102, 2006.
+[114] S. Bagheri, E. A° kervik, L. Brandt, and D. S. Henningson, "Matrix-free methods for the stability and control of boundary layers," AIAA journal, vol. 47, no. 5, pp. 1057­1068, 2009.
+[115] A. Monokrousos, E. A° kervik, L. Brandt, and D. S. Henningson, "Global three-dimensional optimal disturbances in the Blasius boundary-layer flow using time-steppers," J. Fluid Mech., vol. 650, pp. 181­ 214, 2010.
+[116] J.-C. Loiseau, M. A. Bucci, S. Cherubini, and J.-C. Robinet, "Time-stepping and Krylov methods for large-scale instability problems," in Computational Modelling of Bifurcations and Instabilities in Fluid Dynamics, pp. 33­73, Springer, 2019.
+[117] J. H. M. Ribeiro, C.-A. Yeh, and K. Taira, "Randomized resolvent analysis," Physical Review Fluids, vol. 5, no. 3, p. 033902, 2020.
+[118] S. Bagheri, P. Schlatter, P. J. Schmid, and D. S. Henningson, "Global stability of a jet in crossflow," J. Fluid Mech., vol. 624, no. 9, pp. 33­44, 2009.
+[119] V. Theofilis, "Global linear instability," Ann. Rev. Fluid Mech., vol. 43, pp. 319­352, 2011.
+[120] P. Luchini and A. Bottaro, "Adjoint equations in stability analysis," Ann. Rev. Fluid Mech., vol. 46, 2014.
+[121] H. Zhang, C. W. Rowley, E. A. Deem, and L. N. Cattafesta, "Online dynamic mode decomposition for time-varying systems," SIAM J. Appl. Dyn. Syst., vol. 18, no. 3, pp. 1586­1609, 2019.
+[122] C.-A. Yeh and K. Taira, "Resolvent-analysis-based design of airfoil separation control," J. Fluid Mech., vol. 867, pp. 572­610, 2019.
+[123] E. Kaiser, J. N. Kutz, and S. L. Brunton, "Sparse identification of nonlinear dynamics for model predictive control in the low-data limit," Proceedings of the Royal Society of London A, vol. 474, no. 2219, 2018.
+[124] R. Chartrand, "Numerical Differentiation of Noisy, Nonsmooth Data," ISRN Appl. Math., vol. 2011, pp. 1­11, 2011.
+[125] G. H. Golub and C. F. van Loan, "An analysis of the total least squares problem," SIAM J. Numer. Anal., vol. 17, no. 6, pp. 883­893, 1980.
+[126] S. V. Huffel and J. Vandewalle, The total least squares problem: computational aspects and analysis. SIAM, 1991.
+[127] W. Liu, I. Park, Y. Wang, and J. C. Principe, "Extended kernel recursive least squares algorithm," IEEE Trans. Signal Process., vol. 57, no. 10, pp. 3801­3814, 2009. 
+[128] M. Gavish and D. L. Donoho, "The optimal hard threshold for singular values is 4/ 3," IEEE Trans. Inf. Theory, vol. 60, no. 8, pp. 5040­5053, 2014.
+44
+
+

@@ -1,0 +1,1924 @@
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+arXiv:2106.00136v1 [cs.LG] 31 May 2021
+
+Anuj Mahajan 1 Mikayel Samvelyan 2 Lei Mao 3 Viktor Makoviychuk 3 Animesh Garg 3 Jean Kossaifi 3 Shimon Whiteson 1 Yuke Zhu 3 Animashree Anandkumar 3
+
+Abstract
+Reinforcement Learning in large action spaces is a challenging problem. Cooperative multi-agent reinforcement learning (MARL) exacerbates matters by imposing various constraints on communication and observability. In this work, we consider the fundamental hurdle affecting both valuebased and policy-gradient approaches: an exponential blowup of the action space with the number of agents. For value-based methods, it poses challenges in accurately representing the optimal value function. For policy gradient methods, it makes training the critic difficult and exacerbates the problem of the lagging critic. We show that from a learning theory perspective, both problems can be addressed by accurately representing the associated action-value function with a low-complexity hypothesis class. This requires accurately modelling the agent interactions in a sample efficient way. To this end, we propose a novel tensorised formulation of the Bellman equation. This gives rise to our method TESSERACT, which views the Q-function as a tensor whose modes correspond to the action spaces of different agents. Algorithms derived from TESSERACT decompose the Q-tensor across agents and utilise low-rank tensor approximations to model agent interactions relevant to the task. We provide PAC analysis for TESSERACT-based algorithms and highlight their relevance to the class of rich observation MDPs. Empirical results in different domains confirm TESSERACT's gains in sample efficiency predicted by the theory.
+1. Introduction
+Many real-world problems, such as swarm robotics and autonomous vehicles, can be formulated as multi-agent reinforcement learning (MARL) (Bus¸oniu et al., 2010) problems. MARL introduces several new challenges that do not
+1University of Oxford 2University College London 3NVIDIA. Correspondence to: Anuj Mahajan <anuj.mahajan@cs.ox.ac.uk>.
+Proceedings of the 38 th International Conference on Machine Learning, PMLR 139, 2021. Copyright 2021 by the author(s).
+
+arise in single-agent reinforcement learning (RL), including exponential growth of the action space in the number of agents. This affects multiple aspects of learning, such as credit assignment (Foerster et al., 2018), gradient variance (Lowe et al., 2017) and exploration (Mahajan et al., 2019). In addition, while the agents can typically be trained in a centralised manner, practical constraints on observability and communication after deployment imply that decision making must be decentralised, yielding the extensively studied setting of centralised training with decentralised execution (CTDE).
+Recent work in CTDE-MARL can be broadly classified into value-based methods and actor-critic methods. Value-based methods (Sunehag et al., 2017; Rashid et al., 2018; Son et al., 2019; Wang et al., 2020a; Yao et al., 2019) typically enforce decentralisability by modelling the joint action Q-value such that the argmax over the joint action space can be tractably computed by local maximisation of per-agent utilities. However, constraining the representation of the Q-function can interfere with exploration, yielding provably suboptimal solutions (Mahajan et al., 2019). Actor-critic methods (Lowe et al., 2017; Foerster et al., 2018; Wei et al., 2018) typically use a centralised critic to estimate the gradient for a set of decentralised policies. In principle, actor-critic methods can satisfy CTDE without incurring suboptimality, but in practice their performance is limited by the accuracy of the critic, which is hard to learn given exponentially growing action spaces. This can exacerbate the problem of the lagging critic (Konda & Tsitsiklis, 2002). Moreover, unlike the singleagent setting, this problem cannot be fixed by increasing the critic's learning rate and number of training iterations. Similar to these approaches, an exponential blowup in the action space also makes it difficult to choose the appropriate class of models which strike the correct balance between expressibility and learnability for the given task.
+In this work, we present new theoretical results that show how the aforementioned approaches can be improved such that they accurately represent the joint action-value function whilst keeping the complexity of the underlying hypothesis class low. This translates to accurate, sample efficient modelling of long-term agent interactions.
+In particular, we propose TESSERACT (derived from "Tensorised Actors"), a new framework that leverages tensors for
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+MARL. Tensors are high dimensional analogues of matrices that offer rich insights into representing and transforming data. The main idea of TESSERACT is to view the output of a joint Q-function as a tensor whose modes correspond to the actions of the different agents. We thus formulate the Tensorised Bellman equation, which offers a novel perspective on the underlying structure of a multi-agent problem. In addition, it enables the derivation of algorithms that decompose the Q-tensor across agents and utilise low rank approximations to model relevant agent interactions.
+Many real-world tasks (e.g., robot navigation) involve high dimensional observations but can be completely described by a low dimensional feature vector (e.g., a 2D map suffices for navigation). For value-based TESSERACT methods, maintaining a tensor approximation with rank matching the intrinsic task dimensionality1 helps learn a compact approximation of the true Q-function (alternatively MDP-dynamics for model based methods). In this way, we can avoid the suboptimality of the learnt policy while remaining sample efficient. Similarly, for actor-critic methods, TESSERACT reduces the critic's learning complexity while retaining its accuracy, thereby mitigating the lagging critic problem. Thus, TESSERACT offers a natural spectrum for trading off accuracy with computational/sample complexity.
+To gain insight into how tensor decomposition helps improve sample efficiency for MARL, we provide theoretical results for model-based TESSERACT algorithms and show that the underlying joint transition and reward functions can be efficiently recovered under a PAC framework (in samples polynomial in accuracy and confidence parameters). We also introduce a tensor-based framework for CTDE-MARL that opens new possibilities for developing efficient classes of algorithms. Finally, we explore the relevance of our framework to rich observation MDPs.
+Our main contributions are:
+1. A novel tensorised form of the Bellman equation;
+2. TESSERACT, a method to factorise the action-value function based on tensor decomposition, which can be used for any factored action space;
+3. PAC analysis and error bounds for model based TESSERACT that show an exponential gain in sample efficiency of O(|U |n/2); and
+4. Empirical results illustrating the advantage of TESSERACT over other methods and detailed techniques for making tensor decomposition work for deep MARL.
+1We define intrinsic task dimensionality (ITD) as the minimum number of dimensions required to describe an environment
+
+2. Background
+
+Cooperative MARL settings In the most general set-
+
+ting, a fully cooperative multi-agent task can be mod-
+
+elled as a multi-agent partially observable MDP (M-
+
+POMDP) (Messias et al., 2011). An M-POMDP is for-
+
+mally defined as a tuple G = S, U, P, r, Z, O, n,  . S
+
+is the state space of the environment. At each time step
+
+t, every agent i  A  {1, ..., n} chooses an action ui  U which forms the joint action u  U  U n.
+
+P (s |s, u) : S × U × S  [0, 1] is the state transition
+
+function. r(s, u) : S × U  [0, 1] is the reward function
+
+shared by all agents and   [0, 1) is the discount factor.
+
+An M-POMDP is
+
+partially observ-
+
+able (Kaelbling
+
+et al., 1998): each
+
+agent does not
+
+have access to
+
+the full state and
+
+instead samples
+
+observations
+
+z  Z according to observation
+
+Figure 1: Different settings in MARL
+
+distribution
+
+O(s) : S  P(Z). The action-observation history for an agent i is  i  T  (Z × U ). We use u-i to denote
+
+the action of all the agents other than i and similarly for the policies -i. Settings where the agents cannot
+
+exchange their action-observation histories with others
+
+and must condition their policy solely on local trajectories, i(ui| i) : T × U  [0, 1], are referred to as a decen-
+
+tralised partially observable MDP (Dec-POMDP) (Oliehoek
+
+& Amato, 2016). When the observations have additional
+
+structure, namely the joint observation space is partitioned
+
+w.r.t. S, i.e., s1, s2  S  z  Z, P (z|s1) > 0  s1 = s2 = P (z|s2) = 0, we classify the problem as a multiagent richly observed MDP (M-ROMDP) (Azizzadenesheli
+
+et al., 2016). For both M-POMDP and M-ROMDP, we
+
+assume |Z| >> |S|, thus for this work, we assume a setting
+
+with no information loss due to observation but instead,
+
+redundancy across different observation dimensions.
+
+Such is the case for many real world tasks like 2D robot
+
+navigation using observation data from different sensors.
+
+Finally, when the observation function is a bijective map
+
+O : S  Z, we refer to the scenario as a multi-agent MDP
+
+(MMDP) (Boutilier, 1996), which can simply be denoted
+
+by the tuple : S, U, P, r, n,  . Fig. 1 gives the relation
+
+between different scenarios for the cooperative setting. For
+
+ease of exposition, we present our theoretical results for the
+
+MMDP case, though they can easily be extended to other
+
+cases by incurring additional sample complexity.
+
+The joint action-value function given a policy  is defined as:
+
+Q (st, ut) = Est+1:,ut+1:
+
+ k=0
+
+k
+
+rt+k
+
+|st
+
+,
+
+ut
+
+.
+
+The
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+goal is to find the optimal policy  corresponding to the optimal action value function Q. For the special learning scenario called Centralised Training with Decentralised Execution (CTDE), the learning algorithm has access to the action-observation histories of all agents and the full state during training phase. However, each agent can only condition on its own local action-observation history  i during the decentralised execution phase.
+
+sets Ij, j  {1..n} and has elements T (e), e  ×IIj taking values in a given set S, where × is the set cross product and we denote the set of index sets by I. Each dimension {1..n} is also called a mode. An elegant way of
+
+Reinforcement Learning Methods Both value-based
+and actor-critic methods for reinforcement learning (RL) rely on an estimator for the action-value function Q given a target policy . Q satisfies the (scalar)-Bellman expectation equation: Q(s, u) = r(s, u) + Es ,u [Q(s , u )], which can equivalently be written in vectorised form
+as:
+
+Q = R + P Q,
+
+(1)
+
+where R is the mean reward vector of size S, P  is the transition matrix. The operation on RHS T (·) R + P (·) is the Bellman expectation operator for the
+policy . In Section 3 we generalise Eq. (1) to a novel
+tensor form suitable for high-dimensional and multi-agent
+settings. For large state-action spaces function approximation is used to estimate Q. A parametrised approximation Q is usually trained using the bootstrapped target
+objective derived using the samples from  by minimising
+the mean squared temporal difference error: E[(r(s, u) + Q(s , u ) - Q(s, u))2]. Value based methods use the Q estimate to derive a behaviour policy which is iter-
+atively improved using the policy improvement theorem
+(Sutton & Barto, 2011). Actor-critic methods seek to max-
+imise the mean expected payoff of a policy  given by J = S (s) U (u|s)Q(s, u)duds using gradient ascent on a suitable class of stochastic policies parametrised by , where (s) is the stationary distribution over the states.
+Updating the policy parameters in the direction of the gradi-
+ent leads to policy improvement. The gradient of the above objective is J = S (s) U (u|s)Q(s, u)duds (Sutton et al., 2000). An approximate action-value function based critic Q is used when estimating the gradient as we
+do not have access to the true Q-function. Since the critic is
+learnt using finite number of samples, it may deviate from
+the true Q-function, potentially causing incorrect policy
+updates; this is called the lagging critic problem. The prob-
+lem is exacerbated in multi-agent setting where state-action
+
+spaces are very large.
+
+Tensor Decomposition Tensors are high dimensional analogues of matrices and tensor methods generalize matrix algebraic operations to higher orders. Tensor decomposition, in particular, generalizes the concept of low-rank matrix factorization. In the rest of this paper, we use ^· to represent tensors. Formally, an order n tensor T^ has n index
+
+Figure 2: Left: Tensor diagram for an order 3 tensor T^. Right: Contraction between T^1,T^2 on common index sets I2, I3.
+representing tensors and associated operations is via tensor diagrams as shown in Fig. 2. Tensor contraction generalizes the concept of matrix with matrix multiplication. For any two tensors T^1 and T^2 with I = I1  I2 we define the contraction operation as T^ = T^1 T^2 with T^(e1, e2) =
+e×I Ij T^1(e1, e) · T^2(e2, e), ei  ×Ii\I Ij . The contraction operation is associative and can be extended to an arbitrary number of tensors. Using this building block, we can define tensor decompositions, which factorizes a (lowrank) tensor in a compact form. This can be done with various decompositions (Kolda & Bader, 2009), such as Tucker, Tensor-Train (also known as Matrix-Product-State), or CP (for Canonical-Polyadic). In this paper, we focus on the latter, which we briefly introduce here. Just as a matrix can be factored as a sum of rank-1 matrices (each being an outer product of vectors), a tensor can be factored as a sum of rank-1 tensors, the latter being an outer product of vectors. The number of vectors in the outer product is equal to the rank of the tensor, and the number of terms in the sum is called the rank of the decomposition (sometimes also called CP-rank). Formally, a tensor T^ can be factored using a (rank­k) CP decomposition into a sum of k vector outer products (denoted by ), as,
+k
+T^ = wr n uir, i  {1..n}, ||uir||2 = 1. (2)
+r=1
+3. Methodology
+3.1. Tensorised Bellman equation In this section, we provide the basic framework for Tesseract. We focus here on the discrete action space. The extension for continuous actions is similar and is deferred to Appendix B.2 for clarity of exposition.
+Proposition 1. Any real-valued function f of n arguments (x1..xn) each taking values in a finite set xi  Di can be represented as a tensor f^ with modes corresponding to the domain sets Di and entries f^(x1..xn) = f (x1..xn).
+Given a multi-agent problem G = S, U, P, r, Z, O, n,  ,
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+let Q {Q : S × U n  R} be the set of real-valued functions on the state-action space. We are interested in the curried (Barendregt, 1984) form Q : S  U n  R, Q  Q so that Q(s) is an order n tensor (We use functions and tensors interchangeably where it is clear from context). Algorithms in Tesseract operate directly on the curried form and preserve the structure implicit in the output tensor. (Currying in the context of tensors implies fixing the value of some index. Thus, Tesseract-based methods keep action indices free and fix only state-dependent indices.)
+We are now ready to present the tensorised form of the Bellman equation shown in Eq. (1). Fig. 3 gives the equation where I^ is the identity tensor of size |S| × |S| × |S|. The dependence of the action-value tensor Q^ and the policy tensor U^  on the policy is denoted by superscripts . The novel Tensorised Bellman equation provides a theoretically justified foundation for the approximation of the joint Q-function, and the subsequent analysis (Theorems 1-3) for learning using this approximation.
+Figure 3: Tensorised Bellman Equation for n agents. There is an edge for each agent i  A in the corresponding nodes Q^, U^ , R^, P^ with the index set U i.
+3.2. TESSERACT Algorithms For any k  N let Qk {Q : Q  Q  rank(Q(·, s))  k, s  S}. Given any policy  we are interested in projecting Q to Qk using the projection operator k(·) = arg minQQk || · -Q||,F . where ||X||,F Es(s)[||X(s)||F ] is the weighted Frobenius norm w.r.t. policy visitation over states. Thus a simple planning based algorithm for rank k TESSERACT would involve starting with an arbitrary Q0 and successively applying the Bellman operator T  and the projection operator k so that Qt+1 = kT Qt.
+As we show in Theorem 1, constraining the underlying tensors for dynamics and rewards (P^, R^) is sufficient to bound the CP-rank of Q^. From this insight, we propose a model-based RL version for TESSERACT in Algorithm 1. The algorithm proceeds by estimating the underlying MDP dynamics using the sampled trajectories obtained by executing the behaviour policy  = (i)n1 (factorisable across agents) satisfying Theorem 2. Specifically, we use a rank k approximate CP-Decomposition to calculate the model dynamics R, P as we show in Section 4. Next  is evaluated using the estimated dynamics, which is followed by policy
+
+improvement, Algorithm 1 gives the pseudocode for the model-based setting. The termination and policy improvement decisions in Algorithm 1 admit a wide range of choices used in practice in the RL community. Example choices for internal iterations which broadly fall under approximate policy iteration include: 1) Fixing the number of applications of Bellman operator 2) Using norm of difference between consecutive Q estimates etc., similarly for policy improvement several options can be used like -greedy (for Q derived policy), policy gradients (parametrized policy) (Sutton & Barto, 2011)
+
+Algorithm 1 Model-based Tesseract
+
+1: Initialise rank k,  = (i)n1 and Q^: Theorem 2 2: Initialise model parameters P^, R^
+
+3: Learning rate  ,D  {}
+
+4: for each episodic iteration i do
+
+5: Do episode rollout i = (st, ut, rt, st+1)L0 using 
+
+6: D  D  {i} 7: Update P^, R^ using CP-Decomposition on moments
+
+from D (Theorem 2)
+
+8: for each internal iteration j do
+
+9:
+
+Q^  T Q^
+
+10: end for 11: Improve  using Q^
+
+12: end for 13: Return , Q^
+
+For large state spaces where storage and planning using model parameters is computationally difficult (they are O(kn|U ||S|2) in number), we propose a model-free approach using a deep network where the rank constraint on the Q-function is directly embedded into the network architecture. Fig. 4 gives the general network architecture for this approach and Algorithm 2 the associated pseudo-code. Each agent in Fig. 4 has a policy network parameterized by  which is used to take actions in a decentralised manner. The observations of the individual agents along with the actions are fed through representation function g whose output is a set of k unit vectors of dimensionality |U | corresponding to each rank. The output g,r(si) corresponding to each agent i for factor r can be seen as an action-wise contribution to the joint utility from the agent corresponding to that factor. The joint utility here is a product over individual agent utilities. For partially observable settings, an additional RNN layer can be used to summarise agent trajectories. The joint action-value estimate of the tensor Q^(s) by the centralized critic is:
+k
+Q^(s)  T = wr n g,r(si), i  {1..n}, (3)
+r=1
+where the weights wr are learnable parameters exclusive
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+value-based MARL methods in the CTDE setting, as it is an actor-critic method. In general, any form of function approximation and compatible model-free approach can be interleaved with Tesseract by appropriate use of the projection function k.
+
+Figure 4: Tesseract architecture
+
+to the centralized learner. In the case of value based methods where the policy is implicitly derived from utilities, the policy parameters  are merged with . The network architecture is agnostic to the type of the action space (discrete/continuous) and the action-value corresponding to a particular joint-action (u1..un) is the inner product T, A where A = nui (This reduces to indexing using joint action in Eq. (3) for discrete spaces). More representational capacity can be added to the network by creating an abstract representation for actions using f, which can be any arbitrary monotonic function (parametrised by ) of vector output of size m  |U | and preserves relative order of utilities across actions; this ensures that the optimal policy is learnt as long as it belongs to the hypothesis space. In this case A = nf(ui) and the agents also carry a copy of f during the execution phase. Furthermore, the inner product T, A can be computed efficiently using the property
+
+k
+
+n
+
+T, A = wr f(ui)g,r(si) , i  {1..n}
+
+r=1
+
+1
+
+which is O(nkm) whereas a naive approach involving computation of the tensors first would be O(kmn). Training the
+
+Tesseract-based Q-network involves minimising the squared
+
+TD loss (Sutton & Barto, 2011):
+
+LT D(, ) = E[(Q(ut, st; , )
+-[r(ut, st) + Q(ut+1, st+1; -, -)])2],
+where -, - are target parameters. Policy updates involve gradient ascent w.r.t. to the policy parameters  on the objective J = S (s) U (u|s)Q(s, u)duds. More sophisticated targets can be used to reduce the policy gradient variance (Greensmith et al., 2004; Zhao et al., 2016) and propagate rewards efficiently (Sutton, 1988). Note that Algorithm 2 does not require the individual-global maximisation principle (Son et al., 2019) typically assumed by
+
+Algorithm 2 Model-free Tesseract
+1: Initialise rank k, parameter vectors , ,  2: Learning rate  ,D  {} 3: for each episodic iteration i do 4: Do episode rollout i = (st, ut, rt, st+1)L0 using
+ 5: D  D  {i} 6: Sample batch B  D. 7: Compute empirical estimates for LT D, J 8:    - LT D (Rank k projection step) 9:    - LT D (Action representation update) 10:    + J (Policy update) 11: end for 12: Return , Q^
+
+3.3. Why Tesseract? As discussed in Section 1, Q(s) is an object of prime interest in MARL. Value based methods (Sunehag et al., 2017; Rashid et al., 2018; Yao et al., 2019) that directly approximate the optimal action values Q place constraints on Q(s) such that it is a monotonic combination of agent utilities. In terms of Tesseract this directly translates to finding the best projection constraining Q(s) to be rank one (Appendix B.1). Similarly, the following result demonstrates containment of action-value functions representable by FQL(Chen et al., 2018) which uses a learnt inner product to model pairwise agent interactions (proof and additional results in Appendix B.1):.
+
+Proposition 2. The set of joint Q-functions representable by FQL is a subset of that representable by TESSERACT.
+
+MAVEN (Mahajan et al., 2019) illustrates how rank 1 pro-
+
+jections can lead to insufficient exploration and provides
+
+a method to avoid suboptimality by using mutual infor-
+
+mation (MI) to learn a diverse set of rank 1 projections
+
+that correspond to different joint behaviours. In Tesseract,
+
+this can simply be achieved by finding the best approx-
+
+imation constraining Q(s) to be rank k. Moreover, the
+
+CP-decomposition problem, being a product form (Eq. (2)),
+
+is well posed, whereas in (Mahajan et al., 2019) the prob-
+
+lem form is T^ =
+
+k r=1
+
+wr
+
+n
+
+uir, i
+
+
+
+{1..n},
+
+||uir ||2
+
+=
+
+1,
+
+which requires careful balancing of different factors {1..k}
+
+using MI as otherwise all factors collapse to the same esti-
+
+mate. The above improvements are equally important for
+
+the critic in actor-critic frameworks. Note that TESSERACT
+
+is complete in the sense that every possible joint Q-function
+
+is representable by it given sufficient approximation rank.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+This follows as every possible Q-tensor can be expressed as linear combination of one-hot tensors (which form a basis for the set).
+Many real world problems have high-dimensional observation spaces that are encapsulated in an underlying low dimensional latent space that governs the transition and reward dynamics (Azizzadenesheli et al., 2016). For example, in the case of robot navigation, the observation is high dimensional visual and sensory input but solving the underlying problem requires only knowing the 2D position. Standard RL algorithms that do not address modelling the latent structure in such problems typically incur poor performance and intractability. In Section 4 we show how Tesseract can be leveraged for such scenarios. Finally, projection to a low rank offers a natural way of regularising the approximate Q-functions and makes them easier to learn, which is important for making value function approximation amenable to multi-agent settings. Specifically for the case of actor-critic methods, this provides a natural way to make the critic learn more quickly. Additional discussion about using Tesseract for continuous action spaces can be found in Appendix B.2.
+4. Analysis
+In this section we provide a PAC analysis of model-based Tesseract (Algorithm 1). We focus on the MMDP setting (Section 2) for the simplicity of notation and exposition; guidelines for other settings are provided in Appendix A.
+The objective of the analysis is twofold: Firstly it provides concrete quantification of the sample efficiency gained by model-based policy evaluation. Secondly, it provides insights into how Tesseract can similarly reduce sample complexity for model-free methods. Proofs for the results stated can be found in Appendix A. We begin with the assumptions used for the analysis:
+Assumption 1. For the given MMDP G = S, U, P, r, n,  , the reward tensor R^(s), s  S has bounded rank k1  N.
+Intuitively, a small k1 in Assumption 1 implies that the reward is dependent only on a small number of intrinsic factors characterising the actions.
+Assumption 2. For the given MMDP G = S, U, P, r, n,  , the transition tensor P^(s, s ), s, s  S has bounded rank k2  N.
+Intuitively a small k2 in Assumption 2 implies that only a small number of intrinsic factors characterising the actions lead to meaningful change in the joint state. Assumption 1-2 always hold for a finite MMDP as CP-rank is upper bounded by nj=1|Uj|, where Uj are the action sets.
+
+Assumption 3. The underlying MMDP is ergodic for any policy  so that there is a stationary distribution .
+
+Next, we define coherence parameters, which are quan-
+
+tities of interest for our theoretical results: for reward
+
+decomposition R^(s) n maxi,r,j |vr,i,s(j)|,
+
+=r wsmax
+
+wr,s =
+
+n vr,i,s, let µs maxi,r wr,s,wsmin
+
+= =
+
+mini,r wr,s. Similarly define the corresponding quantities
+
+for µs,s , wsm,asx, wsm,isn for transition tensors P^(s, s ). A low
+
+coherence implies that the tensor's mass is evenly spread
+
+and helps bound the possibility of never seeing an entry with
+
+very high mass (large absolute value of an entry).
+
+Theorem 1. For a finite MMDP the action-value tensor satisfies rank(Q^(s))  k1 + k2|S|, s  S, .
+
+Proof. We first unroll the Tensor Bellman equation in Fig. 3. The first term R^ has bounded rank k1 by Assumption 1.
+Next, each contraction term on the RHS is a linear combination of {P^(s, s )}s S each of which has bounded rank k2
+(Assumption 2). The result follows from the sub-additivity
+of CP-rank.
+
+Theorem 1 implies that for approximations with enough factors, policy evaluation converges:
+
+Corollary 1.1. For all k  k1 + k2|S|, the procedure Qt+1  kT Qt converges to Q for all Q0, .
+
+Corollary 1.1 is especially useful for the case of M-POMDP and M-ROMDP with |Z| >> |S|, i.e., where the intrinsic state space dimensionality is small in comparison to the dimensionality of the observations (like robot navigation Section 3.3). In these cases the Tensorised Bellman equation Fig. 3 can be augmented by padding the transition tensor P^ with the observation matrix and the lower bound in Corollary 1.1 can be improved using the intrinsic state dimensionality.
+
+We next give a PAC result on the number of samples required to infer the reward and state transition dynamics for finite MDPs with high probability using sufficient approximate rank k  k1, k2:
+
+Theorem 2 (Model based estimation of R^, P^ error bounds). Given any > 0, 1 >  > 0, for a policy  with the policy tensor satisfying (u|s)  , where
+
+ = max C1µ6sk5(wsmax)4 log(|U |)4 log(3k||R(s)||F / )
+
+s
+
+|U |n/2(wsmin)4
+
+and C1 is a problem dependent positive constant. There ex-
+
+ists
+
+N0
+
+which
+
+is
+
+O(|U
+
+|
+
+n 2
+
+)
+
+and
+
+polynomial
+
+in
+
+1 
+
+,
+
+1,
+
+k
+
+and
+
+rel-
+
+evant spectral properties of the underlying MDP dynamics
+
+such that for samples  N0, we can compute the estimates R¯(s), P¯(s, s ) such that w.p.  1 - , ||R¯(s) - R^(s)||F  , ||P¯(s, s ) - P^(s, s )||F  , s, s  S.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+Theorem 2 gives the relation between the order of the num-
+
+ber of samples required to estimate dynamics and the toler-
+
+ance for approximation. Theorem 2 states that aside from
+
+allowing efficient PAC learning of the reward and transition
+
+dynamics of the multi-agent MDP, Algorithm 1 requires
+
+only
+
+O(|U
+
+|
+
+n 2
+
+)
+
+to
+
+do
+
+so,
+
+which
+
+is
+
+a
+
+vanishing
+
+fraction
+
+of
+
+|U |n, the total number of joint actions in any given state.
+
+This also hints at why a tensor based approximation of the
+
+Q-function helps with sample efficiency. Methods that do not use the tensor structure typically use O(|U |n) samples.
+
+The bound is also useful for off-policy scenarios, where
+
+only the behaviour policy needs to satisfy the bound. Given
+
+the result in Theorem 2, it is natural to ask what is the er-
+
+ror associated with computing the action-values of a policy
+
+using the estimated transition and reward dynamics. We
+
+address this in our next result, but first we present a lemma
+
+bounding the total variation distance between the estimated
+
+and true transition distributions:
+
+Lemma 1. For transition tensor estimates satisfying
+
+||P¯(s, s ) - P^(s, s )||F  , we have for any given
+
+state-action pair (s, a), the distribution over the next
+
+states follows:
+
+T V (P (·|s, a), P (·|s, a))
+
+
+
+1 2
+
+(|1
+
+-
+
+f|
+
++
+
+f |S| )
+
+where
+
+1 1+ |S|
+
+
+
+f
+
+
+
+1 1- |S
+
+|
+
+,
+
+where T V
+
+is
+
+the total variation distance. Similarly for any policy
+
+, T V (P¯(·|s), P(·|s)), T V (P¯(s , a |s), P(s , a |s)) 
+
+1 2
+
+(|1
+
+-
+
+f
+
+|
+
++
+
+f
+
+|S
+
+|
+
+)
+
+We now bound the error of model-based evaluation using approximate dynamics in Theorem 3. The first component on the RHS of the upper bound comes from the tensor analysis of the transition dynamics, whereas the second component can be attributed to error propagation for the rewards.
+
+Theorem 3 (Error bound on policy evaluation). Given a
+
+behaviour policy b satisfying the conditions in Theorem 2
+
+and executed for steps  N0, for any policy  the model based policy evaluation QP¯,R¯ satisfies:
+
+|QP,R(s, a) - QP¯,R¯ (s, a)|
+
+(|1 - f |
+
++ f |S|
+
+) 2(1
+
+ - )2
+
++
+
+, (s, a)  S × U n
+
+1-
+
+where f is as defined in Lemma 1.
+
+Additional theoretical discussion can be found in Appendix B.3
+
+5. Experiments
+In this section we present the empirical results on the StarCraft domain. Experiments for a more didactic domain of Tensor games can be found in Appendix C.3. We use the model-free version of TESSERACT (Algorithm 2) for all the experiments.
+
+StarCraft II We consider a challenging set of cooperative scenarios from the StarCraft Multi-Agent Challenge (SMAC) (Samvelyan et al., 2019). Scenarios in SMAC have been classified as Easy, Hard and Super-hard according to the performance of exiting algorithms on them. We compare TESSERACT (TAC in plots) to, QMIX (Rashid et al., 2018), VDN (Sunehag et al., 2017), FQL (Chen et al., 2018), and IQL (Tan, 1993). VDN and QMIX use monotonic approximations for learning the Q-function. FQL uses a pairwise factorized model to capture effects of agent interactions in joint Q-function, this is done by learning an inner product space for summarising agent trajectories. IQL ignores the multi-agentness of the problem and learns an independent per agent policy for the resulting non-stationary problem. Fig. 5 gives the win rate of the different algorithms averaged across five random runs. Fig. 5(c) features 2c_vs_64zg, a hard scenario that contains two allied agents but 64 enemy units (the largest in the SMAC domain) making the action space of the agents much larger than in the other scenarios. TESSERACT gains a huge lead over all the other algorithms in just one million steps. For the asymmetric scenario of 5m_vs_6m Fig. 5(d), TESSERACT, QMIX, and VDN learn effective policies, similar behavior occurs in the heterogeneous scenarios of 3s5z Fig. 5(a) and MMM2Fig. 5(e) with the exception of VDN for the latter. In 2s_vs_1sc in Fig. 5(b), which requires a `kiting' strategy to defeat the spine crawler, TESSERACT learns an optimal policy in just 100k steps. In the super-hard scenario of 27m_vs_30m Fig. 5(f) having largest ally team of 27 marines, TESSERACT again shows improved sample efficiency; this map also shows TESSERACT's ability to scale with the number of agents. Finally in the super-hard scenarios of 6 hydralisks vs 8 zealots Fig. 5(g) and Corridor Fig. 5(h) which require careful exploration, TESSERACT is the only algorithm which is able to find a good policy. We observe that IQL doesn't perform well on any of the maps as it doesn't model agent interactions/non-stationarity explicitly. FQL loses performance possibly because modelling just pairwise interactions with a single dot product might not be expressive enough for joint-Q. Finally, VDN and QMIX are unable to perform well on many of the challenging scenarios possibly due to the monotonic approximation affecting the exploration adversely (Mahajan et al., 2019). Additional plots and experiment details can be found in Appendix C.1 with comparison with other baselines in Appendix C.1.1 including QPLEX(Wang et al., 2020a), QTRAN(Son et al., 2019), HQL(Matignon et al., 2007), COMA(Foerster et al., 2018) . We detail the techniques used for stabilising the learning of tensor decomposed critic in Appendix C.2.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+(a) 3s5z Easy
+
+(b) 2s_vs_1sc Easy
+
+(c) 2c_vs_64zg Hard
+
+(d) 5m_vs_6m Hard
+
+(e) MMM2 Super Hard
+
+(f) 27m_vs_30m Super Hard
+
+(g) 6h_vs_8z Super Hard
+
+(h) Corridor Super Hard
+
+Figure 5: Performance of different algorithms on different SMAC scenarios: TAC, QMIX, VDN, FQL, IQL.
+
+6. Related Work
+Previous methods for modelling multi-agent interactions include those that use coordination graph methods for learning a factored joint action-value estimation (Guestrin et al., 2002a;b; Bargiacchi et al., 2018), however typically require knowledge of the underlying coordination graph. To handle the exponentially growing complexity of the joint action-value functions with the number of agents, a series of value-based methods have explored different forms of value function factorisation. VDN (Sunehag et al., 2017) and QMIX (Rashid et al., 2018) use monotonic approximation with latter using a mixing network conditioned on global state. QTRAN (Son et al., 2019) avoids the weight constraints imposed by QMIX by formulating multi-agent learning as an optimisation problem with linear constraints and relaxing it with L2 penalties. MAVEN (Mahajan et al., 2019) learns a diverse ensemble of monotonic approximations by
+
+conditioning agent Q-functions on a latent space which helps overcome the detrimental effects of QMIX's monotonicity constraint on exploration. Similarly, Uneven (Gupta et al., 2020) uses universal successor features for efficient exploration in the joint action space. Qatten (Yang et al., 2020) makes use of a multi-head attention mechanism to decompose Qtot into a linear combination of per-agent terms. RODE (Wang et al., 2020b) learns an action effect based role decomposition for sample efficient learning. Policy gradient methods, on the other hand, often utilise the actor-critic framework to cope with decentralisation. MADDPG (Lowe et al., 2017) trains a centralised critic for each agent. COMA (Foerster et al., 2018) employs a centralised critic and a counterfactual advantage function. These actorcritic methods, however, suffer from poor sample efficiency compared to value-based methods and often converge to sub-optimal local minima. While sample efficiency has
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+been an important goal for single agent reinforcement learning methods (Mahajan & Tulabandhula, 2017a;b; Kakade, 2003; Lattimore et al., 2013), in this work we shed light on attaining sample efficiency for cooperative multi-agent systems using low rank tensor approximation.
+Tensor methods have been used in machine learning, in the context of learning latent variable models (Anandkumar et al., 2014) and signal processing (Sidiropoulos et al., 2017). Tensor methods provides powerful analytical tools that have been used for various applications, including the theoretical analysis of deep neural networks (Cohen et al., 2016). Model compression using tensors (Cheng et al., 2017) has recently gained momentum owing to the large sizes of deep neural nets. Using tensor decomposition within deep networks, it is possible to both compress and speed them up (Cichocki et al., 2017; Kossaifi et al., 2019). They allow generalization to higher orders (Kossaifi et al., 2020) and have also been used for multi-task learning and domain adaptation (Bulat et al., 2020). In contrast to prior work on value function factorisation, TESSERACT provides a natural spectrum for approximation of action-values based on the rank of approximation and provides theoretical guarantees derived from tensor analysis. Multi-view methods utilising tensor decomposition have previously been used in the context of partially observable single-agent RL (Azizzadenesheli et al., 2016; Azizzadenesheli, 2019). There the goal is to efficiently infer the underlying MDP parameters for planning under rich observation settings (Krishnamurthy et al., 2016). Similarly (Bromuri, 2012) use four dimensional factorization to generalise across Q-tables whereas here we use them for modelling interactions across multiple agents.
+
+This project has received funding from the European Research Council under the European Union's Horizon 2020 research and innovation programme (grant agreement number 637713). The experiments were made possible by generous equipment grant from NVIDIA.
+
+7. Conclusions & Future Work
+We introduced TESSERACT, a novel framework utilising the insight that the joint action value function for MARL can be seen as a tensor. TESSERACT provides a means for developing new sample efficient algorithms and obtain essential guarantees about convergence and recovery of the underlying dynamics. We further showed novel PAC bounds for learning under the framework using model-based algorithms. We also provided a model-free approach to implicitly induce low rank tensor approximation for better sample efficiency and showed that it outperforms current state of art methods. There are several interesting open questions to address in future work, such as convergence and error analysis for rank insufficient approximation, and analysis of the learning framework under different types of tensor decompositions like Tucker and tensor-train (Kolda & Bader, 2009).
+
+8. Acknowledgements
+AM is funded by the J.P. Morgan A.I. fellowship. Part of this work was done during AM's internship at NVIDIA.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+References
+Anandkumar, A., Hsu, D., and Kakade, S. M. A method of moments for mixture models and hidden markov models. In Conference on Learning Theory, pp. 33­1, 2012.
+Anandkumar, A., Ge, R., Hsu, D., Kakade, S. M., and Telgarsky, M. Tensor decompositions for learning latent variable models. Journal of Machine Learning Research, 15:2773­2832, 2014.
+Azizzadenesheli, K. Reinforcement Learning in Structured and Partially Observable Environments. PhD thesis, UC Irvine, 2019.
+
+Cichocki, A., Phan, A.-H., Zhao, Q., Lee, N., Oseledets, I., Sugiyama, M., Mandic, D. P., et al. Tensor networks for dimensionality reduction and large-scale optimization: Part 2 applications and future perspectives. Foundations and Trends® in Machine Learning, 9(6):431­673, 2017.
+Cohen, N., Sharir, O., and Shashua, A. On the expressive power of deep learning: A tensor analysis. In Conference on Learning Theory, pp. 698­728, 2016.
+Foerster, J. N., Farquhar, G., Afouras, T., Nardelli, N., and Whiteson, S. Counterfactual multi-agent policy gradients. In Thirty-Second AAAI Conference on Artificial Intelligence, 2018.
+
+Azizzadenesheli, K., Lazaric, A., and Anandkumar, A. Reinforcement learning in rich-observation mdps using spectral methods. arXiv preprint arXiv:1611.03907, 2016.
+Barendregt, H. P. Introduction to lambda calculus. 1984.
+Bargiacchi, E., Verstraeten, T., Roijers, D., Nowé, A., and Hasselt, H. Learning to coordinate with coordination graphs in repeated single-stage multi-agent decision problems. In International conference on machine learning, pp. 482­490, 2018.
+Boutilier, C. Planning, learning and coordination in multiagent decision processes. In Proceedings of the 6th Conference on Theoretical Aspects of Rationality and Knowledge, TARK '96, pp. 195­210. Morgan Kaufmann Publishers Inc., 1996.
+
+Greensmith, E., Bartlett, P. L., and Baxter, J. Variance reduction techniques for gradient estimates in reinforcement learning. Journal of Machine Learning Research, 5(9), 2004.
+Guestrin, C., Lagoudakis, M., and Parr, R. Coordinated reinforcement learning. In ICML, volume 2, pp. 227­234. Citeseer, 2002a.
+Guestrin, C., Venkataraman, S., and Koller, D. Contextspecific multiagent coordination and planning with factored mdps. In AAAI/IAAI, pp. 253­259, 2002b.
+Gupta, T., Mahajan, A., Peng, B., Böhmer, W., and Whiteson, S. Uneven: Universal value exploration for multi-agent reinforcement learning. arXiv preprint arXiv:2010.02974, 2020.
+
+Bromuri, S. A tensor factorization approach to generalization in multi-agent reinforcement learning. In 2012 IEEE/WIC/ACM International Conferences on Web Intelligence and Intelligent Agent Technology, volume 2, pp. 274­281. IEEE, 2012.
+Bulat, A., Kossaifi, J., Tzimiropoulos, G., and Pantic, M. Incremental multi-domain learning with network latent tensor factorization. 2020.
+Bus¸oniu, L., Babuska, R., and De Schutter, B. Multi-agent reinforcement learning: An overview. In Innovations in multi-agent systems and applications-1, pp. 183­221. Springer, 2010.
+Chen, Y., Zhou, M., Wen, Y., Yang, Y., Su, Y., Zhang, W., Zhang, D., Wang, J., and Liu, H. Factorized qlearning for large-scale multi-agent systems. arXiv preprint arXiv:1809.03738, 2018.
+Cheng, Y., Wang, D., Zhou, P., and Zhang, T. A survey of model compression and acceleration for deep neural networks. arXiv preprint arXiv:1710.09282, 2017.
+
+Hillar, C. J. and Lim, L.-H. Most tensor problems are nphard. Journal of the ACM (JACM), 60(6):1­39, 2013.
+Jain, P. and Oh, S. Provable tensor factorization with missing data. In Advances in Neural Information Processing Systems, pp. 1431­1439, 2014.
+Kaelbling, L. P., Littman, M. L., and Cassandra, A. R. Planning and acting in partially observable stochastic domains. Artificial intelligence, 101(1-2):99­134, 1998.
+Kakade, S. M. On the sample complexity of reinforcement learning. PhD thesis, UCL (University College London), 2003.
+Kearns, M. J., Vazirani, U. V., and Vazirani, U. An introduction to computational learning theory. MIT press, 1994.
+Kingma, D. P. and Ba, J. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Kolda, T. G. and Bader, B. W. Tensor decompositions and applications. SIAM review, 51(3):455­500, 2009.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+Konda, V. and Tsitsiklis, J. N. Actor-Critic Algorithms. PhD thesis, USA, 2002. AAI0804543.
+Kossaifi, J., Bulat, A., Tzimiropoulos, G., and Pantic, M. Tnet: Parametrizing fully convolutional nets with a single high-order tensor. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2019.
+Kossaifi, J., Toisoul, A., Bulat, A., Panagakis, Y., Hospedales, T., and Pantic, M. Factorized higher-order cnns with an application to spatio-temporal emotion estimation. In IEEE CVPR, 2020.
+Krishnamurthy, A., Agarwal, A., and Langford, J. Pac reinforcement learning with rich observations. In Advances in Neural Information Processing Systems, pp. 1840­1848, 2016.
+Lattimore, T., Hutter, M., and Sunehag, P. The samplecomplexity of general reinforcement learning. In International Conference on Machine Learning, pp. 28­36. PMLR, 2013.
+Lowe, R., Wu, Y., Tamar, A., Harb, J., Abbeel, O. P., and Mordatch, I. Multi-agent actor-critic for mixed cooperative-competitive environments. In Advances in Neural Information Processing Systems, pp. 6379­6390, 2017.
+Mahajan, A. and Tulabandhula, T. Symmetry detection and exploitation for function approximation in deep rl. In Proceedings of the 16th Conference on Autonomous Agents and MultiAgent Systems, pp. 1619­1621, 2017a.
+Mahajan, A. and Tulabandhula, T. Symmetry learning for function approximation in reinforcement learning. arXiv preprint arXiv:1706.02999, 2017b.
+Mahajan, A., Rashid, T., Samvelyan, M., and Whiteson, S. Maven: Multi-agent variational exploration. In Advances in Neural Information Processing Systems, pp. 7611­7622, 2019.
+Matignon, L., Laurent, G. J., and Le Fort-Piat, N. Hysteretic q-learning: an algorithm for decentralized reinforcement learning in cooperative multi-agent teams. In 2007 IEEE/RSJ International Conference on Intelligent Robots and Systems, pp. 64­69. IEEE, 2007.
+Messias, J. a. V., Spaan, M. T. J., and Lima, P. U. Efficient offline communication policies for factored multiagent pomdps. In Proceedings of the 24th International Conference on Neural Information Processing Systems, pp. 1917­1925. Curran Associates Inc., 2011.
+Oliehoek, F. A. and Amato, C. A Concise Introduction to Decentralized POMDPs. SpringerBriefs in Intelligent Systems. Springer, 2016.
+
+Rashid, T., Samvelyan, M., de Witt, C. S., Farquhar, G., Foerster, J., and Whiteson, S. QMIX: Monotonic Value Function Factorisation for Deep Multi-Agent Reinforcement Learning. In Proceedings of the 35th International Conference on Machine Learning, pp. 4295­4304, 2018.
+Samvelyan, M., Rashid, T., de Witt, C. S., Farquhar, G., Nardelli, N., Rudner, T. G., Hung, C.-M., Torr, P. H., Foerster, J., and Whiteson, S. The StarCraft Multi-Agent Challenge. In Proceedings of the 18th International Conference on Autonomous Agents and MultiAgent Systems, 2019.
+Sidiropoulos, N. D., De Lathauwer, L., Fu, X., Huang, K., Papalexakis, E. E., and Faloutsos, C. Tensor decomposition for signal processing and machine learning. IEEE Transactions on Signal Processing, 65(13):3551­3582, 2017.
+Son, K., Kim, D., Kang, W. J., Hostallero, D. E., and Yi, Y. Qtran: Learning to factorize with transformation for cooperative multi-agent reinforcement learning. arXiv preprint arXiv:1905.05408, 2019.
+Sunehag, P., Lever, G., Gruslys, A., Czarnecki, W. M., Zambaldi, V., Jaderberg, M., Lanctot, M., Sonnerat, N., Leibo, J. Z., Tuyls, K., and Graepel, T. Value-Decomposition Networks For Cooperative Multi-Agent Learning Based On Team Reward. In Proceedings of the 17th International Conference on Autonomous Agents and Multiagent Systems, 2017.
+Sutton, R. S. Learning to predict by the methods of temporal differences. Machine learning, 3(1):9­44, 1988.
+Sutton, R. S. and Barto, A. G. Reinforcement learning: An introduction. 2011.
+Sutton, R. S., McAllester, D. A., Singh, S. P., and Mansour, Y. Policy gradient methods for reinforcement learning with function approximation. In Advances in neural information processing systems, pp. 1057­1063, 2000.
+Tan, M. Multi-agent reinforcement learning: Independent vs. cooperative agents. In Proceedings of the Tenth International Conference on Machine Learning, pp. 330­337, 1993.
+Wang, J., Ren, Z., Liu, T., Yu, Y., and Zhang, C. Qplex: Duplex dueling multi-agent q-learning. arXiv preprint arXiv:2008.01062, 2020a.
+Wang, T., Gupta, T., Mahajan, A., Peng, B., Whiteson, S., and Zhang, C. Rode: Learning roles to decompose multiagent tasks. arXiv preprint arXiv:2010.01523, 2020b.
+Wei, E., Wicke, D., Freelan, D., and Luke, S. Multiagent soft q-learning. In 2018 AAAI Spring Symposium Series, 2018.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+Yang, Y., Hao, J., Liao, B. L., Shao, K., Chen, G., Liu, W., and Tang, H. Qatten: A general framework for cooperative multiagent reinforcement learning. ArXiv, abs/2002.03939, 2020.
+Yao, X., Wen, C., Wang, Y., and Tan, X. Smix: Enhancing centralized value functions for cooperative multi-agent reinforcement learning. arXiv preprint arXiv:1911.04094, 2019.
+Zhao, T., Niu, G., Xie, N., Yang, J., and Sugiyama, M. Regularized policy gradients: direct variance reduction in policy gradient estimation. In Asian Conference on Machine Learning, pp. 333­348. PMLR, 2016.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+A. Additional Proofs
+
+A.1. Proof of Theorem 2 Theorem 2 (Model based estimation of R^, P^ error bounds). Given any > 0, 1 >  > 0, for a policy  with the policy
+tensor satisfying (u|s)  , where
+
+ = max C1µ6sk5(wsmax)4 log(|U |)4 log(3k||R(s)||F / )
+
+s
+
+|U |n/2(wsmin)4
+
+(4)
+
+and C1 is a problem dependent positive constant.
+
+There
+
+exists
+
+N0
+
+which
+
+is
+
+O(|U
+
+|
+
+n 2
+
+)
+
+and
+
+polynomial
+
+in
+
+1 
+
+,
+
+1,k
+
+and
+
+relevant spectral properties of the underlying MDP dynamics such that for samples  N0, we can compute the estimates
+
+R¯(s), P¯(s, s ) such that w.p.  1 - , ||R¯(s) - R^(s)||F  , ||P¯(s, s ) - P^(s, s )||F  , s, s  S.
+
+Proof. For the simplicity of notation and emphasising key points of the proof, we focus on orthogonal symmetric tensors with n = 3. Guidelines for more general cases are provided by the end of the proof.
+
+We break the proof into three parts: Let policy  satisfy(u|s)   Eq. (4). Let  be the stationary distribution of 
+
+(exists
+
+by
+
+Assumption
+
+3)
+
+and
+
+let
+
+N1
+
+=
+
+maxs
+
+1 (s)
+
+log
+
+12 k||R(s)||F
+
+. From N1 samples drawn from  by following , we
+
+estimate R¯, the estimated reward tensor computed by using Algorithm 1 in (Jain & Oh, 2014). We have by application of
+
+union bound along with Theorem 1.1 in (Jain & Oh, 2014) for each s  S, w.p.  1 - |U |-5 log2 12 k s ||R(s)||F = p ,
+
+||R¯(s) - R^(s)||F  /3, s  S. We now provide a boosting scheme to increase the confidence in the estimation of R^(·)
+
+from p
+
+to 1 - /3.
+
+Let 
+
+=
+
+1 2
+
+p
+
+-
+
+1 2
+
+> 0 (for clarity of the presentation we assume p
+
+>
+
+1 2
+
+and refer the reader
+
+to (Kearns et al., 1994) for the other more involved case). We compute M independent estimates {R¯i, i  {1..M }} for
+
+R^(s) and find
+
+the
+
+biggest cluster
+
+C
+
+
+
+{R¯i}
+
+amongst
+
+the
+
+estimates
+
+such
+
+that
+
+for any R¯i, R¯j
+
+
+
+C, ||R¯i
+
+- R¯j||F
+
+
+
+2 3
+
+.
+
+We
+
+then output any element of C. Intuitively as p
+
+>
+
+1 2
+
+,
+
+most
+
+of
+
+the
+
+estimates
+
+will
+
+be
+
+near
+
+the
+
+actual
+
+value
+
+R^(s),
+
+this
+
+can
+
+be
+
+confirmed by using the Hoeffding Lemma(Kearns et al., 1994).
+
+It follows that for M
+
+
+
+1 22
+
+ln(
+
+3|S| 
+
+)
+
+the
+
+output
+
+of
+
+the
+
+above procedure satisfies ||R¯(s) - R^(s)||F 
+
+w.p.
+
+
+
+1
+
+-
+
+ 3|S|
+
+for
+
+any
+
+particular
+
+s.
+
+Thus
+
+M N1
+
+samples
+
+from
+
+stationary
+
+distribution are sufficient to ensure that for all s  S, w.p.  1 - /3, ||R¯(s) - R^(s)||F  .
+
+Secondly we note that P^(s, s ) for any s, s  S is a tensor whose entries are the parameters of a Bernoulli distribution. Under
+
+Assumption 2, it can be seen as a latent topic model (Anandkumar et al., 2012) with k factors, P^(s, s ) =
+
+k r=1
+
+ws,s
+
+,r
+
+n
+
+us,s ,r. Moreover it satisfies the conditions in Theorem 3.1 (Anandkumar et al., 2012) so that N2 = maxs,s
+
+1 (s)
+
+N2
+
+(s,
+
+s
+
+)
+
+where each N2(s, s ) is O
+
+k10|S|2 ln2(3|S|/) 2 2
+
+depending on the spectral properties of P^(s, s ) as given in the theorem
+
+and satisfies ||us,¯s ,r - us,s ,r||2 
+
+on
+
+running
+
+Algorithm
+
+B
+
+in
+
+(Anandkumar
+
+et
+
+al.,
+
+2012)
+
+w.p.
+
+
+
+1
+
+-
+
+ 3|S|
+
+.
+
+We
+
+pick
+
+= 7n2kµ2 (wmax )2 so that ||P¯(s, s ) - P^(s, s )||F  , s, s  S. We filter off the effects of sampling from a particular s,s s,s
+
+policy
+
+by
+
+using
+
+lower
+
+bound
+
+constraint
+
+in
+
+Eq.
+
+(4)
+
+and
+
+sampling
+
+N2 
+
+samples.
+
+Finally we account for the fact that there is a delay in attaining the stationary distribution  and bound the failure probability
+
+of significantly deviating from  empirically. Let  = mins (s) and tmix,(x) represent the minimum number of
+
+samples that need to drawn from the Markov chain formed by fixing policy  so that for the state distribution t(s) at
+
+time step t = tmix,(x) we have T V (t - )  x for any starting state s  S where T V (·, ·) is the total variation
+
+distance. We let the policy run for a burn in period of t = tmix,( /4). For a sample of N3 state transitions after
+
+the burn in period, let ¯ represent the empirical state distribution. By applying the Hoeffding lemma for each state,
+
+we get: P (|¯(s) - t (s)|   /4)  2 exp
+
+-N3 2 8
+
+, so that for N3
+
+
+
+8 2
+
+ln
+
+6|S| 
+
+we have w.p.
+
+
+
+1-
+
+ 3|S|
+
+,
+
+|¯(s) - (s)| <  /2, s  S.
+
+Putting
+
+everything
+
+together
+
+we
+
+get
+
+with
+
+tmix, (
+
+/4)
+
++
+
+max{2M N1,
+
+2N2 
+
+,
+
+N3}
+
+samples,
+
+the
+
+underlying
+
+reward
+
+and
+
+proba-
+
+bility tensors can be recovered such that w.p.  1 - , ||R¯(s) - R^(s)||F  , ||P¯(s, s ) - P^(s, s )||F  , s, s  S.
+
+For extending the proof to the case of non-orthogonal tensors, we refer the reader to use whitening transform as elucidated in (Anandkumar et al., 2014). Likewise for asymmetric, higher order (n > 3) tensors methods shown in (Jain & Oh, 2014; Anandkumar et al., 2014; 2012) should be used. Finally for the case of M-POMDP and M-ROMDP, the corresponding
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+results for single agent POMDP and ROMDP should be used, as detailed in (Azizzadenesheli, 2019; Azizzadenesheli et al., 2016) respectively.
+
+A.2. Proof of Lemma 1
+
+Lemma 1. For transition tensor estimates satisfying ||P¯(s, s )-P^(s, s )||F  , we have for any given state and action pair
+
+s, a, the distribution over the next states follows:
+
+TV
+
+(P
+
+(·|s, a), P (·|s, a))
+
+
+
+1 2
+
+(|1-f
+
+|+f
+
+|S|
+
+) where
+
+1 1+ |S|
+
+
+
+f
+
+
+
+1 1- |S|
+
+.
+
+Similarly
+
+for
+
+any
+
+policy
+
+,
+
+TV
+
+(P¯(·|s), P(·|s)), T V
+
+(P¯ (s
+
+,a
+
+|s), P(s
+
+,a
+
+|s))
+
+
+
+1 2
+
+(|1
+
+-
+
+f| +
+
+f |S|
+
+)
+
+Proof. Let P¯(·|s, a) be the next state probability estimates obtained from the tensor estimates. We next normalise them
+
+across the next states to get the (estimated)distribution P (·|s, a) = f P¯(·|s, a) where f =
+
+s
+
+1 P¯(s
+
+|s,a)
+
+.
+
+Dropping
+
+the
+
+conditioning for brevity we have:
+
+1 T V (P , P ) =
+
+|P (s ) - f P¯(s )|
+
+2
+
+s
+
+1 (
+
+|P (s ) - f P (s )| + |f P (s ) - P¯(s )|)
+
+2
+
+s
+
+1 = (|1 - f | + f |S| )
+2
+
+The other two results follow using the definition of TV and Fubini's theorem followed by reasoning similar to above.
+
+A.3. Proof of Theorem 3
+
+Theorem 3 (Error bound on policy evaluation). Given a behaviour policy b satisfying the conditions in Theorem 2 and
+
+being executed for steps  N0, we have that for any policy  the model based policy evaluation QP¯,R¯ satisfies:
+
+|QP,R(s, a) - QP¯,R¯ (s, a)|
+
+
+
+(|1
+
+- f|
+
++ f |S|
+
+) 2(1
+
+ - )2
+
++
+
+, (s, a) 1-
+
+
+
+S
+
+× Un
+
+where f is as defined in Lemma 1.
+
+Proof. Let P¯, R¯ be the estimates obtained after running the procedure as described in Theorem 2 with samples corresponding to error and confidence 1 - . We will bound the error incurred in estimation of the action-values using P¯, R¯. We have for
+
+any  by using triangle inequality
+
+|QP,R(s, a) - QP¯,R¯ (s, a)|  |QP,R(s, a) - QP¯,R(s, a)| + |QP¯,R(s, a) - QP¯,R¯ (s, a)|
+
+(5)
+
+where we use the subscript to denote whether actual or approximate values are used for P, R respectively. We first focus on
+the first term on the RHS of Eq. (5). Let R(st) = at (at|st)R(st, at). We use Pt,(·|s) = (P(·|s))t to denote the state distribution after t time steps. Consider a horizon h interleaving Q estimate given by:
+
+h-1
+
+
+
+Qh(s, a) = R(st, at) +
+
+tEP¯t,(·|s)[R(st)] +
+
+tEPt-h,(·|sh)·P¯h,(sh|s)[R (st)]
+
+t=1
+
+t=h
+
+Where s0 = s, a0 = a and the first h steps are unrolled according to P¯, the rest are done using the true transition P. We have that:
+
+|QP,R(s, a) - QP¯,R¯(s, a)| = |Q0 (s, a) - Q(s, a)|  |Qh(s, a) - Qh+1(s, a)|
+h=0
+
+Each term in the RHS of the above can be independently bounded as :
+
+|Qh(s, a) - Qh+1(s, a)| =h+1 EP¯h+1,(sh+1|s)
+
+(ah+1|sh+1)Q(sh+1.ah+1)
+
+ah+1
+
+- EP P¯h, (sh+1|s)
+
+(ah+1|sh+1)Q(sh+1.ah+1)
+
+ah+1
+
+As the rewards are bounded we get the expression above is 
+
+1 1-
+
+h+1T
+
+V
+
+(P¯ (s
+
+,
+
+a
+
+|s),
+
+P (s
+
+,
+
+a
+
+|s)).
+
+Finally using
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+Lemma
+
+1
+
+we
+
+get
+
+
+
+(
+
+1 2
+
+(|1
+
+-
+
+f|
+
++
+
+f |S|
+
+))
+
+ h+1 1-
+
+.
+
+And
+
+plugging
+
+in
+
+the
+
+original
+
+expression:
+
+|QP,R(s, a)
+
+-
+
+QP¯,R¯ (s, a)|
+
+
+
+(|1
+
+-
+
+f|
+
++
+
+f |S|
+
+) 2(1
+
+ -
+
+)2
+
+Next the second term on the RHS of Eq. (5) can easily be bounded by 1- which gives:
+
+|QP,R(s, a) -
+
+QP¯,R¯ (s, a)|
+
+
+
+(|1 - f | + f |S|
+
+ )
+2(1 -
+
+)2
+
++
+
+1-
+
+B. Discussion
+B.1. Relation to other methods In this section we study the relationship between TESSERACT and some of the existing methods for MARL.
+B.1.1. FQL FQL (Chen et al., 2018) uses a learnt inner product space to represent the dependence of joint Q-function on pair wise agent interactions. The following result shows containment of FQL representable action-value function by TESSERACT :
+Proposition 2. The set of joint Q-functions representable by FQL is a subset of that representable by TESSERACT.
+
+Proof. In the most general form, any join Q-function representable by FQL has the form:
+
+Qfql(s, u) =
+
+qi(s, ui) +
+
+fi(s, ui), fj(s, uj)
+
+i=1:n
+
+i=1:n,j<i
+
+where qi : S × U  R are individual contributions to joint Q-function and fi : S × U  Rd are the vectors describing
+
+pairwise interactions between the agents. There are
+
+n 2
+
+pairs of agents to consider for (pairwise)interactions. Let P
+
+(i, j)
+
+be the ordered set of agent pairs where i > j and i, j  {1..n}, let Pk denote the kth element of P. Define membership
+
+function m : P × {1..n}  {0, 1} as:
+
+1 if x = i  x = j m((i, j), x) =
+0 otherwise
+
+Define the mapping vi
+
+:
+
+S
+
+
+
+R|U |×D
+
+where D
+
+=
+
+d
+
+n 2
+
++ n and vi,k represents the kth column of vi.
+
+vi(s)[j, (k - 1)d + 1 : kd] = fi(s, uj) if m(Pk, i) = 1 
+vi(s) vi(s)[j, D - n + i] = qi(s, uj)
+
+vi(s)[j, k] = 1
+
+otherwise
+
+We get that the tensors:
+
+D
+Qfql(s) = nvi,k(s)
+
+k=1
+
+Thus any Qfql can be represented by TESSERACT, note that the converse is not true ie. any arbitrary Q-function representable by TESSERACT may not be representable by FQL as FQL cannot model higher-order (> 2 agent) interactions.
+
+B.1.2. VDN VDN (Sunehag et al., 2017) learns a decentralisable factorisation of the joint action-values by expressing it as a sum of per agent utilities Q^ = nui, i  {1..n}. This can be equivalently learnt in TESSERACT by finding the best rank one projection of exp(Q^(s)). We formalise this in the following result:
+Proposition 3. For any MMDP, given policy  having Q function representable by VDN ie. Q^(s) = nui(s), i  {1..n}, vi(s)s  S, the utility factorization can be recovered from rank one CP-decomposition of exp(Q^)
+
+Proof. We have that :
+
+exp(Q^(s)) = exp(nui(s)) = n exp(ui(s))
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning Thus (exp(ui(s)))ni=1  arg minvi(s) || exp(Q^(s)) - nvi(s)||F s  S and there always exist vi(s) that can be mapped to some ui(s) via exponentiation. In general any Q-function that is representable by VDN can be represented by TESSERACT under an exponential transform (Section 3.2).
+B.2. Injecting Priors for Continuous Domains
+Figure 6: Continuous actions task with three agents chasing a prey. Perturbing Agent 2's action direction by small amount  leads to a small change in the joint value.
+We now discuss the continuous action setting. Since the action set of each agent is infinite, we impose further structure while maintaining appropriate richness in the hypothesis class of the proposed action value functions. Towards this we present an example of a simple prior for TESSERACT for continuous action domains. WLOG, let U Rd for each agent  1..n. We are now interested in the function class given by Q {Q : S × U n  R} where each Q(s) T (s, {||ui||2}), nui , here T (·) : S × Rn  Rdn is a function that outputs an order n tensor and is invariant to the direction of the agent actions, ·, · is the dot product between two order n tensors and || · ||2 is the Euclidean norm. Similar to the discrete case, we define Qk {Q : Q  Q  rank(T (·)) = k, s  S}. The continuous case subsumes the discrete case with T (·) Q(·) and actions encoded as one hot vectors. We typically use rich classes like deep neural nets for Q and T parametrised by . We now briefly discuss the motivation behind the example continuous case formulation: for many real world continuous action tasks the joint payoff is much more sensitive to the magnitude of the actions than their directions, i.e., slightly perturbing the action direction of one agent while keeping others fixed changes the payoff by only a small amount (see Fig. 6). Furthermore, T can be arbitrarily rich and can be seen as representing utility per agent per action dimension, which is precisely the information required by methods for continuous action spaces that perform gradient ascent w.r.t. ui Q to ensure policy improvement. Further magnitude constraints on actions can be easily handled by a rich enough function class for T . Lastly we can further abstract the interactions amongst the agents by learnable maps fi(ui, s) : Rd × S  Rm, m >> d and considering classes Q(s, u) T (s, {||ui||}), nfi (ui) where T (·) : S × Rn  Rmn .
+B.3. Additional theoretical discussion B.3.1. SELECTING THE CP-RANK FOR APPROXIMATION While determining the rank of a fully observed tensor is itself NP-hard (Hillar & Lim, 2013), we believe we can help alleviate this problem due to two key observations:
+· The tensors involved in TESSERACT capture dependence of transition and reward dynamics on the action space. Thus if we can approximately identify (possibly using expert knowledge) the various aspects in which the actions available at hand affect the environment, we can get a rough idea of the rank to use for approximation.
+· Our experiments on different domains (Section 5, Appendix C) provide evidence that even when using a rank insufficient approximation, we can get good empirical performance and sample efficiency. (This is also evidenced by the empirical success of related algorithms like VDN which happen to be specific instances under the TESSERACT framework.)
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+C. Additional experiments and details
+C.1. StarCraft II
+Figure 7: The 2c_vs_64zg scenario in SMAC.
+In the SMAC bechmark(Samvelyan et al., 2019) (https://github.com/oxwhirl/smac), agents can move in four cardinal directions, stop, take noop (do nothing), or select an enemy to attack at each timestep. Therefore, if there are ne enemies in the map, the action space for each ally unit contains ne + 6 discrete actions.
+C.1.1. ADDITIONAL EXPERIMENTS In addition to the baselines in main text Section 5, we also include 4 more baselines: QTRAN (Son et al., 2019), QPLEX (Wang et al., 2020a), COMA (Foerster et al., 2018) and HQL. QTRAN tries to avoid the issues arising with representational constraints by posing the decentralised multi agent problem as optimisation with linear constraints, these constraints are relaxed using L2 penalties for tractability (Mahajan et al., 2019). Similarly, QPLEX another recent method uses an alternative formulation using advantages for ensuring the Individual Global Max (IGM) principle (Son et al., 2019). COMA is an actor-critic method that uses a centralised critic for computing a counterfactual baseline for variance reduction by marginalising across individual agent actions. Finally, HQL uses the heuristic of differential learning rates on top of IQL (Tan, 1993) to address problems associated with decentralized exploration. Fig. 8 gives the average win rates of the baselines on different SMAC scenarios across five random runs (with one standard deviation shaded). We observe that TESSERACT outperforms the baselines by a large margin on most of the scenarios, especially on the super-hard ones on which the exiting methods struggle, this validates the sample efficiency and representational gains supported by our analysis. We observe that HQL is unable to learn a good policy on most scenarios, this might be due to uncertainty in the bootstrap estimates used for choosing the learning rate that confounds with difficulties arising from non-stationarity. We also observe that COMA does not yield satisfactory performance on any of the scenarios. This is possibly because it does not utilise the underlying tensor structure of the problem and suffers from a lagging critic. While QPLEX is able to alleviate the problems arising from relaxing the IGM constraints in QTRAN, it lacks in performance on the super-hard scenarios of Corridor and 6h_vs_8z.
+C.1.2. EXPERIMENTAL SETUP FOR SMAC We use a factor network for the tensorised critic which comprises of a fully connected MLP with two hidden layers of dimensions 64 and 32 respectively and outputs a r|U | dimensional vector. We use an identical policy network for the actors which outputs a |U | dimensional vector and a value network which outputs a scalar state-value baseline V (s). The agent policies are derived using softmax over the policy network output. Similar to previous work (Samvelyan et al., 2019), we use two layer network consisting of a fully-connected layer followed by GRU (of 64-dimensional hidden state) for encoding agent trajectories. We used Relu for non-linearities. All the networks are shared across the agents. We use ADAM as the optimizer with learning rate 5 × 10-4. We use entropy regularisation with scaling coefficient  = 0.005. We use an approximation rank of 7 for Tesseract ('TAC') for the SMAC experiments. A batch size of 512 is used for training which is collected across 8 parallel environments (additional setup details in Appendix C.2). Grid search was performed over the hyper-parameters for tuning. For the baselines QPLEX, QMIX, QTRAN, VDN, COMA, IQL we use the open sourced code provided by their authors at https://github.com/wjh720/QPLEX and https://github.com/oxwhirl/pymarl respectively which has hyper-parameters tuned for SMAC domain. The choice for architecture make the experimental setup of the neural networks used across all the baselines similar. We use a similar trajectory embedding network as mentioned above for our implementations of HQL and
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+(a) 3s5z Easy
+
+(b) 2s_vs_1sc Easy
+
+(c) 2c_vs_64zg Hard
+
+(d) 5m_vs_6m Hard
+
+(e) MMM2 Super Hard
+
+(f) 27m_vs_30m Super Hard
+
+(g) 6h_vs_8z Super Hard
+
+(h) Corridor Super Hard
+
+Figure 8: Performance of different algorithms on different SMAC scenarios: TAC, QTRAN, QPLEX, COMA, HQL.
+
+FQL which is followed by a network comprising of a fully connected MLP with two hidden layers of dimensions 64 and 32 respectively. For HQL this network outputs |U | action utilities. For FQL, it outputs a |U | + d vector: first |U | dimension are used for obtaining the scalar contribution to joint Q-function and rest d are used for computing interactions between
+agents via inner product. We use ADAM as the optimizer for these two baselines. We use differential learning rates of  = 1 × 10-3,  = 2 × 10-4 for HQL searched over a grid of {1, 2, 5, 10} × 10-3 × {1, 2, 5, 10} × 10-4. FQL uses the same learning rate 5 × 10-4 with d = 10 which was searched over set {5, 10, 15}.
+
+The baselines use -greedy for exploration with annealed from 1.0  0.05 over 50K steps. For super-hard scenarios in
+
+SMAC we extend the anneal time to 400K steps. We use temperature annealing for TESSERACT with temperature given by
+
+
+
+=
+
+2T T +t
+
+where
+
+T
+
+is
+
+the
+
+total
+
+step
+
+budget
+
+and
+
+t
+
+is
+
+the
+
+current
+
+step.
+
+Similarly
+
+we
+
+use
+
+temperature
+
+
+
+=
+
+4T T +3t
+
+for
+
+super-hard
+
+SMAC scenarios. The discount factor was set to 0.99 for all the algorithms.
+
+Experiment runs take 1-5 days on a Nvidia DGX server depending on the size of the StarCraft scenario.
+
+C.2. Techniques for stabilising TESSERACT critic training for Deep-MARL · We used a gradient normalisation of 0.5. The parameters exclusive to the critic were separately subject to the gradient normalisation, this was done because the ratio of gradient norms for the actor and the critic parameters can vary substantially across training.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+· We found that using multi-step bootstrapping substantially reduced target variance for Q-fitting and advantage estimation (we used the advantage based policy gradient S (s) U (u|s)A^(s, u)duds (Sutton & Barto, 2011)) for SMAC experiments. Specifically for horizon T, we used the Q-target as:
+
+T -t
+
+Qtarget,t =
+
+k gt,k
+
+k=1
+
+gt,k = Rt + Rt+1 + ... + kV (st+k)
+
+and similarly for value target. Likewise, the generalised advantage is estimated as:
+T -t
+A^t = ()kt+k
+k=0
+t = Rt + Q^(st+1, ut+1) - V (st)
+Where Q^ is the tensor network output and the estimates are normalized by the accumulated powers of . We used T = 64,  = 0.99 and  = 0.95 for the experiments.
+· The tensor network factors were squashed using a sigmoid for clipping and were scaled by 2.0 for SMAC experiments. Additionally, we initialised the factors according to N (0, 0.01) (before applying a sigmoid transform) so that value estimates can be effectively updated without the gradient vanishing.
+· Similarly, we used clipping for the action-value estimates Q^ to prevent very large estimates: clip(Q^t) = min{Q^t, Rmax}
+we used Rmax = 40 for the SMAC experiments.
+
+(a) Ablation on stabilisation techniques
+
+(b) Ablation on rank
+
+Figure 9: Variations on TESSERACT
+
+We provide the ablation results on the stabilisation techniques mentioned above on the 2c_vs_64zg scenario in Fig. 9(a). The plot lines correspond to the ablations: TAC-multi: no multi-step target and advantage estimation, TAC-clip: no value upper bounding/clipping, TAC-norm: no separate gradient norm, TAC-init: no initialisation and sigmoid squashing of factors. We observe that multi-step estimation of target and advantage plays a very important role in stabilising the training, this is because noisy estimates can adversely update the learn factors towards undesirable fits. Similarly, proper initialisation plays a very important role in learning the Q-tensor as otherwise a larger number of updates might be required for the network to learn the correct factorization, adversely affecting the sample efficiency. Finally we observe that max-clipping and separate gradient normalisation do impact learning, although such effects are relatively mild.
+We also provide the learning curves for TESSERACT as the CP rank of Q-approximation is changed, Fig. 9(b) gives the learning plots as the CP-rank is varied over the set {3, 7, 11}. Here, we observe that approximation rank makes little impact on the final performance of the algorithm, however it may require more samples in learning the optimal policy. Our PAC analysis Theorem 2 also supports this.
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+C.3. Tensor games: We introduce tensor games for our experimental evaluation. These games generalise the matrix games often used in 2-player domains. Formally, a tensor game is a cooperative MARL scenario described by tuple (n, |U |, r) that respectively defines the number of agents (dimensions), the number of actions per agent (size of index set) and the rank of the underlying reward tensor Fig. 10. Each agent learns a policy for picking a value from the index set corresponding to its dimension. The joint reward is given by the entry corresponding to the joint action picked by the agents, with the goal of finding the tensor entry corresponding to the maximum reward. We consider the CTDE setting for this game, which makes it additionally challenging. We compare TESSERACT (TAC) with VDN, QMIX and independent actor-critic (IAC) trained using Reinforce (Sutton et al., 2000). Stateless games provide are ideal for isolating the effect of an exponential blowup in the action space. The natural difficulty knobs for stateless games are |n| and |U | which can be increased to obtain environments with large joint action spaces. Furthermore, as the rank r increases, it becomes increasingly difficult to obtain good approximations for T^.
+
+Figure 10: Tensor games example with 3 agents (n) having 3 actions each (a). Optimal joint-action (a1, a3, a1) shown in orange.
+
+Average Return Average Return Average Return Average Return
+
+n5a10r8
+0.9
+
+0.8
+
+0.7
+
+0.6
+
+VDN
+
+0.5
+
+QMIX
+
+IAC
+
+0.4
+
+TAC
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Steps
+
+1e4
+
+(a) n:5 |U|:10 r:8
+
+n6a10r8
+
+n5a10r8_Rank ablation
+0.9
+
+n5a10 Env rank ablation
+0.9
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Steps
+
+1e5
+
+0.8
+
+0.7
+
+0.6
+
+Rank 2
+
+0.5
+
+Rank 8
+
+Rank 32 0.4
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Steps
+
+1e4
+
+0.8
+
+0.7
+
+0.6
+
+0.5 E_rank 8
+
+0.4
+
+E_rank 32
+
+E_rank 128
+
+0.3
+
+0.0 0.2 0.4 0.6 0.8 1.0
+
+Steps
+
+1e4
+
+(b) n:6 |U|:10 r:8
+
+(c) Dependence on approxima- (d) Effects of approximation tion rank
+
+Figure 11: Experiments on tensor games. Fig. 11(a) Fig. 11(b) present the learning curves for the algorithms for two game scenarios, averaged over 5 random runs with game parameters as mentioned in the figures. We observe that TESSERACT outperforms the other algorithms in all cases. Moreover, while the other algorithms find it increasingly difficult to learn good policies, TESSERACT is less affected by this increase in action space. As opposed to the IAC baseline, TESSERACT quickly learns an effective low complexity critic for scaling the policy gradient. QMIX performs worse than VDN due to the additional challenge of learning the mixing network.
+
+In Fig. 11(c) we study the effects of increasing the approximation rank of Tesseract (k in decomposition Q^(s)  T =
+
+k r=1
+
+wr
+
+n
+
+g,r (si ),
+
+i
+
+
+
+{1..n},)
+
+for
+
+a
+
+fixed
+
+environment
+
+with
+
+5
+
+agents,
+
+each
+
+having
+
+10
+
+actions
+
+and
+
+the
+
+environment
+
+rank
+
+being 8. While all the three settings learn the optimal policy, it can be observed that the number of samples required to learn
+
+a good policy increases as the approximation rank is increased (notice delay in 'Rank 8', 'Rank 32' plot lines). This again is
+
+in-line with our PAC results, and makes intuitive sense as a higher rank of approximation directly implies more parameters
+
+to learn which increases the samples required to learn.
+
+We next study how approximation of the actual Q tensors affects learning. In Fig. 11(d) we compare the performance of using a rank-2 TESSERACT approximation for environment with 5 agents, each having 10 actions and the environment reward tensor rank being varied from 8 to 128. We found that for the purpose of finding the optimal policy, TESSERACT is fairly stable even when the environment rank is greater than the model approximation rank. However performance may drop
+
+Tesseract: Tensorised Actors for Multi-Agent Reinforcement Learning
+
+if the rank mismatch becomes too large, as can be seen in Fig. 11(d) for the plot lines 'E_rank 32', 'E_rank 128', where the actual rank required to approximate the underlying reward tensor is too high and using just 2 factors doesn't suffice to accurately represent all the information.
+
+C.3.1. EXPERIMENTAL SETUP FOR TENSOR GAMES
+
+For tensor game rewards, we sample k linearly independent vectors uir from |N (0, 1)|U|| for each agent dimension
+
+i  {1..n}. The reward tensor is given by T =
+
+k r=1
+
+wr
+
+n
+
+uir, i
+
+
+
+{1..n}.
+
+Thus
+
+T
+
+has
+
+roughly
+
+k
+
+local
+
+maxima
+
+in
+
+general
+
+for k << |U |n. We normalise T^ so that the maximum entry is always 1.
+
+All the agents use feed-forward neural networks with one hidden layer having 64 units for various components. Relu is used for non-linear activation.
+
+The training uses ADAM (Kingma & Ba, 2014) as the optimiser with a L2 regularisation of 0.001. The learning rate is set to 0.01. Training happens after each environment step.
+
+The
+
+batch
+
+size
+
+is
+
+set
+
+to
+
+32.
+
+For
+
+an
+
+environment
+
+with
+
+n
+
+agents
+
+and
+
+a
+
+actions
+
+available
+
+per
+
+agent
+
+we
+
+run
+
+the
+
+training
+
+for
+
+an 10
+
+steps.
+
+For VDN (Sunehag et al., 2017) and QMIX(Rashid et al., 2018) the -greedy coefficient is annealed from 0.9 to 0.05 at a linear rate until half of the total steps after which it is kept fixed.
+
+For Tesseract ('TAC') and Independent Actor-Critic ('IAC') we use a learnt state baseline for reducing policy gradient
+
+variance.
+
+We
+
+also
+
+add
+
+entropy
+
+regularisation
+
+for
+
+the
+
+policy
+
+with
+
+coefficient
+
+starting
+
+at
+
+0.1
+
+and
+
+halved
+
+after
+
+every
+
+1 10
+
+of
+
+total
+
+steps.
+
+We use an approximation rank of 2 for Tesseract ('TAC') in all the comparisons except Fig. 11(c) where it is varied for ablation.
+
+

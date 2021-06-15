@@ -1,0 +1,596 @@
+NVC-Net: End-to-End Adversarial Voice Conversion
+
+arXiv:2106.00992v1 [cs.SD] 2 Jun 2021
+
+Bac Nguyen Sony Europe B.V. Bac.NguyenCong@sony.com
+
+Fabien Cardinaux Sony Europe B.V. Fabien.Cardinaux@sony.com
+
+Abstract
+Voice conversion has gained increasing popularity in many applications of speech synthesis. The idea is to change the voice identity from one speaker into another while keeping the linguistic content unchanged. Many voice conversion approaches rely on the use of a vocoder to reconstruct the speech from acoustic features, and as a consequence, the speech quality heavily depends on such a vocoder. In this paper, we propose NVC-Net, an end-to-end adversarial network, which performs voice conversion directly on the raw audio waveform of arbitrary length. By disentangling the speaker identity from the speech content, NVC-Net is able to perform non-parallel traditional many-to-many voice conversion as well as zero-shot voice conversion from a short utterance of an unseen target speaker. Importantly, NVC-Net is non-autoregressive and fully convolutional, achieving fast inference. Our model is capable of producing samples at a rate of more than 3600 kHz on an NVIDIA V100 GPU, being orders of magnitude faster than state-of-the-art methods under the same hardware configurations. Objective and subjective evaluations on non-parallel many-to-many voice conversion tasks show that NVC-Net obtains competitive results with significantly fewer parameters.
+1 Introduction
+Voice conversion consists in changing the speech of a source speaker in such a way that it sounds like that of a target speaker while keeping the linguistic information unchanged [20, 41]. Typical applications of voice conversion include speaker conversions, dubbing in movies and videos, speaking aid systems [35], and pronunciation conversion [21]. Despite much success in this field, several issues remain to be addressed for voice conversion.
+Early voice conversion methods require parallel training data, which contain utterances of the same linguistic content spoken by different speakers. A drawback of these methods is their sensitivity to misalignment between the source and target utterances [43]. Time alignment and manual correction are typically performed as a pre-processing step to make these methods work more reliably [11]. Nevertheless, collecting parallel training data is still a time-consuming and can be even an infeasible task in many situations [31]. This has motivated growing research interest in developing voice conversion methods on non-parallel training data by using generative adversarial networks (GANs) [10] and its variants. Although GAN-based methods provide a promising solution by learning a mapping through non-parallel training data [17, 19, 20, 22], designing such a method that yields a competitive performance compared to parallel methods still remains to be solved.
+Another common problem in voice conversion is modeling the raw audio waveform. A good model should capture the short and long-term temporal dependencies in audio signals, which is not trivial due to the high temporal resolution of speech (e.g., 16k samples per second). A simple solution is to reduce the temporal resolution into a lower-dimensional representation (e.g., acoustic features). In such a case, one needs a vocoder that reconstructs the waveform representation from acoustic features. Traditional vocoders like WORLD [34] or STRAIGHT [24] often introduce artifacts (metallic sounds). To overcome this issue, more sophisticated neural vocoders such as autoregressive [44, 44]
+Preprint. Under review.
+
+and non-autoregressive [27, 36, 51] models have been proposed. Autoregressive models such as WaveNet [44] and WaveRNN [16] are slow at inference, therefore, they are not well suited for real-world applications. Although non-autoregressive models like WaveGlow [36] yield faster inference, the waveform reconstruction still dominates the computational effort as well as the memory requirements. Lightweight vocoders like MelGAN [27] or Parallel WaveGAN [51] can alleviate the memory issue, however, the feature mismatch problem between the training and inference remains unsolved. Indeed, as observed by Wu et al. [50], the feature mismatch problem may cause the vocoder to produce noisy or collapsed speech in the output, especially when training data are limited.
+While many research efforts have focused on converting audio among speakers seen during training, little attention has been paid to the problem of converting audio from and to speakers unseen during training (i.e., zero-shot voice conversion). Qian et al. [37] proposed to use a pre-trained speaker encoder on a large data set with many speakers. With carefully designed bottleneck layers, the content information can be disentangled from the speaker information, allowing it to perform zero-shot voice conversion. However, under the context of limited data and computational resources, the speaker encoder cannot generalize well on unseen speakers since the speaker embeddings tend to be scattered.
+In this paper, we tackle the problem of voice conversion from raw audio waveform using adversarial training in an end-to-end manner. The main contributions of this paper are summarized as follows.
+(i) We introduce NVC-Net, a many-to-many voice conversion method trained adversarially, which does not require parallel data. Our method aims to disentangle the speaker identity from the speech content. To the best of our knowledge, this is the first GAN-based method that explicitly performs disentanglement for voice conversion directly on the raw audio waveform.
+(ii) Unlike other GAN-based voice conversion methods, NVC-Net can directly generate raw audio without training an additional vocoder. Thus, the feature mismatch problem when using an independent vocoder can be avoided. The absence of a vocoder also allows NVC-Net to be very efficient at inference time. It is capable of generating audio at a rate of more than 3600 kHz on an NVIDIA V100 GPU.
+(iii) NVC-Net addresses the zero-shot voice conversion problem by constraining the speaker representation. We apply the Kullback-Leibler regularization on the speaker latent space, making the speaker representation robust to small variations of input. This also allows stochastic sampling at generation. During inference, one can randomly sample a speaker embedding from this space to generate diverse outputs or extract the speaker embedding from a given reference utterance.
+2 Related works
+Current voice conversion methods resort to non-parallel training data due to the difficulties in collecting parallel training data. Many of them have been inspired by the recent advances in computer vision. For instance, Hsu et al. [13] introduced a variational auto-encoder (VAE)-based voice conversion framework by conditioning the decoder on the speaker identity. As an extension, Kameoka et al. [18] used an auxiliary classifier for VAEs forcing the converted audio to be correctly classified. Despite the success, it is well known that conditional VAEs have the limitation of generating over-smoothed audio. This can be problematic as the model may produce poor-quality audio [17].
+An appealing solution to solve this problem is based on GANs [10] since they do not make any explicit assumption about the data distribution. They learn to capture the distribution of real audio, making the generated audio sounding more natural [22, 27, 51]. First studies were based on CycleGAN [9, 19, 20]. The idea is to learn a mapping on acoustic features between the source and target speakers by combining the adversarial loss, cycle-consistency loss, and identity mapping loss. More recently, inspired by the work of Choi et al. [4], StarGAN-VC [17] and its improved version [22] showed very promising results for voice conversion. Hsu et al. [14] demonstrated that GANs could improve VAE-based models. However, despite the success in generating realistic images, building GANs to generate directly high-fidelity audio waveforms is a challenging task [2, 5, 27]. One reason is that audio are highly periodic and human ears are sensitive to discontinuities. Moreover, unlike images, audio often induce high temporal resolution requirements.
+In the context of voice conversion, we consider speech as a composition of speaker identity and linguistic content. Disentangling the speaker identity from the linguistic content allows to change the speaker identity independently. There have been several methods leveraging the latent representation
+2
+
+Figure 1: Overview training procedure and network architecture of NVC-Net. The model consists of a speaker encoder, a content encoder, a generator, and three discriminators. The rectangle filled with blue color denotes a convolutional layer. NVC-Net produces high-fidelity audio (enforced by the discriminators) matching the input (enforced by the reconstruction loss).
+of automatic speech recognition (ASR) models for voice conversion [29, 52]. An ASR model is used to extract the linguistic features from the source speech, then convert these features into a target speaker using another speaker-dependent model. These models can perform non-parallel voice conversion, but their performance highly depends on the accuracy of the ASR model. Other disentanglement techniques for voice conversion include autoencoder [37], vector quantization [49], and instance normalization [3].
+Many of the aforementioned approaches rely on the intermediate representation of speech, such as spectrograms and mel-frequency cepstral coefficients. Although they are capable of producing good perceptual-quality speech, some still need additional supervision to train a robust vocoder. There are only a few methods dealing with the raw audio waveform. For instance, Engel et al. [7] proposed a WaveNet-style autoencoder for converting audio between different instruments. More recently, Serrà et al. [40] introduced Blow, a normalizing flow network for voice conversion on raw audio signals. Flow-based models have the advantages of efficient sampling and exact likelihood computation, however, they are less expressive compared to autoregressive models.
+3 NVC-Net
+Our proposal is designed with the following objectives: (i) reconstructing highly-perceptually-similar audio waveform from latent embeddings, (ii) preserving the speaker-invariant information during the conversion, and (iii) generating high-fidelity audio for a target speaker. In particular, NVC-Net consists of a content encoder Ec, a speaker encoder Es, a generator G, and three discriminators D(k) for k = 1, 2, 3 which employ on different temporal resolutions of the input. Figure 1 illustrates the overall architecture. We assume that an utterance x is generated from two latent embeddings, speaker identity z  Rdspk and speech content c  R , dcon×Lcon i.e., x = G(c, z). The content describes information that is invariant across different speakers, e.g., phonetic and other prosodic information. To convert an utterance x from speaker y to speaker y with an utterance x, we map x into a content embedding through the content encoder c = Ec(x). In addition, the target speaker embedding z is sampled from the output distribution of the speaker encoder Es(x). Finally, we generate raw audio from the content embedding c conditioned on the target speaker embedding z, i.e., x = G(c, z).
+3.1 Training objectives
+Our goal is to train the content encoder Ec, the speaker encoder Es, and the generator G that learns a mapping among multiple speakers. In the following, we will explain in detail the training objectives.
+3
+
+Adversarial loss. To make synthesized voices indistinguishable from real voices, the adversarial losses for the discriminator Ladv(D(k)) and for the generation Ladv(Ec, Es, G) are defined as
+
+Ladv(D(k)) = - Ex,y log D(k)(x)[y] - Ec,z,y log 1 - D(k)(G(c, z))[y] ,
+
+3
+
+(1)
+
+Ladv(Ec, Es, G) = Ec,z,y log 1 - D(k)(G(c, z))[y] .
+
+k=1
+
+The encoders and generator are trained to fool the discriminators, while the discriminators are trained to solve multiple binary classification tasks simultaneously. Each discriminator has multiple output branches, where each branch corresponds to one task. Each task consists in determining, for one specific speaker, whether an input utterance is real or converted by the generator. The number of branches is equal to the number of speakers. When updating the discriminator D(k) for an utterance x of class y, we only penalize if its y-th branch output D(k)(x)[y] is not correct, while leaving other branch outputs untouched. In our implementation, a reference utterance x for a source utterance x is taken randomly from the same mini-batch.
+Reconstruction loss. When generating the audio, we force the generator G to use the speaker embedding by reconstructing the input from the content and speaker embeddings. One can use the point-wise loss on the raw waveform to measure the difference between the original and generated audio. However, the point-wise loss cannot correctly capture the differences among them since two perceptually-identical audio might not have the same audio waveform [8]. Instead, we use the following feature matching loss [27, 28],
+
+L(fmk)(Ec, Es, G) = Ec,z,x
+
+L1 i=1 Ni
+
+Di(k)(x) - Di(k) G(c, z)
+
+1
+
+,
+
+where Di(k) denotes the feature map output of Ni units from the discriminator D(k) at the i-th layer, . 1 denotes the 1-norm, and L denotes the number of layers. The difference is measured through feature maps of the discriminators [27, 28]. To further improve the fidelity of speech, we add the following spectral loss
+
+L(spwe)(Ec, Es, G) = Ec,z,x
+
+(x, w) -  G(c, z), w
+
+2 2
+
+,
+
+where (., w) computes the log-magnitude of mel-spectrogram with a FFT size of w and . 2 denotes the 2-norm. Measuring the difference between the generated and ground-truth signals on the spectral domain has the advantage of increased phase invariance. Following Engel et al. [8], the spectral loss is computed at different spatial-temporal resolutions using different FFT sizes w  W = {2048, 1024, 512}. Finally, the total reconstruction loss is the sum of all spectral losses and the feature matching losses, i.e.,
+
+3
+
+Lrec(Ec, Es, G) = L(fmk)(Ec, Es, G) + 
+
+L(spwe)(Ec, Es, G) ,
+
+(2)
+
+k=1
+
+wW
+
+where   0 is a weighing term. In our experiments, we simply set  = 1.
+
+Content preservation loss. To encourage that the converted utterance preserves the speaker-invariant characteristics of its input audio, we minimize the following content preservation loss
+
+Lcon(Ec, G) = Ex,z
+
+Ec(x) - Ec G(Ec(x), z)
+
+2 2
+
+.
+
+(3)
+
+We encourage the content encoder Ec to preserve the essential characteristics of an input x while changing its speaker identity z during the conversion. There are two potential benefits of adding this loss. First, it allows cycle conversion in the sense that if we convert, e.g., an utterance from a speaker A to a speaker B and then convert it back from B to A, we should obtain the original utterance provided that the reconstruction is also minimized. Second, minimizing Eq. (3) also results in disentangling the speaker identity from the speech content. It can be seen that if the content embeddings of utterances from different speakers are the same, the speaker information cannot be embedded in the content embedding. Unlike previous works [4, 17, 22], we do not perform
+
+4
+
+any domain classification loss on the content embedding, making the training procedure simpler. Interestingly, we observe that the numerical value of 2-norm in Eq. (3) can be influenced by the scale of the output from Ec. By simply scaling down any Ec(x), the content preservation loss will be reduced. As a result, the magnitude of content embedding will be relatively small, making the distance between two content embeddings meaningless. To avoid such situation, we regularize the content embedding to have a unit 2-norm on the spatial dimension, i.e., cij  cij/( k c2kj)1/2. In Appendix A.4.2, we conduct an empirical analysis for this normalization.
+Kullback-Leibler loss. To perform stochastic sampling from the speaker latent space, we penalize the deviation of the speaker output distribution from a prior zero-mean unit-variance Gaussian, i.e.,
+
+Lkl(Es) = Ex DKL p(z|x) N (z|0, I) ,
+
+(4)
+
+where DKL denotes the Kullback-Leibler (KL) divergence and p(z|x) denotes the output distribution of Es(x). Constraining the speaker latent space provides two simple ways to sample a speaker embedding at inference: (i) sample from the prior distribution N (z|0, I) or (ii) sample from p(z|x) for a reference x. On one hand, this term enforces the speaker embeddings to be smooth and less scattered, making generalization to unseen samples. On the other hand, we implicitly maximize the lower bound approximation of the log-likelihood log p(x) (see our derivation in Appendix A.1).
+Final loss. From Eqs. (1) to (4), the final loss function for the encoders, generator, and discriminators can be summarized as follows
+L(Ec, Es, G) = Ladv(Ec, Es, G) + recLrec(Ec, Es, G) + conLcon(Ec, G) + klLkl(Es) ,
+3
+L(D) = Ladv(D(k)) ,
+k=1
+where rec  0, con  0, and kl  0 control the weights of the objective terms. For our experiments, these hyper-parameters are set to rec = 10, con = 10, and kl = 0.02.
+
+3.2 Model architectures
+We describe the main components of NVC-Net. Some structures of NVC-Net are inherited from MelGAN [27] and WaveNet [44]. More details on network configurations are given in Appendix A.2.
+Content encoder. The content encoder is a fully-convolutional neural network, which can be applied to any input sequence length. It maps the raw audio waveform to an encoded content representation. The content embedding is at 256x lower temporal resolution than its input. The network consists of 4 downsampling blocks, followed by two convolutional layers with the GELU [12] activations. A downsampling block consists of a stack of 4 residual blocks, followed by a strided convolution. A residual block contains dilated convolutions with gated-tanh nonlinearities and residual connections. This is similar to WaveNet [44], but here we simply use reflection padding and do not apply causal convolutions. For the content encoder, no conditional input is feed to the residual block. By increasing the dilation in each residual block, we aim to capture long-range temporal dependencies of audio signals as the receptive field increases exponentially with the number of blocks.
+Speaker encoder. The speaker encoder produces an encoded speaker representation from an utterance. We assume that p(z|x) is a conditionally independent Gaussian distribution. The network outputs a mean vector µ and a diagonal covariance 2I, where I is an identity matrix. Thus, a speaker embedding is given by sampling from the output distribution, i.e., z  N (µ, 2I). Although the sampling operation is non-differentiable, it can be reparameterized as a differentiable operation using the reparameterization trick [26], i.e., z = µ +  , where  N (0, I). We extract melspectrograms from the audio signals and use them as inputs to the speaker encoder. The network consists of 5 residual blocks [22] with dilated 1D convolutions. We use the Leaky ReLU nonlinarity with a negative slope of 0.2 for activation. Finally, an average pooling is used to remove temporal dimensions, followed by two dense layers, which output the mean and covariance.
+Generator. The generator maps the content and speaker embeddings back to raw audio. Our network architecture inherits from MelGAN [27], but instead of upsampling pre-computed mel-spectrograms, its input comes from the content encoder. More specifically, the network consists of 4 upsampling blocks. Each upsampling is performed by a transposed convolutional layer, followed by a stack of 4
+
+5
+
+residual blocks with the GELU [12] activations. To avoid artifacts, the kernel size is chosen to be a multiple of the stride [27]. Different from MelGAN, our model uses gated-tanh nonlinearities [44] in the residual blocks. To perform the conditioning on the speaker identity, we feed a speaker embedding to the residual block as in [44] (see also Fig. 1). The speaker embedding first goes through a 1 × 1 convolutional layer to reduce the number of dimensions to match the number of feature maps used in the dilation layers. Then, its output is broadcast over the time dimension. Finally, we generate the output audio waveform by applying a convolutional layer with the tanh activation at the end.
+Discriminator. The discriminator architecture is similar to that used in MelGAN [27]. In particular, three discriminators with an identical network architecture are applied on different audio resolutions, i.e., downsampled versions of the input with different scales of 1, 2, and 4, respectively. We use strided average pooling with a kernel size of 4 to downsample the audio scales. Differently from MelGAN, our discriminator is a multi-task discriminator [30], which contains multiple linear output branches. The number of output branches corresponds to the number of speakers. Each branch is a binary classification task determining whether an input is a real sample of the source speaker or a conversion output coming from the generator. Instead of classifying the entire audio sequences, we also leverage the idea of PatchGANs [15], which use a window-based discriminator network to classify whether local audio chunks are real or fake.
+3.3 Data augmentation
+It is well known that training GANs with limited data might lead to over-fitting. In order to learn the semantic information instead of memorizing the input signal, we apply a few data augmentation strategies. Human auditory perception is not affected when shifting the phase of the signal by 180 degrees, therefore, we can flip the sign of the input by multiplying with -1 to obtain a different input. Similarly to Serrà et al. [40], a random amplitude scaling is also performed. In particular, the amplitude of input is scaled by a random factor, drawn uniformly in a range of [0.25, 1]. To reduce artifacts, we apply a small amount of temporal jitter (in a range of [-30, 30]) to the ground-truth waveform when computing the reconstruction loss in Eq. (2). Note that these data augmentation strategies do not change the speaker identity or the content information of the signal. Moreover, we introduce a random shuffle strategy, which is applied to the speaker encoder network. First, the input signal is divided into segments of uniformly random lengths from 0.35 to 0.45 seconds. We then shuffle the order of these segments and then concatenate them to form a new input with the linguistic information shuffled in a random order. We observe that the random shuffle strategy helps to avoid that the content information leaks into the speaker embedding, thus achieving better disentanglement.
+4 Experiments
+We describe the experimental setups and discuss the performance of NVC-Net in terms of subjective as well as objective evaluations. Readers can listen to some audio samples on the demo webpage1.
+4.1 Experimental setups
+All experiments are conducted on the VCTK data set [46], which contains 44 hours of utterances from 109 speakers of English with various accents. Most sentences are extracted from newspapers and Rainbow Passage. In particular, each speaker reads a different set of sentences. We use a sampling rate of 22,050 Hz for all experiments. Utterances from the same speaker are randomly partitioned into training and test sets of ratio 9:1, respectively. NVC-Net is trained with the Adam optimizer using a learning rate of 10-4 with 1 = 0.5 and 2 = 0.9. We use a mini-batch size of 8 on 4 NVIDIA V100 GPUs. Training takes about 15 minutes per epoch. Inputs to NVC-Net are clips of length 32,768 samples (1.5 seconds), which are randomly chosen from the utterances.
+Following Wester et al. [48], we compute the naturalness and similarity scores of the converted utterances as subjective metrics. For the naturalness metric, a score ranging from totally unnatural (1) to totally natural (5) is assigned to each utterance. This metric takes into account the amount of distortion and artifacts presented in the utterances. For the similarity metric, a pair of utterances is presented in each test. This pair includes one converted utterance and one real utterance from the target speaker uttering the same sentence. Each subject is asked to assign a score ranging from
+1https://nvcnet.github.io/
+6
+
+Scores
+
+StarGAN-VC2
+
+Blow
+
+AutoVC
+
+NVC-Net
+
+NVC-Net
+
+4
+
+3
+
+2
+
+1
+
+0 F2F
+
+F2M
+
+M2F M2M
+
+Naturalness
+
+F2F
+
+F2M
+
+M2F M2M
+
+Similarity
+
+Figure 2: Subjective evaluation for traditional voice conversion settings with 95% confidence intervals
+
+Table 1: Spoofing evaluations of the competing methods Model StarGAN-VC2 AutoVC Blow NVC-Net NVC-Net
+
+Spoofing
+
+19.08
+
+82.46 89.39 96.43
+
+93.66
+
+different speakers (1) to the same speaker (5). The subject is explicitly instructed to listen beyond the distortion, misalignment, and mainly to focus on identifying the voice. The similarity metric aims to measure how well the converted utterance resembles the target speaker identity. There are in total 20 people that participated in our subjective evaluation.
+We also consider a spoofing assessment as an objective metric. The spoofing measures the percentage of converted utterances being classified as the target speaker. We employ a spectrogram-based classifier trained on the same data split as for training the voice conversion system. A high spoofing value indicates that the voice conversion system can successfully convert the utterance to a target speaker, while a low value indicates that the speaker identity is not well captured by the system. Since we train the speaker identification classifier on clean data, the spoofing measure might be affected by distortions or artifacts. More details on our experimental setups are given in Appendix A.3.
+4.2 Traditional voice conversion
+In this subsection, we compare NVC-Net with other state-of-the-art methods in non-parallel voice conversion, including Blow [40], AutoVC [37], and StarGAN-VC2 [22]. The details of these methods are given in Appendix A.3.2. To make a fair comparison, all methods use the same training and test sets. No extra data and transfer learning have been used in any of the competing methods. For AutoVC, we simply use the one-hot encoder for the speaker embeddings. Note that AutoVC uses the WaveNet [44] vocoder pre-trained on the VCTK corpus, which may encode some information of the test utterances in the vocoder. This could be an unfair advantage. We also implement another version of our model, called NVC-Net, which simply uses the one-hot encoder for the speaker embeddings. This allows us to study the importance of the speaker encoder.
+The subjective evaluation results are illustrated in Fig. 2. Converted utterances are divided into four groups, including conversions of female to female (F2F), female to male (F2M), male to male (M2M), and male to female (M2F). As shown in the figure, NVC-Net and NVC-Net obtain good results over the four groups. Clearly, our methods show a big improvement over StarGAN-VC2 and Blow. In particular, NVC-Net achieves the best performance. Compared to AutoVC, which gives the current state-of-the-art results, NVC-Net yields very competitive performance. In terms of naturalness, NVC-Net yields slightly better than NVC-Net, while both perform equally well in terms of similarity. In addition, the spoofing results are shown in Table 1. The classifier used in this experiment achieves a high accuracy of 99.34% on real speech. NVC-Net gives the highest spoofing score with 96.43%, followed by NVC-Net with 93.66%. Both NVC-Net and NVC-Net achieve superior performance than other competing methods with a clear margin.
+4.3 Zero-shot voice conversion
+In this subsection, we evaluate the generalization capability of NVC-Net on speakers that are unseen during training. Among the competing methods, only AutoVC supports zero-shot voice conversion. Therefore, we only report the results of NVC-Net against AutoVC. We conduct a similar experiment
+
+7
+
+Scores Scores
+
+4 3 2 1 0
+F2M F2F M2F M2M seen to unseen
+
+AutoVC
+
+NVC-Net
+
+F2M F2F M2F M2M F2M F2F M2F M2M
+
+unseen to seen
+
+unseen to unseen
+
+Naturalness
+
+4 3 2 1 0
+F2M F2F M2F M2M seen to unseen
+
+AutoVC
+
+NVC-Net
+
+F2M F2F M2F M2M F2M F2F M2F M2M
+
+unseen to seen
+
+unseen to unseen
+
+Similarity
+
+Figure 3: Subjective evaluation for zero-shot voice conversion settings with 95% confidence intervals
+
+Table 2: Speaker identification accuracy (%) using the content and speaker embeddings
+Model Content Speaker
+NVC-Net 19.21 N/A NVC-Net 24.15 99.22
+
+Table 3: Model size and inference speed comparisons (# of parameters of vocoders are not included in the methods with ).
+
+Model
+
+# parameters Inference speed Inference speed (in millions) GPU (in kHz) CPU (in kHz)
+
+StarGAN-VC2 AutoVC
+Blow
+NVC-Net
+
+9.62 28.42 62.11 15.13
+
+60.47 0.11
+441.11 3661.65
+
+35.47 0.04 2.43 7.49
+
+as in Subsection 4.2. In particular, the experiment is split into three different settings, including conversions of seen to unseen, unseen to seen, and unseen to unseen speakers. To get the best results for AutoVC, we use the pre-trained speaker encoder provided by the corresponding authors. The subjective evaluations are shown in Fig. 3. Both NVC-Net and AutoVC achieve competitive results in terms of naturalness. AutoVC gives a slight improvement in terms of similarity. Note that the speaker encoder of AutoVC was trained on a large corpus of 3,549 speakers to make it generalizable to unseen speakers. Clearly, this gives an unfair advantage over our method in which no extra data are used. Further improvement for NVC-Net can be expected when more data are considered. However, we leave the evaluation of NVC-Net on a large-scale data set for future research because the main purpose here is to show that NVC-Net generalizes to unseen speakers without additional data.
+4.4 Further studies
+Disentanglement analysis. We perform an ablation study to verify the disentanglement of latent representation encoded by the content and speaker encoders. The disentanglement is measured as the accuracy of a speaker identification classifier trained and validated on the latent representation. A high value indicates that the latent representation contains the speaker information. Note that with this VCTK data set, the content itself may reveal speaker identity as each speaker reads a different set of the newspaper texts (split in the both training and test sets). For the speaker classifier, we simply use three fully-connected layers with 512 hidden neurons and ReLU activations. The results are shown in Table 2. As expected, the classification accuracy is high when speaker embeddings are used and it substantially decreases when using content embeddings. The result confirms our hypothesis that the speaker encoder is able to disentangle the speaker identity from the content.
+Inference speed and model size. Table 3 shows the inference speed and model size for the competing methods. We did not report the parameters of the vocoders since AutoVC and StarGAN-VC2 can be used together with other choices of vocoders. Compared to the end-to-end Blow method, NVC-Net is significantly smaller, while being faster at inference time. Our model is capable of generating samples at a rate of 3661.65 kHz on an NVIDIA V100 GPU in full precision and 7.49 kHz on a single CPU core of Intel(R) Xeon(R) CPU E5-2695 v3 @ 2.30GHz. Gaining speed is mainly because NVC-Net is non-autoregressive and fully convolutional. This has an obvious advantage when used in real-time voice conversion systems. Interestingly, the inference speed of NVC-Net is 7x faster than the inference speed of WaveGlow as reported in [36].
+Latent embedding visualization. Figure 4 illustrates the content and speaker embeddings in 2D using the Barnes-Hut t-SNE visualization [45]. Based on speaker embeddings, utterances of the same speaker are clustered together, while those of different speakers are well separated. It is important to note that we do not directly impose any constraints on these speaker embeddings. Due to the KL divergence regularization, the speaker latent space is smooth, allowing to sample a speaker embedding
+
+8
+
+(a) Seen
+
+(b) Unseen
+
+(c) Seen
+
+(d) Unseen
+
+Figure 4: The Barnes-Hut t-SNE visualization [45] of the content embeddings (see (a) and (b)) and speaker embeddings (see (c) and (d)) of utterances from seen and unseen speakers.
+
+from a prior Gaussian distribution. On the other hand, based on content embeddings, utterances are scattered over the whole space. Content embeddings of the same speaker are not nicely clustered together. Our results indicate that speaker information is not embedded in the content representation.
+
+5 Conclusions
+In this paper, we have introduced NVC-Net, an adversarial neural network which is trained in an end-to-end manner for voice conversion. Rather than constraining the model to work with typical intermediate representation (e.g., spectrograms, linguistic features, etc), NVC-Net is able to exploit a good internal representation through a combination of adversarial feedback and reconstruction loss. In particular, NVC-Net aims to disentangle the speaker identity from the linguistic content. Our empirical studies have confirmed that NVC-Net yields very competitive results in traditional voice conversion settings as well as in zero-shot voice conversion settings. Compared to other voice conversion methods, NVC-Net is very efficient at inference. Although NVC-Net can synthesize diverse samples, it still lacks of explicit controls over other aspects of speech, e.g., rhythm and prosody. In future work, we will focus on addressing this issue. Another promising direction is to extend NVC-Net to other speech conversion tasks such as music and singing voice.
+
+Broad impact
+Voice conversion and, more generally, speech synthesis models have a wide range of applications with various impact on the society. In the entertainment industry, automatic content generation will likely spur new types of personalised games with scenes generated along the way. It has also the potential to make dubbing easier and cheaper allowing communities to access a vast amount of content previously unavailable in their languages. In the medical domain, the model presented in this paper can lead to new types of communication aids for the speech impaired. In particular, we envision communication aids that preserve the original voice of a person who has lost the ability to speak. Amongst the applications with positive societal impact, voice conversion can be used for speaker de-identification which helps the preservation of privacy. On the other hand, it can also be used for generating deepfakes and contribute to the propagation of `fake news'. For this reason, we believe that it is critical for the research community to also conduct research on the detection of manipulated images [32, 38] and audio [1, 47]. Improving the computational efficiency of voice conversion models has motivated the work presented in this paper. In particular, the proposed end-to-end model does not require the use of vocoder at inference which typically amounts for most of the computation. Subjective evaluations show that our model can achieve competitive results with the state-of-the-art AutoVC (see Figs. 2 and 3) while being four orders of magnitude faster on GPU (see Table 3). These results suggest that the voice conversion inference can be performed massively with less hardware and less energy consumption. In general, we believe that the energy consumption and environmental impact should be an important criteria when developing novel models. While we are all excited and impressed by the performance of gigantic models, the research community should also consider weighing the positive societal impact of such models against the environmental impact of using them. We refer the readers to the work from Strubell et al. [42] for further discussions on this aspect. Finally, the results in Table 3 show that we are also approaching a real-time inference on a single CPU core without any particular code optimization. This suggests that voice conversion applications will be able to be executed on local devices, helping to preserve the anonymity and privacy of the user.
+
+9
+
+Acknowledgments
+The authors would like to thank Stefan Uhlich, Ali Aroudi, Marc Ferras Font, Lukas Mauch and other colleagues at Sony Europe B.V., Stuttgart Laboratory 1 for many valuable discussions and suggestions.
+References
+[1] E. A. AlBadawy, S. Lyu, and H. Farid. Detecting ai-synthesized speech using bispectral analysis. In Proceedings of the Conference on Computer Vision and Pattern Recognition Workshops, pages 104­109, 2019.
+[2] M. Bin´kowski, J. Donahue, S. Dieleman, A. Clark, E. Elsen, N. Casagrande, L. C. Cobo, and K. Simonyan. High fidelity speech synthesis with adversarial networks. In Proceedings of the International Conference on Learning Representations, 2020.
+[3] J. chieh Chou and H.-Y. Lee. One-shot voice conversion by separating speaker and content representations with instance normalization. In Proceedings of the Conference of the International Speech Communication Association, pages 664­668, 2019.
+[4] Y. Choi, M. Choi, M. Kim, J.-W. Ha, S. Kim, and J. Choo. Stargan: Unified generative adversarial networks for multi-domain image-to-image translation. In Proceedings of the Conference on Computer Vision and Pattern Recognition, pages 8789­8797, 2018.
+[5] C. Donahue, J. McAuley, and M. Puckette. Adversarial audio synthesis. In Proceedings of the International Conference on Learning Representations, 2019.
+[6] V. Dumoulin, J. Shlens, and M. Kudlur. A learned representation for artistic style. In Proceedings of the International Conference on Learning Representations, 2017.
+[7] J. Engel, C. Resnick, A. Roberts, S. Dieleman, M. Norouzi, D. Eck, and K. Simonyan. Neural audio synthesis of musical notes with WaveNet autoencoders. In Proceedings of the International Conference on Machine Learning, pages 1068­1077, 2017.
+[8] J. Engel, L. Hantrakul, C. Gu, and A. Roberts. DDSP: Differentiable digital signal processing. In Proceedings of the International Conference on Learning Representations, 2020.
+[9] F. Fang, J. Yamagishi, I. Echizen, and J. Lorenzo-Trueba. High-quality nonparallel voice conversion based on cycle-consistent adversarial network. In Proceedings of the International Conference on Acoustics, Speech and Signal Processing, pages 5279­5283, 2018.
+[10] I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley, S. Ozair, A. Courville, and Y. Bengio. Generative adversarial nets. In Advances in Neural Information Processing Systems, pages 2672­2680, 2014.
+[11] E. Helander, J. Schwarz, J. Nurminen, H. Silen, and M. Gabbouj. On the impact of alignment on voice conversion performance. In Proceedings of the Conference of the International Speech Communication Association, pages 1453­1456, 2008.
+[12] D. Hendrycks and K. Gimpel. Gaussian error linear units (gelus). arXiv preprint arXiv:1606.08415, 2016.
+[13] C. Hsu, H. Hwang, Y. Wu, Y. Tsao, and H. Wang. Voice conversion from non-parallel corpora using variational auto-encoder. In Proceedings of the Asia-Pacific Signal and Information Processing Association Annual Summit and Conference, pages 1­6, 2016.
+[14] C.-C. Hsu, H.-T. Hwang, Y.-C. Wu, Y. Tsao, and H.-M. Wang. Voice conversion from unaligned corpora using variational autoencoding wasserstein generative adversarial networks. In Proceedings of the Conference of the International Speech Communication Association, pages 3364­3368, 2017.
+[15] P. Isola, J. Zhu, T. Zhou, and A. A. Efros. Image-to-image translation with conditional adversarial networks. In Proceedings of the Conference on Computer Vision and Pattern Recognition, pages 5967­5976, 2017.
+[16] N. Kalchbrenner, E. Elsen, K. Simonyan, S. Noury, N. Casagrande, E. Lockhart, F. Stimberg, A. van den Oord, S. Dieleman, and K. Kavukcuoglu. Efficient neural audio synthesis. In Proceedings of the International Conference on Machine Learning, pages 2410­2419, 2018.
+10
+
+[17] H. Kameoka, T. Kaneko, K. Tanaka, and N. Hojo. StarGAN-VC: Non-parallel many-to-many voice conversion using star generative adversarial networks. In Proceedings of the Spoken Language Technology Workshop, pages 266­273, 2018.
+[18] H. Kameoka, T. Kaneko, K. Tanaka, and N. Hojo. ACVAE-VC: Non-parallel voice conversion with auxiliary classifier variational autoencoder. IEEE/ACM Transactions on Audio, Speech, and Language Processing, 27:1432­1443, 2019.
+[19] T. Kaneko and H. Kameoka. Parallel-data-free voice conversion using cycle-consistent adversarial networks. arXiv preprint arXiv:1711.11293, 2017.
+[20] T. Kaneko and H. Kameoka. CycleGAN-VC: Non-parallel voice conversion using cycle-consistent adversarial networks. In Proceedings of the European Signal Processing Conference, pages 2100­2104, 2018.
+[21] T. Kaneko, H. Kameoka, K. Hiramatsu, and K. Kashino. Sequence-to-sequence voice conversion with similarity metric learned using generative adversarial networks. In Proceedings of the Conference of the International Speech Communication Association, pages 1283­1287, 2017.
+[22] T. Kaneko, H. Kameoka, K. Tanaka, and N. Hojo. StarGAN-VC2: Rethinking conditional methods for stargan-based voice conversion. In Proceedings of the Conference of the International Speech Communication Association, pages 679­683, 2019.
+[23] T. Karras, S. Laine, M. Aittala, J. Hellsten, J. Lehtinen, and T. Aila. Analyzing and improving the image quality of stylegan. In Proceedings of the Conference on Computer Vision and Pattern Recognition, pages 8110­8119, 2020.
+[24] H. Kawahara, I. Masuda-Katsuse, and A. de Cheveigné. Restructuring speech representations using a pitch-adaptive time-frequency smoothing and an instantaneous-frequency-based f0 extraction: Possible role of a repetitive structure in sounds. Speech Communication, 27:187­207, 1999.
+[25] D. P. Kingma and P. Dhariwal. Glow: Generative flow with invertible 1x1 convolutions. In Advances in Neural Information Processing Systems, pages 10236­10245, 2018.
+[26] D. P. Kingma and M. Welling. Auto-encoding variational Bayes. In Proceedings of the International Conference on Learning Representations, 2014.
+[27] K. Kumar, R. Kumar, T. de Boissiere, L. Gestin, W. Z. Teoh, J. Sotelo, A. de Brébisson, Y. Bengio, and A. C. Courville. MelGAN: Generative adversarial networks for conditional waveform synthesis. In Advances in Neural Information Processing Systems, pages 14910­14921, 2019.
+[28] A. B. L. Larsen, S. K. Sønderby, H. Larochelle, and O. Winther. Autoencoding beyond pixels using a learned similarity metric. In Proceedings of the International Conference on Machine Learning, pages 1558­1566, 2016.
+[29] L.-J. Liu, Z.-H. Ling, Y. Jiang, M. Zhou, and L.-R. Dai. WaveNet vocoder with limited training data for voice conversion. In Proceedings of the Conference of the International Speech Communication Association, pages 1983­1987, 2018.
+[30] M.-Y. Liu, X. Huang, A. Mallya, T. Karras, T. Aila, J. Lehtinen, and J. Kautz. Few-shot unsupervised image-to-image translation. In Proceedings of the International Conference on Computer Vision, 2019.
+[31] J. Lorenzo-Trueba, J. Yamagishi, T. Toda, D. Saito, F. Villavicencio, T. Kinnunen, and Z. Ling. The voice conversion challenge 2018: Promoting development of parallel and nonparallel methods. In Proceedings of the Speaker and Language Recognition Workshop, pages 195­202, 2018.
+[32] S. Lyu. Deepfake detection: Current challenges and next steps. In Proceedings of the International Conference on Multimedia & Expo Workshops, pages 1­6, 2020.
+[33] X. Mao, Q. Li, H. Xie, R. Y. Lau, Z. Wang, and S. P. Smolley. Least squares generative adversarial networks. In Proceedings of the International Conference on Computer Vision, pages 2813­2821, 2017.
+[34] M. Morise, F. Yokomori, and K. Ozawa. WORLD: A vocoder-based high-quality speech synthesis system for real-time applications. IEICE Transactions on Information and Systems, E99-D:1877­1884, 2016.
+[35] K. Nakamura, T. Toda, H. Saruwatari, and K. Shikano. Speaking-aid systems using gmm-based voice conversion for electrolaryngeal speech. Speech Communication, 54:134­146, 2012.
+11
+
+[36] R. Prenger, R. Valle, and B. Catanzaro. Waveglow: A flow-based generative network for speech synthesis. In Proceedings of the International Conference on Acoustics, Speech and Signal Processing, pages 3617­3621, 2019.
+[37] K. Qian, Y. Zhang, S. Chang, X. Yang, and M. Hasegawa-Johnson. AutoVC: Zero-shot voice style transfer with only autoencoder loss. In Proceedings of the International Conference on Machine Learning, pages 5210­5219, 2019.
+[38] A. Rossler, D. Cozzolino, L. Verdoliva, C. Riess, J. Thies, and M. Nießner. Faceforensics++: Learning to detect manipulated facial images. In Proceedings of the International Conference on Computer Vision, pages 1­11, 2019.
+[39] T. Salimans and D. P. Kingma. Weight normalization: A simple reparameterization to accelerate training of deep neural networks. In Advances in Neural Information Processing Systems, pages 901­909, 2016.
+[40] J. Serrà, S. Pascual, and C. Segura Perales. Blow: a single-scale hyperconditioned flow for non-parallel raw-audio voice conversion. In Advances in Neural Information Processing Systems, pages 6793­6803, 2019.
+[41] B. Sisman, J. Yamagishi, S. King, and H. Li. An overview of voice conversion and its challenges: From statistical modeling to deep learning. IEEE/ACM Transactions on Audio, Speech, and Language Processing, 29:132­157, 2021.
+[42] E. Strubell, A. Ganesh, and A. McCallum. Energy and policy considerations for deep learning in NLP. In Proceedings of the Annual Meeting of the Association for Computational Linguistics, pages 3645­3650, 2019.
+[43] J. Tao, M. Zhang, J. Nurminen, J. Tian, and X. Wang. Supervisory data alignment for text-independent voice conversion. IEEE Transactions on Audio, Speech, and Language Processing, 18:932­943, 2010.
+[44] A. van den Oord, S. Dieleman, H. Zen, K. Simonyan, O. Vinyals, A. Graves, N. Kalchbrenner, A. Senior, and K. Kavukcuoglu. WaveNet: A generative model for raw audio. In Proceedings of the International Speech Communication Association Workshop, pages 125­125, 2016.
+[45] L. van der Maaten. Accelerating t-SNE using tree-based algorithms. The Journal of Machine Learning Research, 15:3221­3245, 2014.
+[46] C. Veaux, J. Yamagishi, and K. MacDonald. Superseded - cstr vctk corpus: English multi-speaker corpus for cstr voice cloning toolkit, 2017. URL http://datashare.is.ed.ac.uk/handle/10283/2651.
+[47] R. Wang, F. Juefei-Xu, Y. Huang, Q. Guo, X. Xie, L. Ma, and Y. Liu. Deepsonar: Towards effective and robust detection of ai-synthesized fake voices. In Proceedings of the ACM International Conference on Multimedia, pages 1207­1216, 2020.
+[48] M. Wester, Z. Wu, and J. Yamagishi. Analysis of the voice conversion challenge 2016 evaluation results. In Proceedings of the Conference of the International Speech Communication Association, pages 1637­1641, 2016.
+[49] D.-Y. Wu and H.-y. Lee. One-shot voice conversion by vector quantization. In Proceedings of the International Conference on Acoustics, Speech and Signal Processing, pages 7734­7738, 2020.
+[50] Y.-C. Wu, K. Kobayashi, T. Hayashi, P. L. Tobing, and T. Toda. Collapsed speech segment detection and suppression for WaveNet vocoder. In Proceedings of the Conference of the International Speech Communication Association, pages 1988­1992, 2018.
+[51] R. Yamamoto, E. Song, and J.-M. Kim. Parallel wavegan: A fast waveform generation model based on generative adversarial networks with multi-resolution spectrogram. In Proceedings of the International Conference on Acoustics, Speech and Signal Processing, pages 6199­6203, 2020.
+[52] J.-X. Zhang, L.-J. Liu, Y.-N. Chen, Y.-J. Hu, Y. Jiang, Z.-H. Ling, and L.-R. Dai. Voice conversion by cascading automatic speech recognition and text-to-speech synthesis with prosody transfer. In Proceedings of the Joint Workshop for the Blizzard Challenge and Voice Conversion Challenge, pages 121­125, 2020.
+12
+
+A Appendix
+
+A.1 NVC-Net from the probabilistic model perspective
+In this section, we provide a more formal explanation of using the Kullback­Leibler divergence as a regularizer in Eq. (4). Our derivation follows the arguments of the standard VAE [26]. We assume that the observed utterance x is generated from two independent latent variables c and z, corresponding to the speech content and speaker identity of x, respectively. Let q(c|x) and q(z|x) denote approximate posteriors for the latent variables and we assume that q(c, z|x) = q(c|x)q(z|x). Because our content encoder is deterministic, this implies q(c|x) = 1. We follow the variational principle
+
+log p(x) = log p(x, c, z)dcdz
+
+= log
+
+q(c, z|x) p(x|c, z)p(c, z)dcdz
+q(c, z|x)
+
+= log
+
+p(c, z)
+
+q(c, z|x)
+
+p(x|c, z)dcdz
+
+q(c, z|x)
+
+p(z)p(c)
+
+ q(c|x)q(z|x) log
+
+dcdz + q(c, z|x) log p(x|c, z)dcdz
+
+q(c|x)q(z|x)
+
+p(z)
+
+= q(z|x) log
+
+dz +
+
+q(z|x)
+
+q(z|x) log p(c)dcdz + Eq(c,z|x)[log p(x|c, z)]
+
+= -DKL(q(z|x) p(z)) + log p(c)dc + Eq(c,z|x)[log p(x|c, z)] .
+
+(5)
+
+We choose the prior distributions p(z) to be a zero-mean unit-variance Gaussian and p(c) to be a uniform distribution on the surface of unit sphere, i.e.,
+z  N (z|0, I) ,
+c  U (c|( j c2ij )1/2 = 1) .
+Therefore, the second term in Eq. (5) is a constant and equal to -Lcondcon log(A), where Lcon, dcon are the temporal and spatial dimensions of c, respectively, and A is the surface area of a dcon-dimensional unit ball. Equation (5) is also known as the evidence lower bound (ELBO) or the negative variational free energy. One can see that maximizing the ELBO is equivalent to minimize DKL(q(z|x) p(z)) and to maximize Eq(c,z|x)[log p(x|c, z)]. The former term corresponds to our Kullback­Leibler regularization in Eq. (4) and the latter term corresponds to our reconstruction loss in Eq. (2). In other words, the loss function of NVC-Net implicitly performs the maximum likelihood estimation to learn the parameters.
+
+A.2 Model architectures
+In this section, we describe in more detail the architecture design for NVC-Net. In order to stabilize the training and to improve the convergence of GANs, weight normalization [39] is employed in all layers of NVC-Net, including encoders, generator, and discriminators. We do not use batch normalization or instance normalization as they tend to remove important information of speech [27].
+Let T denote the temporal length of the input audio waveform and dcon denote the spatial dimension of the content embedding. The network architecture of the content encoder is shown in Table 4. The temporal resolution of input is reduced 256 times, which is done in 4 stages of 2x, 2x, 8x, and 8x downsampling. A residual block (ResidualBlock) consists of 4 layers of dilated convolutions with dilation 1, 3, 9, and 27, inducing a receptive field of 81. In our experiments, we set dcon = 4.
+We use 80-band mel-spectrograms as inputs for the speaker encoder, where the FFT, window, and hop size are set to 1024, 1024, and 256, respectively. Let M denote the temporal length of the mel-spectrogram. Table 5 shows the network architecture of the speaker encoder. The temporal resolution is reduced 32 times, which is done in 5 stages of 2x downsampling block (DownBlock). The temporal information is removed by an average pooling over the temporal dimension. Finally, we use a convolutional layer of kernel size 1 to project the speaker embedding to the target shape of dspk × 1. In our experiments, we set dspk = 128.
+
+13
+
+Table 6 shows the network architecture of the generator. Given an audio of length T , the content embedding is of dimension dcon × T /256. The generator uses the content embedding in the main branch. To recover the input temporal resolution using the generator, we upsample the input in 4 stages of 8x, 8x, 2x, and 2x upsampling. A speaker embedding is sampled from the output distribution of the speaker encoder, then it is injected to the generator through all residual blocks.
+
+Table 4: Network architecture of the content encoder
+
+Module
+
+Input  Output shape
+
+Layer information
+
+Convolution (1, T )  (32, T )
+
+Conv(channel=32, kernel=7, stride=1, pad=3)
+
+Residual stack (32, T )  (32, T )
+
+4 x ResidualBlock(channel=32)
+
+Downsample (32, T )  (64, T /2)
+
+Conv(channel=64, kernel=4, stride=2, pad=1)
+
+Residual stack (64, T /2)  (64, T /2)
+
+4 x ResidualBlock(channel=64)
+
+Downsample (64, T /2)  (128, T /4)
+
+Conv(channel=128, kernel=4, stride=2, pad=1)
+
+Residual stack (128, T /4)  (128, T /4)
+
+4 x ResidualBlock(channel=128)
+
+Downsample (128, T /4)  (256, T /32) Conv(channel=256, kernel=16, stride=8, pad=4)
+
+Residual stack (256, T /32)  (256, T /32) 4 x ResidualBlock(channel=256)
+
+Downsample (256, T /256)  (512, T /256) Conv(channel=512, kernel=16, stride=8, pad=4)
+
+Convolution (512, T /256)  (dcon, T /256) Conv(channel=dcon, kernel=7, stride=1, pad=3)
+
+Convolution (dcon, T /256)  (dcon, T /256) Conv(channel=dcon, kernel=7, stride=1, pad=3)
+
+Table 5: Network architecture of the speaker encoder
+
+Module
+
+Input  Output shape
+
+Layer information
+
+Convolution (80, M )  (32, M )
+
+Conv(channel=32, kernel=3, stride=1, pad=1)
+
+DownBlock (32, M )  (64, M/2)
+
+Conv(channel=64, kernel=3, stride=1, pad=1)
+
++ AveragePooling(kernel=2)
+
+DownBlock (64, M/2)  (128, M/4) Conv(channel=64, kernel=3, stride=1, pad=1)
+
++ AveragePooling(kernel=2)
+
+DownBlock (128, M/4)  (256, M/8) Conv(channel=64, kernel=3, stride=1, pad=1)
+
++ AveragePooling(kernel=2)
+
+DownBlock (256, M/8)  (512, M/16) Conv(channel=64, kernel=3, stride=1, pad=1)
+
++ AveragePooling(kernel=2)
+
+DownBlock (512, M/16)  (512, M/32) Conv(channel=64, kernel=3, stride=1, pad=1)
+
++ AveragePooling(kernel=2)
+
+AveragePooling (512, M/32)  (512, 1) AveragePooling(kernel=L/32)
+
+Mean Covariance
+
+(512, 1)  (dspk, 1) (512, 1)  (dspk, 1)
+
+Conv(channel=dspk, kernel=1, stride=1, pad=0) Conv(channel=dspk, kernel=1, stride=1, pad=0)
+
+Table 6: Network architecture of the generator
+
+Module
+
+Input  Output shape
+
+Layer information
+
+Convolution (dcon, T /256)  (512, T /256) Conv(channel=512, kernel=7, stride=1, pad=3) Convolution (512, T /256)  (512, T /256) Conv(channel=512, kernel=7, stride=1, pad=3)
+
+Upsample (512, T /256)  (256, T /32) Deconv(channel=256, kernel=16, stride=8, pad=4)
+
+Residual stack (256, T /32)  (256, T /32) 4 x ResidualBlock(channel=256)
+
+Upsample (256, T /32)  (128, T /4) Deconv(channel=128, kernel=16, stride=8, pad=4)
+
+Residual stack (128, T /4)  (128, T /4) 4 x ResidualBlock(channel=256)
+
+Upsample (128, T /4)  (64, T /2)
+
+Deconv(channel=64, kernel=4, stride=2, pad=1)
+
+Residual stack (64, T /2)  (64, T /2)
+
+4 x ResidualBlock(channel=64)
+
+Upsample (64, T /2)  (32, T )
+
+Deconv(channel=32, kernel=4, stride=2, pad=1)
+
+Residual stack (32, T )  (32, T )
+
+4 x ResidualBlock(channel=32)
+
+Convolution (32, T )  (1, T )
+
+Conv(channel=1, kernel=7, stride=1, pad=3)
+
+14
+
+A.3 Details of experimental setups
+A.3.1 Dataset split and configurations
+All experiments were conducted on the VCTK data set [46], which consists of 109 English speakers. From those speakers, six speakers (3 males and 3 females) are randomly extracted as test data for zero-shot voice conversion settings, and the rest used for traditional voice conversion settings. Silences at the beginning and the end of utterances are trimmed. We use 90% of the data for training (37,507 utterances) and the rest 10% for testing (4,234 utterances). Similarly to Qian et al. [37], a reference of speech (20 seconds) is used to compute the speaker embedding for NVC-Net.
+In traditional voice conversion settings, the objective evaluation is carried out as follows. One conversion is performed per test utterance, in which a target speaker is randomly chosen from the pool of available training speakers. A total of 4,234 conversions have been used to compute the spoofing score. For the subjective evaluation, we randomly choose 3 male and 3 female speakers in the test data. We then perform 6 × 5 = 30 conversions from all possible combinations of source-target speaker pairs. There are in total 20 people that participated in our subjective evaluation.
+In zero-shot voice conversion settings, only the subjective test is employed. We use 6 seen speakers and 6 unseen speakers. The experiments are divided into three different settings, including conversions of seen to unseen, unseen to seen, and unseen to unseen. In each of these settings, we report the subjective evaluation of conversions from female to male, female to female, male to female, and female to female.
+A.3.2 Baseline voice conversion methods
+For a fair comparison, we use implementations of the baseline methods provided by the corresponding authors2 except StarGAN-VC2 (since there is no official implementation from the authors).
+StarGAN-VC2 [22] is an improvement of StarGAN-VC [17] with an aim to learn a many-to-many mapping between multiple speakers. StarGAN-VC2 uses the source-and-target conditional adversarial loss, which resolves the issue of unfair training in StarGAN-VC. The improvement in performance is due to the conditional instance normalization [6] that enhances the speaker adaption ability in the generator. However, as noted by Karras et al. [23], instance normalization might cause information loss, which leads to performance degradation. It is important to note that this method works on the intermediate features, including mel-cepstral coefficients (MCEPs), logarithmic fundamental frequency, and aperiodicities, analyzed by the WORLD vocoder [34]. The conversion is mainly performed on the MCEPs. The training is based on the least-squares GAN [33]. Compared to our method NVC-Net, the mapping learned by StarGAN-VC2 is a direct transformation and no disentanglement of the speaker information is employed.
+Blow [40] is an end-to-end method that performs voice conversion directly from the raw audio waveform. The idea is to remove the speaker information when transforming the input space to the latent space. The speaker information is implicitly embedded through the conditional blocks. Inheriting from Glow [25], Blow learns an invertible network architecture with the maximum likelihood objective. The conversion is carried by conditioning directly the weights of the convolutional layers. Blow achieves very competitive results with other state-of-the-art methods. However, the model size is still relatively large compared to that of NVC-Net. In our experiments, we use the same hyper-parameters as proposed by the authors.
+AutoVC [37] achieves the state-of-the-art voice conversion results by disentangling the speaker information from the speech content using a conditional auto-encoder architecture. An information bottleneck is introduced between the encoder and decoder to remove the speaker-identity information. AutoVC has the advantage of implementation simplicity. However, its performance is sensitive to the choice of bottleneck dimension and heavily dependent on the vocoder. In our experiments, we set the bottleneck dimension to 32 and use the WaveNet vocoder [44] pre-trained on the VCTK corpus provided by the authors. For zero-shot voice conversion settings, we set the dimension of speaker embedding to 256 and use the speaker encoder model pre-trained on a large corpus provided by
+2Links to the implementations of the baseline methods: StarGAN-VC2: https://github.com/SamuelBroughton/StarGAN-Voice-Conversion-2 Blow: https://github.com/joansj/blow AutoVC: https://github.com/auspicious3000/autovc
+15
+
+the authors. This speaker corpus has in total 3549 speakers, a combination of the VoxCeleb1 and Librispeech data sets.
+
+A.3.3 Spoofing speaker identification
+Spoofing measure indicates how well a voice conversion method can capture the speaker identities. For this purpose, we train a speaker identification classifier on the same data split used to train the voice conversion method. The classifier follows the network architecture of the speaker encoder (see Appendix A.2). However, instead of outputting the parameters of a distribution, the model outputs a linear layer followed by the softmax activation function. Using the cross-entropy loss, we train the classifier with the Adam optimizer using a learning rate of 5 × 10-4 and an exponential scheduler (a decay rate of 0.99) for 150 epochs. On the VCTK corpus, our classifier achieves an accuracy of 99.34% on the test set of real speech.
+
+A.4 Additional studies
+
+A.4.1 Diversity of outputs
+NVC-Net can synthesize diverse samples by changing the latent representation of the speaker embedding. In Fig. 5, we illustrate the pitch contours of various conversions when sampling different speaker embeddings from the output distribution of the speaker encoder. As shown in the figure, there are various intonation patterns of speech. It is important to note that the VCTK corpus used to train our model has very limited expressive speech.
+
+Frequency (Hz)
+
+175 150 125 100 75 50 25
+0 0
+
+50
+
+100
+
+150
+
+200
+
+250
+
+300
+
+Frame
+
+Figure 5: The fundamental frequency (F0) contours of the converted speech
+
+A.4.2 Ablation studies
+Normalization on content embedding. To study the effect of using normalization on the content embedding, we conduct an experiment comparing the spoofing results of NVC-Net and NVC-Net with and without normalization. As shown in Table 7, employing the normalization on the content embedding helps to improve the performance. We also observe that it reduces the artifacts in the generated audio. Some samples are provided on our demo website https://nvcnet.github.io/.
+
+Table 7: Spoofing results with and without normalization
+Settings NVC-Net NVC-Net
+
+with without
+
+96.43 95.15
+
+93.66 91.79
+
+Table 8: Speaker identification results of NVC-Net with and without random shuffling
+
+Settings Content Speaker
+
+with
+
+24.15
+
+without 27.91
+
+99.22 99.17
+
+Random shuffling. We study the random shuffle strategy as a data augmentation technique for the speaker encoder. Table 8 shows the speaker identification results of NVC-Net based on the content and speaker embeddings. Large value means speaker information is contained, while small value means less speaker information contained in the representation. For the speaker embedding, the higher value is the better and for the content embedding the lower value is the better. The results show that random shuffling can help to improve the disentanglement of the speaker information from the speech content.
+
+16
+
+

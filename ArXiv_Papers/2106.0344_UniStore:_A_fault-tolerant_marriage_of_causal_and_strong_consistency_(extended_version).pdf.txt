@@ -1,0 +1,2549 @@
+UNISTORE: A fault-tolerant marriage of causal and strong consistency
+
+Manuel Bravo Alexey Gotsman Borja de Régil IMDEA Software Institute
+
+Hengfeng Wei  Nanjing University
+
+arXiv:2106.00344v1 [cs.DC] 1 Jun 2021
+
+Abstract
+Modern online services rely on data stores that replicate their data across geographically distributed data centers. Providing strong consistency in such data stores results in high latencies and makes the system vulnerable to network partitions. The alternative of relaxing consistency violates crucial correctness properties. A compromise is to allow multiple consistency levels to coexist in the data store. In this paper we present UNISTORE, the first fault-tolerant and scalable data store that combines causal and strong consistency. The key challenge we address in UNISTORE is to maintain liveness despite data center failures: this could be compromised if a strong transaction takes a dependency on a causal transaction that is later lost because of a failure. UNISTORE ensures that such situations do not arise while paying the cost of durability for causal transactions only when necessary. We evaluate UNISTORE on Amazon EC2 using both microbenchmarks and a sample application. Our results show that UNISTORE effectively and scalably combines causal and strong consistency.
+1 Introduction
+Many of today's Internet services rely on geo-distributed data stores, which replicate data in different geographical locations. This improves user experience by allowing accesses to the closest site and ensures disaster-tolerance. However, geo-distribution also makes it more challenging to keep the data consistent. The classical approach is to make replication transparent to clients by providing strong consistency models, such as linearizability [32] or serializability [69]. The downside is that this approach requires synchronization between data centers in the critical path. This significantly increases latency [1] and makes the system unavailable during network partitionings [27]. Thus, even though several commercial geodistributed systems follow this approach [17, 19, 25, 62, 70], the associated cost has prevented it from being adopted more widely.
+Also with the State Key Laboratory for Novel Software Technology, Software Institute.
+
+An alternative approach is to relax synchronization: the data store executes an operation at a single data center, without any communication with others, and propagates updates to other data centers in the background [20, 65]. This minimizes the latency and makes the system highly available, i.e., operational even during network partitionings. But on the downside, the systems following this approach provide weaker consistency models: e.g., eventual consistency [65,68] or causal consistency [2]. The latter is particularly appealing: it guarantees that clients see updates in an order that respects the potential causality between them. For example, assume that in a banking application Alice deposits $100 into Bob's account (u1) and then posts a notification about it into Bob's inbox (u2). Under causal consistency, if Bob sees the notification (u3), and then checks his account balance (u4), he will see the deposit. This is not guaranteed under eventual consistency, which does not respect causality relationships, such as those between u1 and u2. In some settings, causal consistency has been shown to be the strongest model that allows availability during network partitionings [7, 44]. It has been a subject of active research in recent years, with scalable implementations [3, 42, 47] and some industrial deployments [54, 66].
+However, even causal consistency is often too weak to preserve critical application invariants. For example, consider a banking application that disallows overdrafts and thus maintains an invariant that an account balance is always non-negative. Assume that the balance of an account stored at two replicas is 100, and clients concurrently issue two withdraw(100) operations (u5 and u6) at different replicas. Since causal consistency executes operations without synchronization, both withdrawals will succeed, and once the replicas exchange the updates, the balance will go negative. To ensure integrity invariants in examples such as this, the programmer has to introduce synchronization between replicas, and, since synchronization is expensive, it pays off to do this sparingly. To this end, several research [9,40,41,64] and commercial [5, 6, 28, 48, 57] data stores allow the programmer to choose whether to execute a particular operation under weak or strong consistency. For example, to preserve the integrity
+
+1
+
+invariant in our banking application, only withdrawals need to use strong consistency, and hence, synchronize; deposits may use weaker consistency and proceed without synchronization.
+Given the benefits of causal consistency, it is particularly appealing to marry it with strong consistency in a geo-distributed data store. But like real-life marriages, to be successful this one needs to hold together both in good times and in bad ­ when data centers fail due to catastrophic events or power outages. Unfortunately, none of the existing data stores meant for geo-replication combine causal and strong consistency while providing such fault tolerance [9, 40, 41]. In this paper we present UNISTORE ­ the first fault-tolerant and scalable data store that combines causal and strong consistency. More precisely, UNISTORE implements a transactional variant of Partial Order-Restrictions consistency (PoR consistency) [30,41]. This guarantees transactional causal consistency by default [3] and allows the programmer to additionally specify which pairs of transactions conflict, i.e., have to synchronize. For instance, to preserve the integrity invariant in our previous example, the programmer should declare that withdrawals from the same account conflict. Then one of the withdrawals u5 and u6 will observe the other and will fail.
+The key challenge we have to address in UNISTORE is to maintain liveness despite data center failures. Just adding a Paxos-based commit protocol for strong transactions [18, 19, 34] to an existing causally consistent protocol does not yield a fault-tolerant data store. In such a data store, a committed strong transaction t2 may never become visible to clients if a causal transaction t1 on which it depends is lost due to a failure of its origin data center. This compromises the liveness of the system, because no transaction t3 conflicting with t2 can commit from now on: according to the PoR model, one of the transactions t2 and t3 has to observe the other, but t2 will never be visible and t2 did not observe t3.
+UNISTORE addresses this problem by ensuring that, before a strong transaction commits, all its causal dependencies are uniform, i.e., will eventually become visible at all correct data centers. This adapts the classical notion of uniformity in distributed computing to causal consistency [15]. UNISTORE does so without defeating the benefits of causal consistency. Causal transactions remain highly available at the cost of increasing the latency of strong transactions: a strong transaction may have to wait for some of its dependencies to become uniform before committing. To minimize this cost, UNISTORE executes causal transactions on a snapshot that is slightly in the past, such that a strong transaction will mostly depend on causal transactions that are already uniform before committing. Furthermore, UNISTORE reuses the mechanism for tracking uniformity to let clients make causal transaction durable on demand and to enable consistent client migration.
+In addition to being fault tolerant, UNISTORE scales horizontally, i.e., with the number of machines in each data center; this also goes beyond previous proposals [9, 40, 41]. To this end, UNISTORE builds on Cure [3] ­ a scalable implementa-
+
+tion of transactional causal consistency. Our protocol extends Cure with a novel mechanism that distributes the task of tracking the set of uniform transactions among the machines of a data center. We also add the ability for data centers to forward transactions they receive from others, so that a transaction can propagate through the system even if its origin data center fails. Finally, we carefully integrate an existing fault-tolerant atomic commit for strong transactions [18] into the protocol for causal consistency.
+We have rigorously proved the correctness of the UNISTORE protocol (§7 and §D). We have also evaluated it on Amazon EC2 using both microbenchmarks and a more realistic RUBiS benchmark. Our evaluation demonstrates that UNISTORE scalably combines causal and strong transactions, with the former not affecting the performance of the latter. Under the RUBiS mix workload, causal transactions exhibit a low latency (1.2ms on average), and the overall average latency is 3.7× lower than that of a strongly consistent system.
+2 System Model
+We consider a geo-distributed system consisting of a set of
+data centers D = {1, . . . , D} that manage a large set of data
+items. A data item is uniquely identified by its key. For scalability, the key space is split into a set of logical partitions
+P = {1, . . . , N}. Each data center stores replicas of all parti-
+tions, scattered among its servers. We let pmd be the replica of partition m at data center d, and we refer to replicas of the same partition as sibling replicas. As is standard, we assume that D = 2 f + 1 and at most f data centers may fail. We call a data center that does not fail correct. If a data center fails, all partition replicas it stores become unavailable. For simplicity, we do not consider the failures of individual replicas within a data center: these can be masked using standard state-machine replication protocols executing within a data center [37, 55].
+Replicas have physical clocks, which are loosely synchronized by a protocol such as NTP. The correctness of UNISTORE does not depend on the precision of clock synchronization, but large drifts may negatively impact its performance. Any two replicas are connected by a reliable FIFO channel, so that messages between correct data centers are guaranteed to be delivered. As is standard, to implement strong consistency we require the network to be eventually synchronous, so that message delays between sibling replicas in correct data centers are eventually bounded by some constant [23].
+3 Consistency Model
+A client interacts with UNISTORE by executing a stream of transactions at the data center it is connected to. A transaction consists of a sequence of operations, each on a single data item, and can be interactive: the data items it accesses are not known a priori. A transaction that modifies at least one data item is an update transaction; otherwise it is read-only.
+
+2
+
+A consistency model defines a contract between the data store and its clients that specifies which values the data store is allowed to return in response to client operations. UNISTORE implements a transactional variant of Partial OrderRestrictions consistency (PoR consistency) [30, 41], which we now define informally; we give a formal definition in §B. The PoR model enables the programmer to classify transactions as either causal or strong. Causal transactions satisfy transactional causal consistency, which guarantees that clients see transactions in an order that respects the potential causality between them [2, 3]. However, clients can observe causally independent transactions in arbitrary order. Strong transactions give the programmer more control over their visibility. To this end, the programmer provides a symmetric conflict relation on operations that is lifted to strong transactions as follows: two transactions conflict if they perform conflicting operations on the same data item. Then the PoR model guarantees that, out of two conflicting strong transactions, one has to observe the other.
+More precisely, a transaction t1 precedes a transaction t2 in the session order if they are executed by the same client and t1 is executed before t2. A set of transactions T committed by the data store satisfies PoR consistency if there exists a causal order relation  on T such that the following properties hold:
+Causality Preservation. The relation  is transitive, irreflexive, and includes the session order.
+Return Value Consistency. Consider an operation u on a data item k in a transaction t  T . The return value of u can be computed from the state of k obtained as follows: first execute all operations on k by transactions preceding t in  in an order consistent with ; then execute all operations on k that precede u in t.
+Conflict Ordering. For any distinct strong transactions t1,t2  T , if t1 t2, then either t1  t2 or t2  t1.
+Eventual Visibility. A transaction t  T that is either strong or originates at a correct data center eventually becomes visible at all correct data centers: from some point on, t precedes in  all transactions issued at correct data centers.
+If all transactions are causal, then the above definition specializes to transactional causal consistency [3, 16]. If all transactions are strong and all pairs of operations conflict, then we obtain (non-strict) serializability.
+When t1  t2, we say that t1 is a causal dependency of t2. Return Value Consistency ensures that all operations in a transaction t execute on a snapshot consisting of its causal dependencies (as well as prior operations by t). Transactions are atomic, so that either all of their operations are included into the snapshot or none at all. The transitivity of , mandated by Causality Preservation, ensures that the snapshot a transaction executes on is causally consistent: if a transaction t1 is included into the snapshot, then so is any other transaction t2 on which t1 depends (i.e., t2  t1). The inclusion of the session order into , also mandated by Causality Preservation,
+
+ensures session guarantees such as read your writes [63]. The consistency model disallows the causality violation anomaly from §1. Indeed, since  includes the session order, we have u1  u2 and u3  u4. Moreover, Bob sees Alice's message, and by Return Value Consistency this can only happen if u2  u3. Then since  is transitive, u1  u4, and by Return Value Consistency, Bob has to see Alice's deposit.
+Causal consistency nevertheless allows the overdraft anomaly from §1: the withdrawals u5 and u6 may not be related by , and thus may both execute on the balance 100 and succeed. The Conflict Ordering property can be used to disallow this anomaly by declaring that withdraw operations on the same account conflict and labeling transactions containing these as strong. Then one of the withdrawal transactions will be guaranteed to causally precede the other. The latter will be executed on the account balance 0 and will fail.
+Finally, Eventual Visibility ensures that strong transactions and those causal ones that originate at correct data centers are durable, i.e., will eventually propagate through the system.
+To facilitate the use of causal transactions, UNISTORE includes replicated data types (aka CRDTs), which implement policies for merging concurrent updates to the same data item [56]. Each data item in the store is associated with a type (e.g., counter, set), which is backed by a CRDT implementation managing updates to it. For example, the programmer can use a counter CRDT to represent an account balance. Then if two clients concurrently deposit 100 and 200 into an empty account using causal transactions, eventually the balance at all replicas will be 300. Using ordinary writes here would yield 100 or 200, depending on the order in which the writes are applied. More generally, CRDTs ensure that two replicas receiving the same set of updates are in the same state, regardless of the receipt order. Together with Eventual Visibility, this implies the expected guarantee of eventual consistency [65]. Due to space constraints, we omit details about the use of CRDTs from our protocol descriptions.
+4 Key Design Decisions in UNISTORE
+Baseline causal consistency. A causal transaction in UNISTORE first executes at a single data center on a causally consistent snapshot. After this it immediately commits, and its updates are replicated to all other data centers in the background. This minimizes the latency of causal transactions and makes them highly available, i.e., they can be executed even when the network connections between data centers fail.
+As is common in causally consistent data stores [3, 22, 42], to ensure that causal transactions execute on consistent snapshots, a data center exposes a remote transaction to clients only after exposing all its dependencies. Then to satisfy the Eventual Visibility property under failures, a data center receiving a remote causal transaction may need to forward it to other data centers, as in reliable broadcast [11] and antientropy protocols for replica reconciliation [53].
+
+3
+
+d1
+
+1
+
+submit(t1) 2 dep[t1] = 
+
+d2
+
+3 x
+t1
+
+4 submit(t2) 5 dep[t2] = {t1}
+
+t2
+
+d3
+
+d1
+
+1 submit(t1)
+
+2
+
+dep[t1] = 
+
+submit(t2) dep[t2] = {t1}
+
+d2
+
+3
+certify(t2)
+
+d3
+
+4
+
+commit(t2)
+
+5 x
+
+4 commit(t2)
+4 commit(t2) 6 submit(t3) dep[t3] = 
+
+7
+certify(t3)
+
+8 abort(t3) 8 abort(t3)
+
+Figure 1: Why UNISTORE may need to for- Figure 2: Why UNISTORE needs to ensure that the dependencies of a strong transaction are
+
+ward remote causal transactions.
+
+uniform before committing it.
+
+Figure 1 depicts a scenario that demonstrates how Eventual Visibility could be violated in the absence of this mechanism. Let t1 be a causal transaction submitted at a data center d1 (event 1 ). Assume that d1 replicates t1 to a correct data center d2 (event 2 ) and then fails (event 3 ), so that t1 does not get replicated anywhere else. Let t2 be a transaction submitted at d2 after t1 becomes visible there, so that t2 depends on t1 (event 4 ). Transaction t2 will eventually be replicated to all correct data centers (event 5 ). But it will never be exposed at any of them, because its dependency t1 is missing. If data centers can forward remote causal transactions, then d2 can eventually replicate t1 to all correct data centers, preventing this problem.
+On-demand strong consistency. UNISTORE uses optimistic concurrency control for strong transactions: they are first executed speculatively and the results are then certified to determine whether the transaction can commit, or must abort due to a conflict with a concurrent strong transaction [69]. Certifying a strong transaction requires synchronization between the replicas of partitions it accessed, located in different data centers. UNISTORE implements this using an existing fault-tolerant protocol that combines two-phase commit and Paxos [18] while minimizing commit latency. However, just using such a protocol is not enough to make the overall system fault tolerant: for this, before a strong transaction commits, all its causal dependencies must be uniform in the following sense.
+DEFINITION 1. A transaction is uniform if both the transaction and its causal dependencies are guaranteed to be eventually replicated at all correct data centers.
+This adapts the classical notion of uniformity in distributed computing to causal consistency [15]. UNISTORE considers a transaction to be uniform once it is visible at f + 1 data centers, because at least one of these must be correct, and data centers can forward causal transactions to others.
+The following scenario, depicted in Figure 2, demonstrates why committing a strong transaction before its dependencies become uniform can compromise the liveness of the system. Assume that a causal transaction t1 and a strong transaction t2 are submitted at a data center d1 in such a way that t1 becomes a dependency of t2 (events 1 and 2 ). Assume also that t2 is certified, committed and delivered to all relevant replicas (events 3 and 4 ) before t1 is replicated to any data center, and thus before it is uniform. Now if d1 fails before
+
+replicating t1 (event 5 ), no remote data center will be able to expose t2, because its dependency t1 is missing. This violates the Eventual Visibility property, and even worse, no strong transaction conflicting with t2 can commit from now on. For instance, let t3 be such a transaction, submitted at d3 (event 6 ). Because d3 cannot expose t2, transaction t3 executes on a snapshot excluding t2. Hence, t3 will abort during certification (events 7 and 8 ): committing it would violate the Conflict Ordering property, since transactions t2 and t3 conflict, but neither of them is visible to the other. Ensuring that t1 is uniform before committing t2 prevents this problem, because it guarantees that t1 will eventually be replicated at d3. After this t2 will be exposed to conflicting transactions at this data center, which will allow them to commit.
+Minimizing the latency of strong transactions. Ensuring that all the causal dependencies of a strong transaction are uniform before committing it may significantly increase its latency, since this requires additional communication between data centers. UNISTORE mitigates this problem by executing causal transactions on a snapshot that is slightly in the past, which is allowed by causal consistency. Namely, UNISTORE makes a remote causal transaction visible to the clients only after it is uniform. This minimizes the latency of a strong transaction, since to commit it only needs to wait for causal transactions originating at the local data center to become uniform. We cannot delay the visibility of the latter transactions due to the need to guarantee read your writes to local clients.
+On-demand durability of causal transactions. Client applications interacting with the external world require hard durability guarantees: e.g., a banking application has to ensure that a withdrawal is durably recorded before authorizing the operation. UNISTORE guarantees that, once a strong transaction commits, the transaction and its dependencies are durable. However, UNISTORE returns from a causal transaction before it is replicated, and thus the transaction may be lost if its origin data center fails. Ensuring the durability of every single causal transaction would require synchronization between data centers on its critical path, defeating the benefits of causal consistency. Instead, UNISTORE reuses the mechanism for tracking uniformity to let the clients pay the cost of durability only when necessary. Even though UNISTORE replicates causal transactions asynchronously, it allows clients to execute a uniform barrier, which ensures that the transactions they have observed so far are uniform, and thus durable.
+
+4
+
+Client migration. Clients may need to migrate between data centers, e.g., because of roaming or for load balancing. UNISTORE also uses the uniformity mechanism to preserve session guarantees during migration. A client wishing to migrate from its local data center d to another data center i first invokes a uniform barrier at d. This guarantees that the transactions the client has observed or issued at d are durable and will eventually become visible at i, even if d fails. The client then makes an attach call at the destination data center i that waits until i stores all the above transactions. After this, the client can operate at i knowing that the state of the data center is consistent with the client's previous actions.
+Currently UNISTORE does not support consistent client migration in response to a data center failure: if the data center a client is connected to fails, the client will have to restart its session when connecting to a different data center. As shown in [71], this limitation can be lifted without defeating the benefits of causal consistency. We leave integrating the corresponding mechanisms into UNISTORE for future work.
+5 Fault-Tolerant Causal Consistency Protocol
+We first describe the UNISTORE protocol for the case when all transactions are causal. We give its pseudocode in Algorithms 1 and 2; for now the reader should ignore highlighted lines, which are needed for strong transactions. For simplicity, we assume that each handler in the algorithms executes atomically (although our implementation is parallelized). We reference pseudocode lines using the format algorithm#:line#.
+5.1 Metadata
+Most metadata in our protocol are represented by vectors with an entry per each data center, where each entry stores a scalar timestamp. However, different pieces of metadata use the vectors in different ways, which we now describe.
+Tracking causality. The first use of the vectors is as vector clocks [26, 46], to track causality between transactions. Given vectors V1 and V2, we write V1 < V2 if each entry of V1 is no greater than the corresponding entry of V2, and at least one is strictly smaller. Each update transaction is tagged with a commit vector commitVec. The order on these vectors is consistent with the causal order  from §3: if commitVec1 and commitVec2 are the commit vectors of two update transactions t1 and t2 such that t1  t2, then commitVec1 < commitVec2. For a transaction originating at a data center d with a commit vector commitVec, we call commitVec[d] its local timestamp.
+Each replica pmd maintains a log opLog[k] of update operations performed on each data item k stored at the replica. Each log entry stores, together with the operation, the commit vector of the transaction that performed it. This allows reconstructing different versions of a data item from its log.
+Representing causally consistent snapshots. The protocol also uses a vector to represent a snapshot of the data store
+
+on which a transaction operates: a snapshot vector V represents all transactions with a commit vector  V . This snapshot is causally consistent. Indeed, consider a transaction t1 included into it, i.e., commitVec1  V . Since any causal dependency t0 of t1 is such that commitVec0 < commitVec1, we have commitVec0 < V , so that t0 is also included into the snapshot. A client also maintains a vector pastVec that represents its causal past: a causally consistent snapshot including the update transactions the client has previously observed.
+Tracking what is replicated where. Each replica pmd maintains three vectors that are used to compute which transactions are uniform. These respectively track the sets of transactions replicated at pmd , the local data center d, and f + 1 data centers. Each of these vectors V represents the set of update transactions originating at a data center i with a local timestamp  V [i]. Note that this set may not form a causally consistent snapshot. The first vector maintained by pmd is knownVec. For each data center i, it defines the prefix of update transactions originating at i (in the order of local timestamps) that pmd knows about.
+PROPERTY 1. For each data center i, the replica pmd stores the updates to partition m by all transactions originating at i with local timestamps  knownVec[i].
+Our protocol ensures that knownVec[d]  clock at any replica in data center d. The vector knownVec at pmd records whether the updates to partition m by a given transaction are stored at this replica. In contrast, the next vector stableVec records whether the updates to all partitions by a transaction are stored at the local data center d.
+PROPERTY 2. For each data center i, the data center d stores the updates by all transactions originating at i with local timestamps  stableVec[i]. More precisely, we are guaranteed that knownVec[i] at any replica of d  stableVec[i] at any pmd .
+Finally, the last vector uniformVec defines the set of update transactions that pmd knows to have been replicated at f + 1 data centers, including d.
+PROPERTY 3. Consider uniformVec[i] at pmd . All update transactions originating at i with local timestamps  uniformVec[i] are replicated at f + 1 datacenters including d. More precisely: knownVec[i] at any replica of these data centers  uniformVec[i] at pmd .
+When uniformVec is reinterpreted as a causally consistent snapshot, it defines transactions that pmd knows to be uniform according to Definition 1:
+PROPERTY 4. Consider uniformVec at pmd . All update transactions with commit vectors  uniformVec are uniform.
+Proof sketch. Consider a transaction t1 that originates at a data center i with a commit vector commitVec1  uniformVec at pmd . In particular, commitVec1[i]  uniformVec[i], and by Property 3, t1 is replicated at f + 1 data centers. We as-
+
+5
+
+sume at most f failures. Then the transaction forwarding mechanism of our protocol (§4) guarantees that t1 will eventually be replicated at all correct data centers. Consider now any causal dependency t2 of t1 with a commit vector commitVec2. Since commit vectors are consistent with causality, commitVec2 < commitVec1  uniformVec. Then as above, we can again establish that t2 will be replicated at all correct data centers, as required by Definition 1.
+5.2 Causal Transaction Execution
+Starting a transaction. A client can submit a transaction to any replica in its local data center by calling START_TX(V ), where V is the client's causal past pastVec (line 1:1, for brevity, we omit the pseudocode of the client). A replica pmd receiving such a request acts as the transaction coordinator. It generates a unique transaction identifier tid, computes a snapshot snapVec[tid] on which the transaction will execute, and returns tid to the client (we explain lines 1:2-3 and similar ones later). The snapshot is computed by combining uniform transactions from uniformVec (line 1:5) with the transactions from the client's causal past originating at d (line 1:6). The former is crucial to minimize the latency of strong transactions (§4), while the latter ensures read your writes.
+Transaction execution. The client proceeds to execute the transaction tid by issuing a sequence of operations at its coordinator via DO_OP (line 1:9). When the coordinator receives an operation op on a data item k, it sends a GET_VERSION message with the transaction's snapshot snapVec[tid] to the local replica responsible for k (line 1:11). Upon receiving the message (line 1:18), the replica first ensures that it is as up-to-date as required by the snapshot (line 1:21). It then computes the latest version of k within the snapshot by applying the operations from opLog[k] by all transactions with commit vectors  snapVec[tid]. The result is sent to the coordinator in a VERSION message. After receiving it (line 1:12), the coordinator further applies the operations on k previously executed by the transaction, which are stored in a buffer wbuff[tid]; this ensures read your writes within the transaction. If the operation is an update, the coordinator then appends it to wbuff[tid]. Finally, the coordinator executes the desired operation op and forwards its return value to the client.
+Commit. A client commits a causal transaction by calling COMMIT_CAUSAL (line 1:26). This returns immediately if the transaction is read-only, since it already read a consistent snapshot (line 1:28). To commit an update transaction, UNISTORE uses a variant of two-phase commit protocol (recall that for simplicity we only consider whole-data center failures, not those of individual replicas, §2). The coordinator first sends a PREPARE message to the replicas in the local data center storing the data items updated by the transaction (line 1:29). The message to each replica contains the part of the write buffer relevant to that replica. When a replica receives the message (line 1:36), it computes the transaction's
+
+Algorithm 1 Transaction execution at pmd .
+
+1: function START_TX(V )
+
+2: for i  D \ {d} do
+
+3:
+
+uniformVec[i]  max{V [i], uniformVec[i]}
+
+4: var tid  generate_tid()
+
+5: snapVec[tid]  uniformVec
+
+6: snapVec[tid][d]  max{V [d], uniformVec[d]}
+
+7: snapVec[tid][strong]  max{V [strong], stableVec[strong]}
+
+8: return tid
+
+9: function DO_OP(tid, k, op)
+
+10: var l  partition(k)
+11: send GET_VERSION(snapVec[tid], k) to pld 12: wait receive VERSION(state) from pld 13: for all k, op  wbuff[tid][l] do state  apply(op , state)
+
+14: rset[tid]  rset[tid]  { k, op }
+
+15: if op is an update then
+
+16:
+
+wbuff[tid][l]  wbuff[tid][l] · k, op
+
+17: return retval(op, state)
+
+18: when received GET_VERSION(snapVec, k) from p
+
+19: for i  D \ {d} do
+
+20:
+
+uniformVec[i]  max{snapVec[i], uniformVec[i]}
+
+21: wait until knownVec[d]  snapVec[d] 
+
+knownVec[strong]  snapVec[strong]
+
+22: var state  
+
+23: for all op , commitVec opLog[k]. commitVecsnapVec do
+
+24:
+
+state  apply(op , state)
+
+25: send VERSION(state) to p
+
+26: function COMMIT_CAUSAL(tid)
+
+27: var L  {l | wbuff[tid][l] = }
+
+28: if L =  then return snapVec[tid]
+29: send PREPARE(tid, wbuff[tid][l], snapVec[tid]) to pld , l  L 30: var commitVec  snapVec[tid]
+
+31: for all l  L do
+
+32:
+
+wait receive PREPARE_ACK(tid, ts) from pld
+
+33:
+
+commitVec[d]  max{commitVec[d], ts}
+
+34: send COMMIT(tid, commitVec) to pld , l  L
+
+35: return commitVec
+
+36: when received PREPARE(tid, wbuff , snapVec) from p
+
+37: for i  D \ {d} do
+
+38:
+
+uniformVec[i]  max{snapVec[i], uniformVec[i]}
+
+39: var ts  clock
+
+40: preparedCausal  preparedCausal  { tid, wbuff , ts }
+
+41: send PREPARE_ACK(tid, ts) to p
+
+42: when received COMMIT(tid, commitVec)
+
+43: wait until clock  commitVec[d]
+
+44: tid, wbuff , _  find(tid, preparedCausal)
+
+45: preparedCausal  preparedCausal \ { tid, _, _ }
+
+46: for all k, op  wbuff do
+
+47:
+
+opLog[k]  opLog[k] · op, commitVec
+
+48: committedCausal[d]  committedCausal[d] 
+
+{ tid, wbuff , commitVec }
+
+49: function UNIFORM_BARRIER(V ) 50: wait until uniformVec[d]  V [d]
+
+51: function ATTACH(V )
+52: wait until i  D \ {d}. uniformVec[i]  V [i]
+
+6
+
+prepare time ts from its local clock and adds the transaction to preparedCausal, which stores the set of causal transactions that are prepared to commit at the replica. The replica then returns ts to the coordinator in a PREPARE_ACK message.
+When the coordinator receives replies from all replicas updated by the transaction, it computes the transaction's commit vector commitVec: it sets the local timestamp commitVec[d] to the maximum among the prepare times proposed by the replicas (line 1:33), and it copies the other entries of commitVec from the snapshot vector snapVec[tid] (line 1:30). The latter reflects the fact that the transactions in the snapshot become causal dependencies of tid.
+After computing commitVec, the coordinator sends it in a COMMIT message to the relevant replicas at the local data center (line 1:34) and returns it to the client (line 1:35). The client then sets its causal past pastVec to the commit vector. When a replica receives the COMMIT message (line 1:42), it removes the transaction from preparedCausal, adds the transaction's updates to opLog, and adds the transaction to a set committedCausal[d], which stores transactions waiting to be replicated to sibling replicas at other data centers.
+5.3 Transaction Replication
+Each replica pmd periodically replicates locally committed update transactions to sibling replicas in other data centers by executing PROPAGATE_LOCAL_TXS (line 2:1). Transactions are replicated in the order of their local timestamps. The prefix of transactions that is ready to be replicated is determined by knownVec[d]: according to Property 1, pmd stores updates to m by all transactions originating at d with local timestamps  knownVec[d]. Thus, the replica first updates knownVec[d] while preserving Property 1.
+There are two cases of this update. If the replica does not have any prepared transactions (preparedCausal = ), it sets knownVec[d] to the current value of the clock (line 2:2). This preserves Property 1 because in this case a new transaction originating at d and updating m will get a prepare time at m higher than the current clock (line 1:39), and thus also a higher local timestamp (line 1:33). If the replica has some prepared transactions, then they may end up getting local timestamps lower than the current clock. In this case, the replica sets knownVec[d] to just below the smallest prepared time (line 2:3). This preserves Property 1 because: (i) currently prepared transactions will get a local timestamp no lower than their prepare time; and (ii) as we argued above, new transactions will get a prepare time higher than the current clock and, hence, than the smallest prepare time.
+After updating knownVec[d], the replica sends a REPLICATE message to its siblings with the transactions in committedCausal[d] such that commitVec[d]  knownVec[d], and then removes them from committedCausal[d]. In other words, the replica sends all transactions from the prefix determined by knownVec[d] that it has not yet replicated.
+When a replica pmd receives a REPLICATE message with
+
+Algorithm 2 Transaction replication at pmd .
+
+1: function PROPAGATE_LOCAL_TXS()
+
+Run periodically
+
+2: if preparedCausal =  then knownVec[d]  clock
+
+3: else knownVec[d]  min{ts | _, _, ts  preparedCausal}-1
+
+4: var txs  { _, _, commitVec  committedCausal[d] |
+
+commitVec[d]  knownVec[d]}
+
+5: if txs =  then
+
+6:
+
+send REPLICATE(d, txs) to pmi , i  D \ {d}
+
+7: committedCausal[d]  committedCausal[d] \ txs
+
+8: else send HEARTBEAT(d, knownVec[d]) to pmi , i  D \{d}
+
+9: when received REPLICATE(i, txs)
+
+10: for all tid, wbuff , commitVec  txs in commitVec[i] order do
+
+11:
+
+if commitVec[i] > knownVec[i] then
+
+12:
+
+for all k, op  wbuff do
+
+13:
+
+opLog[k]  opLog[k] · op, commitVec
+
+14:
+
+committedCausal[i]  committedCausal[i] 
+
+{ tid, wbuff , commitVec }
+
+15:
+
+knownVec[i]  commitVec[i]
+
+16: when received HEARTBEAT(i, ts) 17: pre: ts > knownVec[i] 18: knownVec[i]  ts
+
+19: function FORWARD_REMOTE_TXS(i, j) 20: var txs  { _, _, commitVec  committedCausal[ j] |
+commitVec[ j] > globalMatrix[i][ j]} 21: if txs =  then send REPLICATE( j, txs) to pmi 22: else send HEARTBEAT( j, knownVec[ j]) to pmi
+
+23: function BROADCAST_VECS()
+
+Run periodically
+
+24: send KNOWNVEC_LOCAL(m, knownVec) to pld , l  P 25: send STABLEVEC(d, stableVec) to pmi , i  D 26: send KNOWNVEC_GLOBAL(d, knownVec) to pmi , i  D
+
+27: when received KNOWNVEC_LOCAL(l, knownVec)
+28: localMatrix[l]  knownVec
+29: for i  D do stableVec[i]  min{localMatrix[n][i] | n  P } 30: stableVec[strong]  min{localMatrix[n][strong] | n  P }
+
+31: when received STABLEVEC(i, stableVec)
+
+32: stableMatrix[i]  stableVec
+
+33: G  all groups with f + 1 replicas that include pmd
+34: for j  D do
+
+35:
+
+var ts  max{min{stableMatrix[h][ j] | h  g} | g  G}
+
+36:
+
+uniformVec[ j]  max{uniformVec[ j], ts}
+
+37: when received KNOWNVEC_GLOBAL(l, knownVec) 38: globalMatrix[l]  knownVec
+
+a set of transactions txs originating at a sibling replica pmi (line 2:9), it iterates over txs in commitVec[i] order. For each
+new transaction in txs with commit vector commitVec, the
+replica adds the transaction's operations to its log and sets
+knownVec[i] = commitVec[i]. Since communication channels are FIFO, pmd processes all transactions from pmi in their local timestamp order. Hence, the above update to knownVec[i] preserves Property 1: pmd stores updates originating at pmi by all transactions with commitVec[i]  knownVec[i]. Finally, the
+replica adds the transactions to committedCausal[i], which
+is used to implement transaction forwarding (§4). Due to
+
+7
+
+the forwarding, pmd may receive the same transaction from different data centers. Thus, when processing transactions in the REPLICATE message, it checks for duplicates (line 2:11).
+5.4 Advancing the Uniform Snapshot
+Replicas run a background protocol that refreshes the information about uniform transactions. This proceeds in two stages. First, a replica keeps track of which transactions have been replicated at the replicas of other partitions in the same data center. To this end, replicas in the same data center periodically exchange KNOWNVEC_LOCAL messages with their knownVec vectors, which they store in a matrix localMatrix (lines 2:24 and 2:27); in our implementation this is done via a dissemination tree. This matrix is then used to compute the vector stableVec, which represents the set of transactions that have been fully replicated at the local data center as per Property 2. To ensure this, a replica computes an entry stableVec[i] as the minimum of knownVec[i] it received from the replicas of other partitions in the same data center (line 2:29).
+In the second stage of the background protocol, sibling replicas periodically exchange STABLEVEC messages with their stableVec vectors, which they store in a matrix stableMatrix (lines 2:25 and 2:31). This matrix is then used by a replica to compute uniformVec, which characterizes the update transactions that are replicated at f + 1 data centers as per Property 3. To this end, a replica first enumerates all groups G of f + 1 data centers that include its local data center (line 2:33). For each data center j the replica performs the following computation. First, for each group g  G, it computes the minimum j-th entry in the stable vectors of all data centers h  g: min{stableMatrix[h][ j] | h  g}. By Property 2 all update transactions originating at j with local timestamp  the minimum have been replicated at all data centers in g. The replica then sets uniformVec[ j] to the maximum of the resulting values computed for all groups g  G, to cover transactions that are replicated at any such group. According to Property 4, the transactions with commit vectors  uniformVec are uniform, and now become visible to transactions coordinated by pmd (§5.2).
+Replicas also update uniformVec in lines 1:2-3, 1:19-20 and 1:37-38 by incorporating snapVec[i] for remote data centers i. This is safe because a transaction executes on a snapshot that only includes uniform remote transactions.
+Finally, if a replica does not receive new transactions for a long time, it sends the value of its knownVec[d] as a heartbeat (lines 2:8 and 2:16). This allows advancing stableVec and uniformVec even under skewed load distributions.
+5.5 Transaction Forwarding
+As we explained in §4, to guarantee that a transaction originating at a correct data center eventually becomes exposed at all correct data centers despite failures (Eventual Visibility), replicas may have to forward remote update transactions. To determine which transactions to forward, each replica keeps track
+
+of the update transactions that have been replicated at sibling replicas in other data centers. To this end, sibling replicas periodically exchange KNOWNVEC_GLOBAL messages with their knownVec vectors, which they store in a matrix globalMatrix (lines 2:26 and 2:37). Thus, pmi has received all update transactions from pmj with commitVec[ j]  globalMatrix[i][ j].
+A replica pmd only forwards transactions when it suspects that a data center j may have failed before replicating all the update transactions originating at it to a data center i (this information is provided by a separate module). In this case, pmd executes FORWARD_REMOTE_TXS(i, j) (line 2:19). The function forwards the set of transactions txs received from pmj that have not been replicated at pmi according to globalMatrix[i][ j]. For example, in Figure 1, UNISTORE will eventually invoke FORWARD_REMOTE_TXS(d1, d3) at replicas in d2 to forward t1. The replica pmd sends the transactions in txs to pmi in a REPLICATE message. If there are no update transactions to forward, pmd sends a heartbeat to pmi with knownVec[ j].
+UNISTORE periodically deletes from committedCausal transactions that have been replicated at every data center (omitted from the pseudocode for brevity).
+5.6 On-Demand Durability and Client Migration
+A client may wish to ensure that the transactions it has observed so far are durable. To this end, the client can call UNIFORM_BARRIER(V ) at any replica in its local data center d, where V is the client's causal past pastVec (line 1:49). The replica returns to the client only when all the transactions from pastVec that originate at d are uniform, and thus durable. Then the same holds for all transactions from pastVec, because the protocol only exposes remote transactions to clients when they are already uniform (§5.2).
+A client wishing to migrate from its local data center d to another data center i first calls UNIFORM_BARRIER(V ) at any replica in d with V = pastVec, to ensure that the transactions the client has observed or issued at d will eventually become visible at i. The client then calls ATTACH(V ) at any replica in i (line 1:51). The replica returns when its uniformVec includes all remote transactions from V (line 1:52). The client can then be sure that its transactions at i will operate on snapshots including all the transactions it has observed before.
+6 Adding Strong Transactions
+We now describe the full UNISTORE protocol with both causal and strong transactions. It is obtained by adding the highlighted lines to Algorithms 1-2 and a new Algorithm 3.
+6.1 Metadata
+The Conflict Ordering property of our consistency model requires any two conflicting strong transactions to be related one way or another by the causal order  (§3). To ensure this, the protocol assigns to each strong transaction a scalar
+
+8
+
+strong timestamp, analogous to those used in optimistic concurrency control for serializability [69]. Several vectors used as metadata in the causal consistency protocol (§5.1) are then extended with an extra strong entry.
+First, we extend commit vectors and those representing causally consistent snapshots. Commit vectors are compared using the previous order <, but considering all entries; as before, this order is consistent with the causal order . Furthermore, conflicting strong transactions are causally ordered according to their strong timestamps.
+PROPERTY 5. For any conflicting strong transactions t1 and t2 with commit vectors commitVec1 and commitVec2, we have: t1  t2  commitVec1[strong] < commitVec2[strong].
+A consistent snapshot vector V now defines the set of transactions with a commit vector  V , according to the new <. The vectors knownVec and stableVec maintained by a replica pmd are also extended with a strong entry. The entries knownVec[strong] and stableVec[strong] define the prefix of strong transactions that have been replicated at pmd and the local data center d, respectively:
+PROPERTY 6. Replica pmd stores the updates to m by all strong transactions with commitVec[strong]  knownVec[strong].
+PROPERTY 7. Data center d stores the updates by all strong transactions with commitVec[strong]  stableVec[strong].
+To ensure Property 7, the strong entry of stableVec is updated at line 2:30 similarly to its other entries. We do not extend uniformVec, because our commit protocol for strong transactions automatically guarantees their uniformity.
+6.2 Transaction Execution
+UNISTORE uses optimistic concurrency control for strong transactions, with the same protocol for executing causal and speculatively executing strong transactions. To this end, Algorithm 1 is modified as follows. First, the computation of the snapshot vector snapVec[tid] is extended to compute the strong entry (line 1:7), which is now taken into account when checking that a replica state is up to date (line 1:21). The strong entry of the snapshot vector is computed so as to include all strong transactions known to be fully replicated in the local data center, as defined by stableVec[strong]. To ensure read your writes, the snapshot additionally includes strong transactions from the client's causal past, as defined by V [strong]. Finally, the coordinator of a transaction now maintains not only its write set, but also its read set rset that records all operations by the transaction, including read-only ones (line 1:14). The latter is used to certify strong transactions.
+After speculatively executing a strong transaction, the client tries to commit it by calling COMMIT_STRONG at its coordinator (line 3:1). The coordinator first waits until the snapshot on which the transaction operated becomes uniform by calling UNIFORM_BARRIER (line 3:2): as we argued in §4, this is crucial for liveness. The coordinator next submits the trans-
+
+Algorithm 3 Committing strong transactions at pmd . 1: function COMMIT_STRONG(tid) 2: UNIFORM_BARRIER(snapVec[tid]) 3: return CERTIFY(tid, wbuff[tid], rset[tid], snapVec[tid])
+
+4: upon DELIVER_UPDATES(W )
+
+5: for all wbuff , commitVec W in commitVec[strong] order do
+
+6:
+
+for all k, op  wbuff do
+
+7:
+
+opLog[k]  opLog[k] · op, commitVec
+
+8:
+
+knownVec[strong]  commitVec[strong]
+
+9: function HEARTBEAT_STRONG() 10: return CERTIFY(, , , 0)
+
+Run periodically
+
+action to a certification service, which determines whether the transaction commits or aborts (line 3:3, see §6.3). In the former case, the service also determines its commit vector, which the coordinator returns to the client. If the transaction commits, the client sets its causal past pastVec to the commit vector; otherwise, it re-executes the transaction.
+The certification service also notifies replicas in all data centers about updates by strong transactions affecting them via DELIVER_UPDATES upcalls, invoked in an order consistent with strong timestamps of the transactions (line 3:4). A replica receiving an upcall adds the new operations to its log and refreshes knownVec[strong] to preserve Property 6.
+Finally, a replica pmd that has not seen any strong transactions updating its partition m for a long time submits a dummy strong transaction that acts as a heartbeat (line 3:9). Similarly to heartbeats for causal transactions, this allows coping with skewed load distributions.
+6.3 Certification Service
+We implement the certification service using an existing faulttolerant protocol from [18], with transaction commit vectors computed using the techniques from [29]. The protocol integrates two-phase commit across partitions accessed by the transaction and Paxos among the replicas of each partition. It furthermore uses white-box optimizations between the two protocols to minimize the commit latency. The use of Paxos ensures that a committed strong transaction is durable and its updates will eventually be delivered at all correct data centers (line 3:4). For each partition, a single replica functions as the Paxos leader. The protocol is described and formally specified elsewhere [18], and here we discuss it only briefly. Its pseudocode and formal specification are given in §A and §C, respectively.
+The certification service accepts the read and write sets of a transaction and its snapshot vector (line 3:3). Even though the service is distributed, it guarantees that commit/abort decisions are computed like in a centralized database with optimistic concurrency control ­ in a total certification order. To ensure Conflict Ordering, the decisions are computed using a concurrency-control policy similar to that for serializability [69]: a transaction commits if its snapshot includes all
+
+9
+
+Average latency (ms)
+
+conflicting transactions that precede it in the certification order. The certification service also computes a commit vector for each committed transaction by copying its per-data center entries from the transaction's snapshot vector and assigning a strong timestamp consistent with the certification order.
+7 Proof of Correctness
+We have rigorously proved that UNISTORE correctly implements the specification of PoR consistency for the case when the data store manages last-writer-wins registers. The proof uses the formal framework from [13, 14, 16] and establishes Properties 1-7 stated earlier. Due to space constraints, we defer the proof to §D.
+8 Evaluation
+We have implemented UNISTORE and several other protocols (listed in the following) in the same codebase, consisting of 10.3K SLOC of Erlang. We evaluate the protocols on Amazon EC2 using m4.2xlarge VMs from 5 different regions. Each VM has 8 virtual cores and 32GB of RAM. The RTT between regions ranges from 26ms to 202ms. Unless otherwise stated, our experiments deploy 3 data centers, thus tolerating a single data center failure: Virginia (US-East), California (US-West) and Frankfurt (EU-FRA). All Paxos leaders are located in Virginia. By default we use 4 replica machines per data center. Each machine stores replicas of 8 partitions, matching the number of cores. Clients are hosted on separate machines in each data center. We run each experiment for at least 5 minutes, with the first and the last minute ignored. Replicas propagate local update transactions (line 2:1) and broadcast vectors (line 2:23) every 5ms.
+8.1 Does UNISTORE combine causal and strong consistency effectively?
+We start by analyzing the performance of UNISTORE using RUBiS ­ a popular benchmark that emulates an online auction website such as eBay [40, 41]. It defines 11 read-only transactions and 5 update transactions, e.g., selling items, bidding on items, and consulting outstanding auctions. As in previous work [41], to make the benchmark more challenging, we add an extra update transaction closeAuction to declare the winner of an auction. We also borrow from [41] a conflict relation between RUBiS transactions that preserves key integrity invariants in the PoR consistency model. This marks four transactions as strong (registerUser, storeBuyNow, storeBid and closeAuction) and declares three conflicts between them. For example, storeBid, which places a bid on a item, conflicts with closeAuction if both act on the same item: this is needed to preserve the invariant that the winner of an auction is the highest bidder. Our RUBiS database is configured according to the benchmark specification: it is populated with 33,000 items for sale and 1 million users; client
+
+200 175 150 125 100
+75 50 25
+0 0
+
+UniStore RedBlue
+
+Strong Causal
+
+10
+
+20
+
+30
+
+40
+
+50
+
+60
+
+70
+
+80
+
+Throughput (Ktxs/s)
+
+Figure 3: RUBiS benchmark: throughput vs. average latency.
+
+think times are 500ms. We run the bidding mix workload of RUBiS with 15% of update transactions, which yields 10% of strong transactions.
+We compare UNISTORE with STRONG, REDBLUE and CAUSAL. STRONG implements serializability [69] as a special case of UNISTORE where all transactions are strong and all pairs of operations conflict. REDBLUE implements redblue consistency [40], which like PoR, combines causal and strong consistency. However, it declares conflicts between all strong transactions. REDBLUE certifies strong transactions at a centralized replicated service, with a replica at each data center. CAUSAL implements causal consistency as a special case of UNISTORE where all transactions are causal. It cannot preserve the integrity invariants of RUBiS, but gives an upper bound on the expected performance.
+Throughput and average latency. Figure 3 evaluates average transaction latency and throughput. As the figure shows, UNISTORE exhibits a high throughput: 72% and 183% higher than REDBLUE and STRONG respectively at their saturation point. This is expected, as UNISTORE implements the consistency model that enables the most concurrency. STRONG classifies all transactions as strong. This impacts performance because executing a strong transaction is significantly more expensive than executing a causal one. REDBLUE uses a centralized certification service that saturates before the UNISTORE's distributed service, creating a bottleneck. UNISTORE exhibits an average latency of 16.5ms, lower than 80.4ms of STRONG. The latency of REDBLUE is comparable to that of UNISTORE. This is because both systems mark the same set of transactions as strong. Still, REDBLUE declares conflicts between all strong transaction and thus aborts more transaction than UNISTORE: 0.12% vs 0.027%. The clients whose transactions abort have to retry them, thus increasing latency. Since the abort rate remains low in both cases, the difference in latency is negligible in our experiment. We expect a more significant difference in workloads with higher contention. Finally, in comparison to CAUSAL, UNISTORE penalizes throughput by 45%. This is the unavoidable price to pay to preserve application-specific invariants.
+Latency of each transaction type. In UNISTORE, the latency of strong transactions is dominated by the RTT between Virginia (the leader's region) and California (Virginia's closest data center) ­ 61ms. Strong transactions exhibit a latency of 73.9ms on average. The latency varies depending on the
+
+10
+
+Throughput (Ktxs/sec) Throughput (Ktxs/sec)
+
+90
+
+80
+
+UniStore-16
+
+70
+
+UniStore-32
+
+60
+
+UniStore-64
+
+50
+
+40
+
+30
+
+20
+
+10
+
+0
+
+60
+
+50
+
+UniStore-16 UniStore-32
+
+40
+
+UniStore-64
+
+30
+
+20
+
+10
+
+0
+
+0%
+
+10%
+
+25%
+
+50%
+
+100%
+
+Figure 4: Scalability when varying the ratio of strong transactions with uniform data access (top) and under contention (bottom).
+
+client's location: from 65.4ms on average at the leader's site to 93.2ms at the site furthest from the leader (Frankfurt). Since causal transactions do not require coordination between data centers, they exhibit a very low latency ­ 1.2ms on average, which is comparable to that of CAUSAL. This demonstrates that UNISTORE is able to mix causal and strong consistency effectively, as the latency of causal transactions remains low regardless of concurrently executing strong transactions.
+
+8.2 How does UNISTORE scale with the number of machines?
+We evaluate the peak throughput of UNISTORE as we increase the number of machines per each data center from 2 to 8, i.e., the number of partitions from 16 to 64. We use a microbenchmark with 100% of update transactions, where each transaction accesses three data items. We vary the ratio of strong transactions from 0% to 100% to understand their impact on scalability.
+Scalability under low contention. For this set of experiments, the data items accessed by each transactions are picked uniformly at random. This yields a very low contention: e.g., with 16 partitions, the probability of two transactions accessing the same partition is 0.031. As shown by the top plot of Figure 4, UNISTORE is able to scale almost linearly even when the workload includes strong transactions: a 9.76% throughput drop compared to the optimal scalability. This is because, with uniform accesses, the task of committing transactions is balanced among partitions. Thus, when the number of partitions increases, so does the system's capacity. The scalability is not perfect due to the cost of the background protocol that computes stableVec, which grows logarithmically with the number of partitions. The plot also shows that strong transactions are expensive: 25.72% of throughput drop on average with 10% of strong transactions. The performance is dominated by the number of strong transactions that a partition can certify per second.
+
+160 140 Uniform 120 CureFT 100
+80 60 40 20
+0
+
+3 DCs
+
+4 DCs
+
+5 DCs
+
+Figure 5: Throughput penalty of tracking uniformity.
+
+Impact of contention. For this set of experiments, we set the ratio of strong transactions that access a designated partition to 20% to create contention. As shown by the bottom plot of Figure 4, UNISTORE is still able to scale fairly well under contention. But, as expected, contention has an impact on scalability: a 17.15% throughput drop from the optimal scalability compared to the 9.76% throughput drop in the experiments without contention.
+8.3 What is the cost of uniformity?
+We compare CUREFT to UNIFORM. CUREFT implements Cure [3], a causally consistent data store, and makes it fault tolerant by adding transaction forwarding (§4). UNIFORM is a simplified version of UNISTORE that removes all the mechanisms related to strong transactions. UNIFORM tracks uniformity and makes remote transactions visible only when these are uniform; CUREFT does not. We use a microbenchmark with only causal transactions and 15% of update transactions. Each transaction accesses three data items.
+Throughput penalty. Figure 5 evaluates the cost of tracking uniformity. It shows the peak throughput when the number of data centers increases from 3 to 5. We first add Ireland and then Brazil. As we do this, the throughput remains almost constant. This is because each data center stores replicas of all partitions and the computational power gained when adding a data center is offset by the cost of replicating update transactions. As the figure shows, the cost of tracking uniformity is small: a 7.97% drop on average. The gap grows as we increase the number of data centers: a 10.61% drop on average with 5 data centers. This is because, to track uniform transactions, sibling replicas exchange messages: the more data centers, the more messages exchanged. The penalty can be reduced by decreasing the frequency at which sibling replicas exchange their stableVec (line 2:25), at the expense of an extra delay in the visibility of remote transactions.
+Reading from a uniform snapshot. Figure 6 evaluates the delay on the visibility of remote transactions when reading from a uniform snapshot. We deploy four data centers: Virginia, California, Frankfurt and Brazil. We set f = 2 to tolerate 2 data center failures (when f = 1, UNIFORM shows no delay). Under such a configuration, a data center makes a transaction visible when it knows that 3 data centers store the transaction and its dependencies (§5.4). The figure shows the cumulative distribution of the delay before updates from
+
+11
+
+CDF
+
+1 0.8 0.6 0.4 0.2
+0 0
+
+Uniform
+
+CureFT
+
+5 10 15 20 25 30 35 40 0 20 40 60 80 100 120 140 Update visibility delay (ms)
+
+Figure 6: Left: California to Brazil (best case). Right: California to Virginia (worst case).
+
+California are visible in Brazil and Virginia. The extra delay at Brazil is only of 5ms at the 90th per-
+centile. This is the best case scenario for UNIFORM because Brazil learns that Virginia stores a transaction originating at California only 2ms after receiving it. The worst case scenario for UNIFORM is when the origin and the destination datacenter are the closest ones. This is why the extra delay at Virginia is 92ms at the 90th percentile: Brazil learns that Frankfurt stores a transaction originating at California 88ms after receiving it. Note that when clients communicate only via the data store, the delay is unnoticeable. Even if clients communicate out of band, as the maximum extra delay is less than a 100ms, it is unlikely that a client will miss an update.
+
+9 Related Work
+Systems with multiple consistency levels. A number of data stores have combined weak and strong consistency, including several commercial and academic systems that combine eventual and strong consistency [5, 6, 28, 48, 57, 64, 72]. Several academic data stores combined causal and strong consistency [9, 36, 40, 41, 58, 64]. Pileus [64] funnels all updates through a single data center. In the fault-tolerant version of lazy replication [36], causal operations require synchronization between replicas on its critical path. In both cases, causal operations are not highly available, defeating the benefits of causal consistency. Walter [58] restricts causal operations to a specific type and lacks fault tolerance due to the use of two-phase commit across data centers. The remaining works [9, 40, 41] support highly available causal operations, but are not fault tolerant. First, they do not make causal operations uniform on demand to guarantee the liveness of strong operations. Thus, they suffer from the liveness issue we explained in §4 (Figure 2). In addition, these systems do not use fault-tolerant mechanisms even for strong transactions. They guard the use of strong transactions using mechanisms similar to locks; if the lock holder fails before releasing it, no other data center can execute a strong transaction requiring the same lock. This occurs even when the service handing locks is fault-tolerant, as in [41]. Finally, the above systems either do not include mechanisms for partitioning the key space among different machines in a data center or include per-data center centralized services, which limits their scalability (§8.2).
+Some group communication systems mix causal and atomic
+
+broadcast [10, 67]. However, these systems do not provide mechanisms for maintaining transactional data consistency.
+Several papers have proposed tools that use formal verification technology to ensure that consistency choices do not violate application invariants [9, 30, 33, 39, 50, 51]. Such tools can make it easier for programmers to use our system.
+Causal consistency implementations. Our subprotocol for causal consistency belongs to a family of highly scalable protocols that avoid using any centralized components or dependency check messages [3, 22, 59­61]; other alternatives are less scalable [4, 8, 12, 21, 31, 42, 43, 47, 71]. While we base our causal consistency subprotocol on an existing one, Cure [3], we have extended it in nontrivial ways, by integrating mechanisms for tracking uniformity (§5.4) and for transaction forwarding (§5.5). Some of the above protocols [31, 60] use hybrid clocks instead of real time [35] to improve performance with large clock skews; this technique can also be integrated into UNISTORE.
+SwiftCloud [71] implements k-stability [45], a notion similar to uniformity, to enable client migration. SwiftCloud relies on a single per-data center sequencer, which makes tracking k-stability easy, but the data store less scalable. Our protocol is more sophisticated, since we distribute the responsibility of tracking uniformity among the replicas in a data center.
+Paxos variants. Several Paxos variants [24, 38, 49, 52] lower the latency by allowing commutative operations to execute at replicas in arbitrary orders. In contrast to them, UNISTORE implements PoR consistency, which allows causal transactions to execute without any synchronization at all.
+10 Conclusion
+This paper presented UNISTORE, the first fault-tolerant and scalable data store that combines causal and strong consistency. UNISTORE carefully integrates state-of-the-art scalable protocols and extends them in nontrivial ways. To maintain liveness despite data center failures, unlike previous work, UNISTORE commits a strong transaction only when all its causal dependencies are uniform. Our results show that UNISTORE combines causal and strong consistency effectively: 3.7× lower latency on average than a strongly consistent system with 1.2ms latency on average for causal transactions. We expect that the key ideas in UNISTORE will pave the way for practical systems that combine causal and strong consistency.
+Acknowledgements. We thank our shepherd, Heming Cui, as well as Gregory Chockler, Vitor Enes, Luís Rodrigues and Marc Shapiro for comments and suggestions. This work was partially supported by an ERC Starting Grant RACCOON, the Juan de la Cierva Formación funding scheme (FJC2018-036528-I), the CCF-Tencent Open Fund (CCFTencent RAGR20200124) and the AWS Cloud Credit for Research program.
+
+12
+
+References
+[1] D. Abadi. Consistency tradeoffs in modern distributed database system design: CAP is only part of the story. IEEE Computer, 45(2), 2012.
+[2] M. Ahamad, G. Neiger, J. E. Burns, P. Kohli, and P. W. Hutto. Causal memory: Definitions, implementation, and programming. Distributed Comput., 9(1), 1995.
+[3] D. D. Akkoorath, A. Z. Tomsic, M. Bravo, Z. Li, T. Crain, A. Bieniusa, N. Preguiça, and M. Shapiro. Cure: Strong semantics meets high availability and low latency. In International Conference on Distributed Computing Systems (ICDCS), 2016.
+[4] S. Almeida, J. Leitão, and L. Rodrigues. ChainReaction: A causal+ consistent datastore based on chain replication. In European Conference on Computer Systems (EuroSys), 2013.
+[5] Amazon. Read consistency. https://docs.aws.amazon.com/amazondynamodb/latest/ developerguide/HowItWorks.ReadConsistency.html, 2020.
+[6] Apache Cassandra. Read repair. https://cassandra.apache.org/doc/latest/operating/ read_repair.html, 2020.
+[7] H. Attiya, F. Ellen, and A. Morrison. Limitations of highly-available eventually-consistent data stores. IEEE Trans. Parallel Distributed Syst., 28(1), 2017.
+[8] P. Bailis, A. Ghodsi, J. M. Hellerstein, and I. Stoica. Bolt-on causal consistency. In International Conference on Management of Data (SIGMOD), 2013.
+[9] V. Balegas, N. Preguiça, R. Rodrigues, S. Duarte, C. Ferreira, M. Najafzadeh, and M. Shapiro. Putting the consistency back into eventual consistency. In European Conference on Computer Systems (EuroSys), 2015.
+[10] K. Birman, A. Schiper, and P. Stephenson. Lightweight causal and atomic group multicast. ACM Trans. Comput. Syst., 9(3), 1991.
+[11] K. P. Birman and T. A. Joseph. Reliable communication in the presence of failures. ACM Trans. Comput. Syst., 5(1), 1987.
+[12] M. Bravo, L. Rodrigues, and P. Van Roy. Saturn: A distributed metadata service for causal consistency. In European Conference on Computer Systems (EuroSys), 2017.
+[13] S. Burckhardt. Principles of Eventual Consistency. Now Publishers, 2014.
+
+[14] S. Burckhardt, A. Gotsman, H. Yang, and M. Zawirski. Replicated data types: specification, verification, optimality. In Symposium on Principles of Programming Languages (POPL), 2014.
+[15] C. Cachin, R. Guerraoui, and L. E. T. Rodrigues. Introduction to Reliable and Secure Distributed Programming (2nd ed.). Springer, 2011.
+[16] A. Cerone, G. Bernardi, and A. Gotsman. A framework for transactional consistency models with atomic visibility. In International Conference on Concurrency Theory (CONCUR), 2015.
+[17] Y. L. Chen, S. Mu, J. Li, C. Huang, J. Li, A. Ogus, and D. Phillips. Giza: Erasure coding objects across global data centers. In USENIX Annual Technical Conference (USENIX ATC), 2017.
+[18] G. Chockler and A. Gotsman. Multi-shot distributed transaction commit. In Symposium on Distributed Computing (DISC), 2018.
+[19] J. C. Corbett, J. Dean, M. Epstein, A. Fikes, C. Frost, J. J. Furman, S. Ghemawat, A. Gubarev, C. Heiser, P. Hochschild, W. C. Hsieh, S. Kanthak, E. Kogan, H. Li, A. Lloyd, S. Melnik, D. Mwaura, D. Nagle, S. Quinlan, R. Rao, L. Rolig, Y. Saito, M. Szymaniak, C. Taylor, R. Wang, and D. Woodford. Spanner: Google's Globally-Distributed Database. In Symposium on Operating Systems Design and Implementation (OSDI), 2012.
+[20] G. DeCandia, D. Hastorun, M. Jampani, G. Kakulapati, A. Lakshman, A. Pilchin, S. Sivasubramanian, P. Vosshall, and W. Vogels. Dynamo: Amazon's highly available key-value store. In Symposium on Operating Systems Principles (SOSP), 2007.
+[21] J. Du, S. Elnikety, A. Roy, and W. Zwaenepoel. Orbe: Scalable causal consistency using dependency matrices and physical clocks. In Symposium on Cloud Computing (SoCC), 2013.
+[22] J. Du, C. Iorgulescu, A. Roy, and W. Zwaenepoel. Gentlerain: Cheap and scalable causal consistency with physical clocks. In Symposium on Cloud Computing (SoCC), 2014.
+[23] C. Dwork, N. Lynch, and L. Stockmeyer. Consensus in the Presence of Partial Synchrony. Journal of the ACM, 35(2), 1988.
+[24] V. Enes, C. Baquero, T. F. Rezende, A. Gotsman, M. Perrin, and P. Sutra. State-machine replication for planetscale systems. In European Conference on Computer Systems (EuroSys), 2020.
+
+13
+
+[25] FaunaDB. What is FaunaDB? https://docs.fauna.com/fauna/current/introduction.html, 2020.
+[26] C. Fidge. Timestamps in message-passing systems that preserve the partial ordering. In Australian Computer Science Conference (ASCS), 1988.
+[27] S. Gilbert and N. Lynch. Brewer's conjecture and the feasibility of consistent, available, partition-tolerant web services. SIGACT News, 33(2), 2002.
+[28] Google. Balancing strong and eventual consistency with datastore. https://cloud.google.com/datastore/docs/articles/ balancing-strong-and-eventual-consistency-withgoogle-cloud-datastore, 2020.
+[29] A. Gotsman, A. Lefort, and G. Chockler. White-box atomic multicast. In International Conference on Dependable Systems and Networks (DSN), 2019.
+[30] A. Gotsman, H. Yang, C. Ferreira, M. Najafzadeh, and M. Shapiro. 'Cause I'm strong enough: reasoning about consistency choices in distributed systems. In Symposium on Principles of Programming Languages (POPL), 2016.
+[31] C. Gunawardhana, M. Bravo, and L. Rodrigues. Unobtrusive deferred update stabilization for efficient georeplication. In USENIX Annual Technical Conference (USENIX ATC), 2017.
+[32] M. P. Herlihy and J. M. Wing. Linearizability: A correctness condition for concurrent objects. ACM Trans. Program. Lang. Syst., 12(3), 1990.
+[33] G. Kaki, K. Earanky, K. C. Sivaramakrishnan, and S. Jagannathan. Safe replication through bounded concurrency verification. Proc. ACM Program. Lang., 2(OOPSLA), 2018.
+[34] T. Kraska, G. Pang, M. J. Franklin, S. Madden, and A. Fekete. MDCC: Multi-data center consistency. In European Conference on Computer Systems (EuroSys), 2013.
+[35] S. S. Kulkarni, M. Demirbas, D. Madappa, B. Avva, and M. Leone. Logical physical clocks. In International Conference on Principles of Distributed Systems (OPODIS), 2014.
+[36] R. Ladin, B. Liskov, L. Shrira, and S. Ghemawat. Providing high availability using lazy replication. ACM Trans. Comput. Syst., 10(4), 1992.
+[37] L. Lamport. The part-time parliament. ACM Trans. Comput. Syst., 16(2), 1998.
+
+[38] L. Lamport. Generalized consensus and Paxos. Technical Report MSR-TR-2005-33, Microsoft Research, 2005.
+[39] C. Li, J. Leitão, A. Clement, N. M. Preguiça, R. Rodrigues, and V. Vafeiadis. Automating the choice of consistency levels in replicated systems. In USENIX Annual Technical Conference (USENIX ATC), 2014.
+[40] C. Li, D. Porto, A. Clement, R. Rodrigues, N. Preguiça, and J. Gehrke. Making geo-replicated systems fast if possible, consistent when necessary. In Symposium on Operating Systems Design and Implementation (OSDI), 2012.
+[41] C. Li, N. Preguiça, and R. Rodrigues. Fine-grained consistency for geo-replicated systems. In USENIX Annual Technical Conference (USENIX ATC), 2018.
+[42] W. Lloyd, M. J. Freedman, M. Kaminsky, and D. G. Andersen. Don't settle for eventual: Scalable causal consistency for wide-area storage with cops. In Symposium on Operating Systems Principles (SOSP), 2011.
+[43] W. Lloyd, M. J. Freedman, M. Kaminsky, and D. G. Andersen. Stronger semantics for low-latency georeplicated storage. In Conference on Networked Systems Design and Implementation (NSDI), 2013.
+[44] P. Mahajan, L. Alvisi, and M. Dahlin. Consistency, availability, and convergence. Technical Report TR-1122, University of Texas at Austin, 2011.
+[45] P. Mahajan, S. Setty, S. Lee, A. Clement, L. Alvisi, M. Dahlin, and M. Walfish. Depot: Cloud storage with minimal trust. ACM Trans. Comput. Syst., 29(4), 2011.
+[46] F. Mattern. Virtual time and global clocks in distributed systems. In International Workshop on Parallel and Distributed Algorithms, 1988.
+[47] S. A. Mehdi, C. Littley, N. Crooks, L. Alvisi, N. Bronson, and W. Lloyd. I can't believe it's not causal! Scalable causal consistency with no slowdown cascades. In Conference on Networked Systems Design and Implementation (NSDI), 2017.
+[48] Microsoft. Consistency levels in Azure Cosmos DB. https://docs.microsoft.com/en-us/azure/ cosmos-db/consistency-levels, 2020.
+[49] I. Moraru, D. G. Andersen, and M. Kaminsky. There is more consensus in egalitarian parliaments. In Symposium on Operating Systems Principles (SOSP), 2013.
+[50] S. S. Nair, G. Petri, and M. Shapiro. Proving the safety of highly-available distributed objects. In European Symposium on Programming (ESOP), 2020.
+
+14
+
+[51] M. Najafzadeh, A. Gotsman, H. Yang, C. Ferreira, and M. Shapiro. The CISE tool: proving weakly-consistent applications correct. In Workshop on the Principles and Practice of Consistency for Distributed Data (PaPoC), 2016.
+[52] F. Pedone and A. Schiper. Generic broadcast. In International Symposium on Distributed Computing (DISC), 1999.
+[53] K. Petersen, M. J. Spreitzer, D. B. Terry, M. M. Theimer, and A. J. Demers. Flexible update propagation for weakly consistent replication. In Symposium on Operating Systems Principles (SOSP), 1997.
+[54] Redis Labs. Causal consistency in an active-active database. https://docs.redislabs.com/latest/rs/administering/ database-operations/causal-consistency-crdb/, 2020.
+[55] F. B. Schneider. Implementing fault-tolerant services using the state machine approach: A tutorial. ACM Comput. Surv., 22(4), 1990.
+[56] M. Shapiro, N. M. Preguiça, C. Baquero, and M. Zawirski. Conflict-free replicated data types. In International Symposium on Stabilization, Safety, and Security of Distributed Systems (SSS), 2011.
+[57] D. Shukla, S. Thota, K. Raman, M. Gajendran, A. Shah, S. Ziuzin, K. Sundaram, M. G. Guajardo, A. Wawrzyniak, S. Boshra, R. Ferreira, M. Nassar, M. Koltachev, J. Huang, S. Sengupta, J. J. Levandoski, and D. B. Lomet. Schema-agnostic indexing with azure documentdb. Proc. VLDB Endow., 8(12), 2015.
+[58] Y. Sovran, R. Power, M. K. Aguilera, and J. Li. Transactional storage for geo-replicated systems. In Symposium on Operating Systems Principles (SOSP), 2011.
+[59] K. Spirovska, D. Didona, and W. Zwaenepoel. Wren: Nonblocking reads in a partitioned transactional causally consistent data store. In International Conference on Dependable Systems and Networks (DSN), 2018.
+[60] K. Spirovska, D. Didona, and W. Zwaenepoel. Paris: Causally consistent transactions with non-blocking reads and partial replication. In International Conference on Distributed Computing Systems (ICDCS), 2019.
+[61] K. Spirovska, D. Didona, and W. Zwaenepoel. Optimistic causal consistency for geo-replicated key-value stores. IEEE Transactions on Parallel and Distributed Systems, 32(3), 2020.
+[62] R. Taft, I. Sharif, A. Matei, N. VanBenschoten, J. Lewis, T. Grieger, K. Niemi, A. Woods, A. Birzin, R. Poss, P. Bardea, A. Ranade, B. Darnell, B. Gruneir, J. Jaffray,
+
+L. Zhang, and P. Mattis. CockroachDB: The Resilient Geo-Distributed SQL Database. In International Conference on Management of Data (SIGMOD), 2020.
+[63] D. B. Terry, A. J. Demers, K. Petersen, M. Spreitzer, M. Theimer, and B. W. Welch. Session guarantees for weakly consistent replicated data. In International Conference on Parallel and Distributed Information Systems (PDIS), 1994.
+[64] D. B. Terry, V. Prabhakaran, R. Kotla, M. Balakrishnan, M. K. Aguilera, and H. Abu-Libdeh. Consistency-based service level agreements for cloud storage. In Symposium on Operating Systems Principles (SOSP), 2013.
+[65] D. B. Terry, M. M. Theimer, K. Petersen, A. J. Demers, M. J. Spreitzer, and C. H. Hauser. Managing update conflicts in Bayou, a weakly connected replicated storage system. In Symposium on Operating Systems Principles (SOSP), 1995.
+[66] M. Tyulenev, A. Schwerin, A. Kamsky, R. Tan, A. Cabral, and J. Mulrow. Implementation of clusterwide logical clock and causal consistency in MongoDB. In International Conference on Management of Data (SIGMOD), 2019.
+[67] R. van Renesse, K. P. Birman, and S. Maffeis. Horus: A flexible group communication system. Commun. ACM, 39(4), 1996.
+[68] W. Vogels. Eventually consistent. CACM, 52(1), 2009.
+[69] G. Weikum and G. Vossen. Transactional Information Systems: Theory, Algorithms, and the Practice of Concurrency Control and Recovery. Morgan Kaufmann Publishers Inc., 2001.
+[70] YugabyteDB. Replication. https://docs.yugabyte.com/latest/architecture/ docdb-replication/replication/, 2020.
+[71] M. Zawirski, N. Preguiça, S. Duarte, A. Bieniusa, V. Balegas, and M. Shapiro. Write fast, read in the past: Causal consistency for client-side applications. In International Middleware Conference (Middleware), 2015.
+[72] I. Zhang, N. K. Sharma, A. Szekeres, A. Krishnamurthy, and D. R. K. Ports. Building consistent transactions with inconsistent replication. ACM Trans. Comput. Syst., 35(4), 2018.
+
+15
+
+A The Full UNISTORE Protocol for LWW Registers
+Algorithms A1 ­ A10 given in this section define the full UNISTORE protocol, including parts omitted from the main text. This version of the protocol is specialized to the case when the data store manages last-writer-wins (LWW) registers.
+Algorithm A1 shows the pseudocode of clients. We assume that each client is associated with a unique client identifier. Each client maintains the following variables:
+· lc: The Lamport clock at this client. · d: The data center to which this client is currently con-
+nected. · p: The coordinator partition of the current ongoing trans-
+action. · tid: The identifier of the current ongoing transaction. · pastVec: The client's causal past.
+A client interacts with UNISTORE via the following procedures:
+· tid  START(): Start a transaction and obtain an identifier tid.
+· v  READ(k): Invoke a read operation on key k in the ongoing transaction and obtain a return value v.
+· ok  UPDATE(k, v): Invoke an update operation on key k and value v in the ongoing transaction.
+· ok  COMMIT_CAUSAL_TX(): Commit a causal transaction.
+· dec  COMMIT_STRONG_TX(): Try to commit a strong transaction and obtain a decision dec  {COMMIT, ABORT}.
+· ok  CL_UNIFORM_BARRIER(): Execute a uniform barrier.
+· ok  CL_ATTACH( j): Attach to data center j.
+Algorithms A2 ­ A6 show the pseudocode of replicas. The code needed for strong transactions in Algorithms A2, A3, and A5 is highlighted in red. Each replica pmd maintains a set of variables as follows.
+· clock: The current time at pmd . · rset: The read sets of transactions coordinated by pmd ,
+indexed by transaction identifier tid. · wbuff: The write buffers of transactions coordinated by
+pmd , indexed by transaction identifier tid, partition l, and key k. · snapVec: The snapshot vectors of transactions coordinated by pmd , indexed by transaction identifier tid. · opLog: The log of updates performed on keys managed by pmd , indexed by key k. · knownVec, stableVec, uniformVec: The vectors used by pmd to track what is replicated where. · preparedCausal: The set of causal transactions local to pmd that are prepared to commit. · committedCausal: For each data center i, committedCausal[i] stores transactions waiting to
+
+be replicated by pmd to sibling replicas at other data centers than i. · localMatrix: The set of knownVec received by pmd from other partitions in data center d. It is used to compute stableVec. · stableMatrix: The set of stableVec received by pmd from sibling replicas. It is used to compute uniformVec. · globalMatrix: The set of knownVec received by pmd from sibling replicas. It is used to track what has been replicated at sibling replicas. We specialize the UNISTORE protocol to LWW registers in several ways. First, we add code for managing Lamport clocks, highlighted in blue. In particular, each (committed) transaction is associated with a Lamport timestamp, equal to the value of lc at its client when the transaction completes (lines A1:14 and A1:23). Lamport timestamps are totally ordered, with client identifiers used for tie-breaking (see also Definition 54). Second, in Algorithm A2 we replace DO_OP by the following two procedures: · v  DO_READ(tid, k): Execute a read operation on key k in a transaction with identifier tid and obtain a value v. · DO_UPDATE(tid, k, v): Execute an update operation on key k and value v in a transaction with identifier tid. Finally, in Algorithm A3 we modify the handler of message GET_VERSION: · GET_VERSION(snapVec, k): Read the latest value from key k based on the snapshot vector snapVec. Specifically, it returns the last update to key k of the transaction with the latest commitVec in terms of their Lamport clock order such that commitVec  snapVec (line A3:5). Algorithms A7 ­ A10 contain the implementation of the transaction certification service (see also §C). The certification service uses an instance of the leader election failure detector m for each partition m1. This primitive ensures that from some point on, all correct processes nominate the same correct process as the leader. For the case when the data store manages only registers, we assume that any two writes to the same object conflict. Other data types and conflict relations can be easily supported by modifying the certification check in Algorithm A8.
+1Tushar Deepak Chandra, Vassos Hadzilacos, and Sam Toueg. The weakest failure detector for solving consensus. J. ACM, 1996.
+
+16
+
+Algorithm A1 Client operations at client cl
+1: function START() 2: p  an arbitrary replica in data center d 3: tid  remote call START_TX(pastVec) at p 4: return tid
+
+5: function READ(k)
+
+6: v, lc  remote call DO_READ(tid, k) at p
+
+7: if lc =  then
+
+8:
+
+lc  max{lc, lc}
+
+9: return v
+
+10: function UPDATE(k, v) 11: remote call DO_UPDATE(tid, k, v) at p 12: return ok
+
+13: function COMMIT_CAUSAL_TX() 14: lc  lc + 1 15: vc  remote call COMMIT_CAUSAL(tid, lc) at p 16: pastVec  vc 17: return ok
+
+18: function COMMIT_STRONG_TX()
+
+19: lc  lc + 1
+
+20: dec, vc, lc  remote call COMMIT_STRONG(tid, lc) at p
+
+21: if dec = COMMIT then
+
+22:
+
+pastVec  vc
+
+23:
+
+lc  lc
+
+24: return dec
+
+25: function CL_UNIFORM_BARRIER() 26: var p  an arbitrary replica in data center d 27: remote call UNIFORM_BARRIER(pastVec) at p 28: lc  lc + 1 29: return ok
+
+30: function CL_ATTACH( j) 31: var p  an arbitrary replica in data center j 32: remote call ATTACH(pastVec) at p 33: lc  lc + 1 34: d  j 35: return ok
+
+ts(START)  snapVecpd[tid]
+lclock(COMMIT_CAUSAL_TX)  lc ts(COMMIT_CAUSAL_TX)  pastVec
+ts(COMMIT_STRONG_TX)  pastVec lclock(COMMIT_STRONG_TX)  lc
+ts(CL_UNIFORM_BARRIER)  pastVec lclock(CL_UNIFORM_BARRIER)  lc ts(CL_ATTACH)  pastVec lclock(CL_ATTACH)  lc
+
+17
+
+Algorithm A2 Transaction coordinator at pmd : causal commit
+1: function START_TX(V )
+2: for i  D \ {d} do
+3: uniformVec[i]  max{V [i], uniformVec[i]} 4: var tid  generate_tid() 5: snapVec[tid]  uniformVec 6: snapVec[tid][d]  max{V [d], uniformVec[d]} 7: snapVec[tid][strong]  max{V [strong], stableVec[strong]} 8: return tid
+
+9: function DO_READ(tid, k)
+
+10: var l  partition(k)
+
+11: if wbuff[tid][l][k] =  then
+
+12:
+
+return wbuff[tid][l][k], 
+
+13: send GET_VERSION(snapVec[tid], k) to pld 14: wait receive VERSION(v, lc) from pld 15: rset[tid]  rset[tid]  {k}
+
+16: return v, lc
+
+17: function DO_UPDATE(tid, k, v) 18: var l  partition(k) 19: wbuff[tid][l][k]  v 20: rset[tid]  rset[tid]  {k}
+
+21: function COMMIT_CAUSAL(tid, lc)
+
+22: var L  {l | wbuff[tid][l] = }
+
+23: if L =  then
+
+24:
+
+return snapVec[tid]
+
+25: send PREPARE(tid, wbuff[tid][l], snapVec[tid]) to pld, l  L 26: var commitVec  snapVec[tid]
+
+27: for all l  L do
+
+28:
+
+wait receive PREPARE_ACK(tid, ts) from pld
+
+29: commitVec[d]  max{commitVec[d], ts}
+
+30: send COMMIT(tid, commitVec, lc) to pld, l  L 31: return commitVec
+
+18
+
+Algorithm A3 Transaction execution at pmd
+
+1: when received GET_VERSION(snapVec, k) from p
+2: for i  D \ {d} do
+3: uniformVec[i]  max{snapVec[i], uniformVec[i]}
+4: wait until knownVec[d]  snapVec[d]  knownVec[strong]  snapVec[strong]
+
+5: v, commitVec, lc  snapshot(opLog[k], snapVec)
+
+returns the last update to key k by a transaction
+
+6:
+
+with the highest Lamport timestamp such that commitVec  snapVec
+
+7: send VERSION(v, lc) to p
+
+8: when received PREPARE(tid, wbuff , snapVec) from p
+9: for i  D \ {d} do
+10: uniformVec[i]  max{snapVec[i], uniformVec[i]} 11: var ts  clock 12: preparedCausal  preparedCausal  { tid, wbuff , ts }
+13: send PREPARE_ACK(tid, ts) to p
+
+14: when received COMMIT(tid, commitVec, lc) 15: wait until clock  commitVec[d]
+16: tid, wbuff , _  find(tid, preparedCausal) 17: preparedCausal  preparedCausal \ { tid, _, _ } 18: for all k, v  wbuff do 19: opLog[k]  opLog[k] · v, commitVec, lc 20: committedCausal[d]  committedCausal[d]  { tid, wbuff , commitVec, lc }
+
+21: function UNIFORM_BARRIER(V ) 22: wait until uniformVec[d]  V [d]
+
+23: function ATTACH(V )
+24: wait until i  D \ {d}. uniformVec[i]  V [i]
+
+19
+
+Algorithm A4 Transaction replication at pmd
+1: function PROPAGATE_LOCAL_TXS() 2: if preparedCausal =  then 3: knownVec[d]  clock 4: else 5: knownVec[d]  min{ts | _, _, ts  preparedCausal} - 1
+
+6: var txs  { _, _, commitVec, _  committedCausal[d] | commitVec[d]  knownVec[d]}
+
+7: if txs =  then
+
+8:
+
+send REPLICATE(d, txs) to pmi , i  D \ {d}
+
+9: committedCausal[d]  committedCausal[d] \ txs
+
+10: else
+
+11:
+
+send HEARTBEAT(d, knownVec[d]) to pmi , i  D \ {d}
+
+12: when received REPLICATE(i, txs)
+
+13: for all tid, wbuff , commitVec, lc  txs in commitVec[i] order do
+
+14: if commitVec[i] > knownVec[i] then
+
+15:
+
+for all k, v  wbuff do
+
+16:
+
+opLog[k]  opLog[k] · v, commitVec, lc
+
+17:
+
+committedCausal[i]  committedCausal[i]  { tid, wbuff , commitVec, lc }
+
+18:
+
+knownVec[i]  commitVec[i]
+
+Run periodically
+
+19: when received HEARTBEAT(i, ts) 20: pre: ts > knownVec[i]
+21: knownVec[i]  ts
+
+22: function FORWARD_REMOTE_TXS(i, j) forward transactions received from data center j = d to data center i / {d, j}
+
+23: var txs  { tid, _, commitVec, _  committedCausal[ j] | commitVec[ j] > globalMatrix[i][ j]}
+
+24: if txs =  then
+
+25:
+
+send REPLICATE( j, txs) to pmi
+
+26: else
+
+27:
+
+send HEARTBEAT( j, knownVec[ j]) to pmi
+
+20
+
+Algorithm A5 Updating metadata at pmd
+1: function BROADCAST_VECS()
+2: send KNOWNVEC_LOCAL(m, knownVec) to pld, l  P 3: send STABLEVEC(d, stableVec) to pmi , i  D 4: send KNOWNVEC_GLOBAL(d, knownVec) to pmi , i  D
+
+5: when received KNOWNVEC_LOCAL(l, knownVec)
+
+6: localMatrix[l]  knownVec
+
+7: for i  D do
+
+8:
+
+stableVec[i]  min{localMatrix[n][i] | n  P }
+
+9: stableVec[strong]  min{localMatrix[n][strong] | n  P }
+
+10: when received STABLEVEC(i, stableVec)
+11: stableMatrix[i]  stableVec 12: G  all groups with f + 1 replicas that include pmd
+13: for j  D do
+14: var ts  max{min{stableMatrix[h][ j] | h  g} | g  G}
+15: uniformVec[ j]  max{uniformVec[ j], ts}
+
+16: when received KNOWNVEC_GLOBAL(l, knownVec) 17: globalMatrix[l]  knownVec
+
+Algorithm A6 Committing strong transactions at pmd
+1: function COMMIT_STRONG(tid, lc) 2: UNIFORM_BARRIER(snapVec[tid]) 3: dec, vc, lc  CERTIFY(tid, wbuff[tid], rset[tid], snapVec[tid], lc) 4: return dec, vc, lc
+
+5: upon DELIVER_UPDATES(txs)
+
+6: for _, wbuff , commitVec, lc  txs in commitVec[strong] order do
+
+7:
+
+for k, v  wbuff do
+
+8:
+
+opLog[k]  opLog[k] · v, commitVec, lc
+
+9: knownVec[strong]  commitVec[strong]
+
+10: function HEARTBEAT_STRONG() 11: return CERTIFY(, , , 0, )
+
+21
+
+Run periodically Run periodically
+
+Algorithm A7 Certification service at coordinator pmd
+
+1: function CERTIFY(tid, wbuff , rset, snapVec, lc)
+
+2: var L  {l | wbuff [l] = }  {partition(k) | k  rset} 3: repeat
+
+4:
+
+send PREPARE_STRONG(tid, wbuff , rset, snapVec, lc) to l, l  L
+
+5:
+
+wait receive ALREADY_DECIDED(tid, decision, commitVec, lc)
+
+ receive ACCEPT_ACK(l, bl, tid, votel, tsl, lcl) from a quorum for all l  L 6: until not timeout
+
+7: if received ALREADY_DECIDED(tid, decision, commitVec, lc) then
+
+8: return decision, commitVec, lc
+
+9: else
+
+10:
+
+commitVec  snapVec
+
+11:
+
+commitVec[strong]  max{tsl | l  L}
+
+12:
+
+if l  L. votel = ABORT then decision  ABORT
+
+13:
+
+else decision  COMMIT
+
+14:
+
+lc  max{lcl | l  L}
+
+15:
+
+send DECISION(bl, tid, decision, commitVec, lc) to l, l  L
+
+16: return decision, commitVec, lc
+
+Algorithm A8 Strong transaction certification at pmd
+
+1: function CERTIFICATION_CHECK(W, rset, snapVec, lc)
+
+2: for all _, wbuff , rset , _, COMMIT, _, _  preparedStrong do
+
+3: if ( k, _  wbuff [m]. k  rset)  (k  rset . k, _  W ) then
+
+4:
+
+return ABORT, 
+
+5: for all _, wbuff , COMMIT, commitVec, lc  decidedStrong do
+
+6: if ( k, _  wbuff [m]. k  rset)  ¬(commitVec  snapVec) then
+
+7:
+
+return ABORT, 
+
+8:
+
+if lc  lc then
+
+9:
+
+lc  lc + 1
+
+10: return COMMIT, lc
+
+22
+
+Algorithm A9 Atomic transaction commit protocol at pmd
+1: when received PREPARE_STRONG(tid, wbuff , rset, snapVec, lc) from p 2: pre: status = LEADER
+
+3: if  tid, _, decision, commitVec, lc  decidedStrong then
+
+4:
+
+send ALREADY_DECIDED(tid, decision, commitVec, lc) to p
+
+5: else if  tid, _, _, snapVec, vote, ts, lc  preparedStrong then
+
+6:
+
+send ACCEPT(ballot, tid, wbuff , rset, snapVec, vote, ts, p, lc) to REPLICAS(m)
+
+7: else
+
+8: wait until clock > snapVec[strong]
+
+9:
+
+ts  clock
+
+10:
+
+vote, lc  CERTIFICATION_CHECK(wbuff [m], rset, snapVec, lc)
+
+11:
+
+send ACCEPT(ballot, tid, wbuff , rset, snapVec, vote, ts, p, lc) to REPLICAS(m)
+
+12: when received ACCEPT(b, tid, wbuff , rset, snapVec, vote, p, ts, lc) 13: pre: status  {LEADER, FOLLOWER}  ballot = b
+14: preparedStrong  preparedStrong  { tid, wbuff , rset, snapVec, vote, ts, lc } 15: send ACCEPT_ACK(m, b, tid, vote, ts, lc) to p
+
+16: when received DECISION(b, tid, decision, commitVec, lc) 17: pre: status = LEADER  ballot = b
+18: wait until clock  commitVec[strong] 19: send LEARN_DECISION(b, tid, decision, commitVec, lc) to REPLICAS(m)
+
+20: when received LEARN_DECISION(b, tid, decision, commitVec, lc) 21: pre: status  {LEADER, FOLLOWER}  ballot = b   tid, wbuff , _, _, _, _, _  preparedStrong
+22: preparedStrong  preparedStrong \ { tid, _, _, _, _, _, _ } 23: decidedStrong  decidedStrong  { tid, wbuff , decision, commitVec, lc }
+
+24: upon  _, _, COMMIT, commitVec, _  decidedStrong. commitVec[strong] > lastDelivered  (¬ _, _, _, _, COMMIT, ts, _  preparedStrong. lastDelivered < ts  commitVec[strong])  (¬ _, _, COMMIT, commitVec , _  decidedStrong. lastDelivered < commitVec [strong] < commitVec[strong])
+25: pre: status = LEADER 26: send DELIVER(ballot, commitVec[strong]) to REPLICAS(m)
+
+27: when received DELIVER(b, ts) 28: pre: status  {LEADER, FOLLOWER}  ballot = b  lastDelivered < ts
+29: lastDelivered  ts 30: var W  { tid, wbuff [m], commitVec, lc |  tid, wbuff , COMMIT, commitVec, lc  decidedStrong.
+commitVec[strong] = ts} 31: upcall DELIVER_UPDATES(W ) to pmd
+
+23
+
+Algorithm A10 Atomic transaction commit protocol at pmd : recovery
+1: upon m = trusted 2: trusted  m 3: if trusted = pmd then RECOVER() 4: else send NACK(ballot) to trusted
+
+5: when received NACK(b) 6: pre: b > ballot 7: ballot  b 8: RECOVER()
+
+9: function RECOVER() 10: send NEW_LEADER(any ballot b such that b > ballot  leader(b) = pmd ) to REPLICAS(m)
+
+11: when received NEW_LEADER(b) from p
+
+12: if trusted = p  ballot < b then
+
+13:
+
+status  RECOVERING
+
+14:
+
+ballot  b
+
+15:
+
+send NEW_LEADER_ACK(ballot, cballot, preparedStrong, decidedStrong) to p
+
+16: else send NACK(ballot) to p
+
+17: when received {NEW_LEADER_ACK(b, cballot j, preparedStrong j, decidedStrong j) | p j  Q} from a quorum Q 18: pre: status = RECOVERING  ballot = b
+19: var J  the set of j with maximal cballot j 20: decidedStrong  decidedStrong j
+jJ
+21: preparedStrong  { tid, _, _, _, _, _, _  preparedStrong j | tid, _, _, _, _ / decidedStrong}
+jJ
+22: var maxPrep  max{ts | _, _, _, _, _, ts, _  preparedStrong} 23: var maxDec  max{commitVec[strong] | _, _, _, commitVec, _  decidedStrong} 24: wait until clock  max{maxPrep, maxDec}
+25: cballot  b 26: send NEW_STATE(ballot, preparedStrong, decidedStrong) to REPLICAS(m) \ {pmd }
+27: when received NEW_STATE(b, preparedStrong, decidedStrong) from p 28: pre: status = RECOVERING  b  ballot
+29: cballot  b 30: preparedStrong  preparedStrong 31: decidedStrong  decidedStrong 32: status  FOLLOWER 33: send NEW_STATE_ACK(b) to p
+
+34: when received NEW_STATE_ACK(b) from a set of processes that together with pmd form a quorum 35: pre: status = RECOVERING  ballot = b
+
+36: status  LEADER
+
+37: var T  {commitVec[strong] |  _, _, COMMIT, commitVec, _  decidedStrong.
+
+ _, _, _, _, COMMIT, ts, _  preparedStrong. ts > commitVec[strong]}
+
+38: for all ts  T in increasing order do
+
+39:
+
+send DELIVER(b, ts) to REPLICAS(m)
+
+40: function RETRY(tid) 41: pre:  tid, wbuff , rs, snapVec, _, _, lc  preparedStrong
+42: CERTIFY(tid, wbuff , rs, snapVec, lc)
+
+Run periodically
+
+24
+
+B Consistency Model Specification
+B.1 Relations
+For a binary relation R  A × A and an element a  A, we define R -1(a) = {b | (b, a)  R }. For a non-empty set A and a total order R  A × A, we let max(A) be the maximum
+R
+element in A according to R . Formally,
+max(A) = a  A =   b  A. a = b  (b, a)  R .
+R
+If A is empty, then max(A) is undefined. We implicitly assume
+R
+that max(A) is defined whenever it is used.
+R
+We call a binary relation a (strict) partial order if it is irreflexive and transitive. We call it a total order if it additionally relates every two distinct elements one way or another.
+B.2 Operations and Events Transactions in UNISTORE can start, read and write keys, and commit. We assume that each transaction is associated with a unique transaction identifier tid from a set TID (corresponding to line A2:8). Besides, clients can issue on-demand barriers and migrate between data centers.
+Let Key and Val be the set of keys and values, respectively. We define O as the set of all possible operations
+O = {START(tid) | tid  TID}  {COMMIT_CAUSAL_TX(tid) | tid  TID}  {COMMIT_STRONG_TX(tid, dec) | tid  TID, dec  {COMMIT, ABORT}}  {CL_UNIFORM_BARRIER} 
+{CL_ATTACH( j) | j  D} 
+{READ(tid, k, v), UPDATE(tid, k, v) | tid  TID, k  Key, v  Val}.
+We denote each invocation of such an operation by an event from a set E, usually ranged over by e. A function op : E  O determines the operation a given event denotes. Formally, we use the following notation to denote different types of events.
+· E: The set of all events. · S: The set of START events. That is,
+S = {e  E | tid  TID. op(e) = START(tid)}.
+· R: The set of READ (read) events. That is,
+R = {e  E | tid  TID, k  Key, v  Val. op(e) = READ(tid, k, v)}.
+· U: The set of UPDATE (update) events. That is,
+U = {e  E | tid  TID, k  Key, v  Val. op(e) = UPDATE(tid, k, v)}.
+
+· Ccausal: The set of COMMIT_CAUSAL_TX events. That is,
+Ccausal = {e  E | tid  TID. op(e) = COMMIT_CAUSAL_TX(tid)}.
+· Cstrong: The set of COMMIT_STRONG_TX events with decision dec = COMMIT. That is,
+Cstrong = {e  E | tid  TID. op(e) = COMMIT_STRONG_TX(tid, COMMIT)}.
+· C Ccausal Cstrong: The set of all commit events. · Q: The set of CL_UNIFORM_BARRIER events. That is,
+Q = {e  E | op(e) = CL_UNIFORM_BARRIER}.
+· A: The set of CL_ATTACH events. That is,
+A = {e  E |  j  D. op(e) = CL_ATTACH( j)}.
+· Rk: The set of read events on key k. That is,
+Rk = {e  E | tid  TID, v  Val. op(e) = READ(tid, k, v)}.
+· Uk: The set of update events on key k. That is,
+Uk = {e  E | tid  TID, v  Val. op(e) = UPDATE(tid, k, v)}.
+For different types of events, we define · key(e): The key that the read or update event e  R U
+accesses. · rval(e): The return value of the read event e  R. · uval(e): The value written by the update event e  U.
+B.3 Transactions Definition 1 (Transactions). A transaction t is a triple (tid,Y, po), where
+· tid  TID is a unique transaction identifier; · Y  E \ (Q  A) is a finite, non-empty set of events; · po  Y ×Y is the program order, which is total. We only consider well-formed transactions: according to the po order, t starts with a START event, then performs some number of READ/UPDATE events, and ends with a commit event (COMMIT_CAUSAL_TX or COMMIT_STRONG_TX).
+In the following, we denote components of t as in t.tid. For simplicity, we assume a dedicated initial transaction t0 which installs initial values to all possible keys before the system launches.
+We use the following notations to denote different types of transactions.
+· T : The set of all committed transactions.
+
+25
+
+· Tk: The set of committed transactions that update key k. We also use Ck to denote the set of commit events of transactions in Tk.
+· Tcausal: The set of transactions that end with the COMMIT_CAUSAL_TX events. We call them causal transactions. Causal transactions will always be committed.
+· Tall-strong: The set of transactions that end with the COMMIT_STRONG_TX events. We call them strong transactions. Strong transactions can be committed or aborted.
+· Tstrong: The set of committed strong transactions.
+We have T = Tcausal Tstrong. For each transaction t  T , we define
+· tid(t)  TID: The transaction identifier t.tid of t. · events(t)  S  R U C: The set t.Y of events in t. · ws(t)  Key × Val: The write set of t. It is the set of keys
+with their values that t updates, which contains at most one value per key. Formally,
+
+ws(t) {(key(e), uval(e)) | e  t.Y U}.
+
+· rs(t)  Key: The read set of t. It is the set of keys that t reads. Formally,
+
+rs(t) {key(e) | e  t.Y  R}.
+
+· st(t)  S: The START event of t. Formally, it is the unique event in the set t.Y  S.
+· ct(t)  C: The commit event of t. Formally, it is the unique event in the set t.Y C.
+· ud(t, k)  Uk: The last update event on key k, if any, in transaction t. Formally,
+
+ud(t, k)
+
+max(events(t)
+po
+
+
+
+Uk
+
+).
+
+Besides, we define
+
+W (t) {k  Key | k, _  ws(t)},
+
+(1)
+
+R(t) rs(t) W (t).
+
+(2)
+
+For a read event e on key k in transaction t, if there exist update events on k preceding e in t, then e is called an internal read event. Otherwise, e is called an external read event. We denote the sets of internal reads and external reads by RINT and REXT, respectively. That is, R = RINT REXT.
+We also distinguish commit events for read-only transactions from those for update transactions, and denote their sets by CRO and CRW, respectively. That is, C = CRO CRW.
+For notational convenience, for an event e  E \ (Q  A), we also define tx(e) to be the transaction containing e and
+
+st(e) st(tx(e)), ct(e) ct(tx(e)).
+
+B.4 Abstract Executions
+Clients interacts with UNISTORE by issuing transactions and CL_UNIFORM_BARRIER and ATTACH events. We use histories to record such interactions in a single computation. Note that histories only record committed transactions.
+Definition 2 (Histories). A history is a tuple
+H = (X, client, dc, so)
+such that · X  T  Q  A is a set of committed transactions and CL_UNIFORM_BARRIER and ATTACH events; · client : X  C is a function that returns ­ the client client(t) which issues the transaction t  (X  T ), ­ the client client(q) which issues the CL_UNIFORM_BARRIER event q  (X  Q), or ­ the client client(a) which issues the ATTACH event a  (X  A);
+· dc : X  D is a function that returns the original data
+center dc(t) of transaction t  (X  T ), dc(q) of CL_UNIFORM_BARRIER event q  (X  Q), or dc(a) of ATTACH event a  (X  A); · so  X ×X is the session order on X. Consider s1, s2  X. We say that s1 precedes s2 in the session order, denoted s1 -so s2, if they are executed by the same client and s1 is executed before s2.
+In the following, we denote components of H as in H.X and often shorten H.X by X when it is clear. Let VH (H.X  T ).Y be the set of transactional events in history H.
+A consistency model is specified by a set of histories. To define this set, we extend histories with two relations, declaratively describing how the system processes transactions and CL_UNIFORM_BARRIER events.
+Definition 3 (Abstract Executions). An abstract execution is a triple
+A = ((X, client, dc, so), vis, ar)
+such that · (X, client, dc, so) is a history; · Visibility vis  X × X is a partial order; · Arbitration ar  X × X is a total order.
+For H = (X, client, dc, so), we often shorten ((X, client, dc, so), vis, ar) by (H, vis, ar).
+B.5 Partial Order-Restrictions Consistency
+We aim to show that UNISTORE implements a transactional variant of Partial Order-Restrictions consistency (POR consistency) [40, 41] for LWW registers. A history H of UNISTORE satisfies POR, denoted H |= POR, if it can be extended to an
+
+26
+
+abstract execution that satisfies several axioms, defined in the following:
+H |= POR  vis, ar. (H, vis, ar) |= RVAL  CAUSALCONSISTENCY  CONFLICTORDERING  EVENTUALVISIBILITY.
+UNISTORE satisfies POR, denoted UNISTORE |= POR, if all its histories do.
+Given an abstract execution A = (H, vis, ar), the axioms are defined as follows.
+Definition 4 (RVAL, [16]). The Return Value Consistency (RVAL) specifies the return value of each read event.
+RVAL INTRVAL  EXTRVAL.
+Here INTRVAL requires an internal read event e on key k to read from the last update event on k preceding e in the same transaction. Formally,
+INTRVAL e  RINT  Rk  VH . rval(e) = uval max(po-1(e) Uk) .
+po
+EXTRVAL requires an external read event e on key k to read from the last update event on k in the last transaction preceding tx(e) in ar, among the set of transactions visible to tx(e). Formally,
+EXTRVAL e  REXT  Rk  VH . rval(e) = uval ud max vis-1(tx(e))  Tk , k .
+ar
+Definition 5 (CAUSALCONSISTENCY, [13]).
+CAUSALCONSISTENCY CAUSALVISIBILITY  CAUSALARBITRATION,
+where
+CAUSALVISIBILITY (so  vis)+  vis;
+CAUSALARBITRATION vis  ar.
+The Conflict Ordering property requires that out of any two conflicting strong transactions, one must be visible to the other. Formally,
+Definition 6 (Conflict Relation). The conflict relation, denoted by , between strong transactions is a symmetric relation defined as follows:
+t, t  Tstrong. t t  (R(t) W (t ) = )  (W (t)  R(t ) = ).
+
+Definition 7 (CONFLICTORDERING).
+CONFLICTORDERING t1, t2  X  Tstrong. t1 t2  t1 -vis t2  t2 -vis t1.
+The Eventual Visibility property requires that a transaction that originates at a correct data center, that is visible to some CL_UNIFORM_BARRIER events, or that is a strong transaction eventually becomes visible at all correct data centers. Let
+C  D be the set of correct data centers. Formally,
+Definition 8 (EVENTUALVISIBILITY).
+EVENTUALVISIBILITY t  X  T.
+dc(t)  C  (q  Q. t -vis q)  t  Tstrong
+ t  T | ¬(t -vis t ) < .
+
+C Transaction Certification Service Specification
+
+C.1 Interface
+The Transaction Certification Service (TCS) [18] is responsible for certifying strong transactions issued by transaction coordinators, computing commit vectors and Lamport clocks for committed transactions, and (asynchronously) delivering committed transactions to replicas.
+Each strong transaction t  Tall-strong submitted to TCS may be associated with its read set rs(t), write set ws(t), snapshot vector snapshotVec(t) (Definition 10), commit vector commitVec(t) (Definition 11), and Lamport clock lclock(t) (Definition 52). From rs(t) and ws(t) we can then define W (t) and R(t) according to (1) and (2), respectively. Note that we have W (t)  R(t).
+Transaction coordinators for strong transactions interact with TCS using two types of actions. Coordinators can make certification requests (corresponding to procedure CERTIFY of Algorithm A7) of the form
+
+certify(tid(t), ws(t), R(t), snapshotVec(t),C(t)),
+
+where t  Tall-strong and C(t)  N denotes the contribution of client(t) to the Lamport clock of t. The TCS responses are of the form
+decide(tid(t), dec, vc, lc),
+
+containing a decision dec from D = {COMMIT, ABORT} for
+
+t, a commit vector vc from V for t if dec = COMMIT, and a
+
+Lamport clock lc from N for t if dec = COMMIT. If dec =
+
+ABORT, then vc and lc are irrelevant.
+
+Besides, TCS can deliver some payload W to a replica
+
+via upcall actions deliver(W ) (corresponding to procedure
+
+DELIVER_UPDATES of Algorithm A6). We denote by
+
+delivermd (W ) the delivery of when the latter is relevant.
+
+the The
+
+payload payload
+
+W W
+
+to in
+
+aderelipvleircmda(Wpmd),
+
+27
+
+is a set of tuples of the form tid, wbuff , commitVec, lc , each of which corresponds to the updates wbuff  Key × Val performed at a particular partition m by a particular committed strong transaction with transaction identifier tid, commit vector commitVec, and Lamport clock lc.
+
+C.2 Certification Functions TCS is specified using a certification function
+
+F : 2Tstrong × Tall-strong  D × V × N.
+
+(3)
+
+For a strong transaction t  Tall-strong and the set Tc  Tstrong of previously committed strong transactions, F(Tc, t) returns not only the decision dec  D, but also the commit vector vc  V and Lamport clock lc  N for t. We use Fdec(Tc, t), Fvec(Tc, t), and Flc(Tc, t) to select the first, second, and third component of F(Tc, t), respectively.
+The decision Fdec(Tc, t) should satisfy
+
+Fdec(Tc, t) = COMMIT  k  R(t). t  Tc. k  W (t )  commitVec(t )  snapshotVec(t) . (4)
+
+The commit vector Fvec(Tc, t) should satisfy
+(i  D. Fvec(Tc, t)[i] = snapshotVec(t)[i])
+ Fvec(Tc, t)[strong] > snapshotVec(t)[strong]  t  Tc. t t  Fvec(Tc, t)  commitVec(t ). (5)
+
+The Lamport clock Flc(Tc, t) should satisfy
+Flc(Tc, t)  C(t) 
+t  Tc. t t  Flc(Tc, t) > lclock(t ) . (6)
+C.3 Histories of TCS
+TCS executions are represented by histories, which are (possibly infinite) sequences of certify, decide, and deliver actions. For a TCS history h, we use act(h) to denote the set of actions in h. For actions act, act  act(h), we write act h act when act occurs before act in h. A strong transaction t  Tall-strong commits in a history h if h contains decide(tid(t), COMMIT, _, _). We denote by committed(h) the projection of h to actions corresponding to the strong transactions that are committed in h.
+Each history h needs to meet the following requirements. (R1) For each strong transaction t  Tall-strong, there is at most
+one certify(tid(t), _, _, _, _) action in h. (R2) For each action decide(tid, _, _, _)  act(h), there is ex-
+actly one certify(tid, _, _, _, _) action in h such that
+
+certify(tid, _, _, _, _) h decide(tid, _, _, _).
+(R3) For each action deliver(W )  act(h) and each tid, _, _, _  W , there is no decide(tid, ABORT, _, _) action in h.
+
+(R4) Every committed strong transaction is delivered at most once to each replica.
+(R5) For each action deliver(W )  act(h) and each tid, _, _, _  W , there is a certify(tid, _, _, _, _) action such that
+certify(tid, _, _, _, _) h deliver(W ).
+(R6) At each replica pmd , committed strong transactions are delivered in the increasing order of their strong timestamps. Formally, for any two distinct actions delivermd (W1) and delivermd (W2) with payloads W1 and W2, respectively,
+delivermd (W1) h delivermd (W2)   _, _, commitVec1, _  W1.  _, _, commitVec2, _  W2. commitVec1[strong] < commitVec2[strong].
+A history is complete if every certify action in it has a matching decide action. A complete history h is sequential if it consists of consecutive pairs of certify and matching decide actions. For a complete history h, a permutation h of h is a sequential history such that
+· h and h contain the same actions, i.e., act(h) = act(h ). · Transactions are certified in h according to their session
+order.
+t, t  Tall-strong. t -so t  decide(tid(t), _, _, _) h certify(tid(t ), _, _, _, _).
+C.4 TCS Correctness: Safety and Liveness C.4.1 Safety of TCS
+A complete sequential history h is legal with respect to a certification function F, if its results are computed so as to satisfy (4) ­ (6) according to F:
+act = decide(tid(t), dec, vc, lc)  act(h). (dec, vc, lc) = F({t | decide(tid(t ), COMMIT, _, _) h act}, t).
+A history h is correct with respect to F if h | committed(h) has a legal permutation. A TCS implementation is correct with respect to F if so are all its histories.
+
+C.4.2 Liveness of TCS
+TCS guarantees that every committed strong transaction will eventually be delivered by every correct data center. Formally,
+
+act = decide(tid, COMMIT, _, _)  act(h).
+
+m  partitions(tid). c  C .
+
+act = delivermc (W )  act(h).
+
+tid, _, _, _  W  act h act .
+
+(7)
+
+28
+
+Here partitions(tid) denotes the set of partitions that a particular transaction with transaction identifier tid accesses.
+A TCS implementation meets the liveness requirement if every history produced by its maximal execution satisfies (7).
+C.5 TCS Correctness The proof of TCS correctness is an adjustment of the ones in [18, 29].
+Theorem 9. The TCS implementation in UNISTORE (Algorithms A7 ­ A10) is correct with respect to the certification function F in (3) and meets the liveness requirement in (7).
+D The Proof of UNISTORE Correctness
+Consider an execution of UNISTORE with a history H = (X, client, dc, so). We prove that H satisfies POR by constructing an abstract execution A (Theorem 84). We also establish the liveness guarantees of UNISTORE (Theorem 86).
+D.1 Assumptions We take the following assumptions about UNISTORE.
+ASSUMPTION 1. For any replica pmd in data center d, clock at pmd is strictly increasing until d (may) crash.
+ASSUMPTION 2. Replicas are connected by reliable FIFO channels: messages are delivered in FIFO order, and messages between correct data centers are guaranteed to be eventually delivered.
+ASSUMPTION 3. We assume that in an execution of UNISTORE, any clients and up to f data centers may crash and that D > 2 f .
+ASSUMPTION 4. We assume fairness of procedures of UNISTORE: In an execution, if a procedure is enabled infinitely often, then it will be executed infinitely often.
+ASSUMPTION 5. We consider only well-formed executions, in which for each client:
+· transactions are issued in sequence; and · both CL_UNIFORM_BARRIER and CL_ATTACH events
+can be issued only outside of transactions.
+ASSUMPTION 6. We consider only executions where every causal commit event (i.e., COMMIT_CAUSAL_TX) completes and every strong commit event (i.e., COMMIT_STRONG_TX) that calls the TCS completes.
+We make the last assumption to simplify the technical development. The other assumptions come from the system model.
+
+D.2 Notations
+We use cl to range over clients from a finite set C. We also use the following notations to refer to different types of variables and their values (below are some typical examples).
+· snapVecmd : The variable snapVec at replica pmd . · (snapVecmd )e: The value of variable snapVecmd after the
+event e is performed at replica pmd . · snapVecmd (): The value of snapVecmd at some specific
+time . · pastVeccl: The variable pastVec at client cl. · (pastVeccl)e: The value of variable pastVeccl after the
+event e is performed at client cl. · snapVec(GET_VERSION,e): The actual value of parameter
+snapVec of handler GET_VERSION for event e. · commitVec(COMMIT_CAUSAL,e): The value of the local vari-
+able commitVec in procedure COMMIT_CAUSAL after event e is performed. Besides, we use coord(t) to denote the coordinator partition of transaction t. Each transaction is associated with a snapshot vector and a commit vector.
+Definition 10 (Snapshot Vector). Let t  T be a transaction. Let d dc(t) and m coord(t). We define its snapshot vector snapshotVec(t) as
+snapshotVec(t) (snapVecmd )st(t)[t].
+Definition 11 (Commit Vector). Let t  T be a transaction. Let d dc(t) and m coord(t). We define its commit vector commitVec(t) as follows.
+· If t is a read-only causal transaction, then
+commitVec(t) (snapVecmd )ct(t)[t].
+· If t is an update causal transaction, then
+
+commitVec(t) commitVec(COMMIT_CAUSAL,ct(t)). · If t is a committed strong transaction, then
+
+commitVec(t) Lemma 12.
+
+vc(C O M M I T _ S T RO N G,ct(t)) .
+
+t  T. commitVec(t)  snapshotVec(t).
+
+Proof. We perform a case analysis according to the type of t.
+· CASE I: t is a read-only causal transaction. By Definition 10 of snapshotVec(t), Definition 11 of commitVec(t), and Assumption 5,
+
+commitVec(t) = snapshotVec(t).
+
+· CASE II: t is an update causal transaction. By lines A2:26 and A2:29,
+
+commitVec(t)  snapshotVec(t).
+
+29
+
+· CASE III: t is a strong transaction. By line A6:3 and (5), commitVec(t)  snapshotVec(t).
+
+· CASE II: knownVecmd (1)[d] is set at line A4:3 and knownVecmd (2)[d] is set at line A4:5. By line A4:3, knownVecmd (1)[d] = clockmd (1).
+
+For client cl, we use cur_dc(cl) to denote the data center to which cl is currently attached. We also use T |cl to denote the set of transactions issued by cl. Formally,
+T |cl {t  T | client(t) = cl}.
+For a transaction t and a partition m, we use ws(t)[m] to denote the subset of ws(t) restricted to partition m. Formally,
+ws(t)[m] { k, v  ws(t) | partition(k) = m}.
+For notational convenience, we also define
+log(t) { k, v, commitVec(t), lclock(t) | k, v  ws(t)},
+and
+
+By the fact that preparedCausalmd (1) = , 2 > 1, and line A3:11,
+ _, _,ts  preparedCausalmd (2). ts > clockmd (1) = knownVecmd (1)[d].
+Therefore, by line A4:5,
+knownVecmd (1)[d]  min{ts | _, _, ts  preparedCausalmd (2)} - 1 = knownVecmd (2)[d].
+· CASE III: knownVecmd (1)[d] is set at line A4:5 and knownVecmd (2)[d] is set at line A4:3. Let t1 be the transaction in preparedCausalmd (1) that has the minimum ts. Formally,
+
+log(t)[m] { k, v, commitVec(t), lclock(t) | k, v  ws(t)[m]}.
+
+t1 argmin{ts | tid(t), _, ts  preparedCausalmd (1)}.
+t
+
+For a key k  Key and a transaction t  Tk, let log(t)[k] be the unique tuple
+k, v, commitVec(t), lclock(t)
+in log(t).
+
+By lines A4:5, A2:29, A3:15, and A4:3,
+knownVecmd (1)[d] < commitVec(t1)[d]  clockmd (2) = knownVecmd (2)[d].
+
+D.3 Metadata for Causal Transactions A causal transaction is committed when COMMIT_CAUSAL for it returns. A causal transaction is committed at replica pmd when COMMIT for it at pmd returns.
+D.3.1 Properties of knownVec Lemma 13. For any replica pmd in data center d, knownVecmd [d] is non-decreasing.
+
+· CASE IV:
+
+Both knownVecmd (1)[d]
+
+and
+
+knownVecmd (2)[d] are set at line A4:5. By lines A4:5
+
+and A3:11,
+
+knownVecmd (1)[d] = min{ts | _, _, ts  preparedCausalmd (1)} - 1  min{ts | _, _, ts  preparedCausalmd (2)} - 1 = knownVecmd (2)[d].
+
+Proof. Consider two points of time 1 and 2 such that 1 < 2. We need to show that
+
+knownVecmd (1)[d]  knownVecmd (2)[d].
+
+Note that knownVecmd [d] is updated only at lines A4:3 or A4:5. We distinguish between the following four cases.
+
+· CASE I:
+
+Both knownVecmd (1)[d]
+
+and
+
+knownVecmd (2)[d] are set at line A4:3. By line A4:3
+
+and Assumption 1,
+
+knownVecmd (1)[d] = clockmd (1) < clockmd (2) = knownVecmd (2)[d].
+
+Lemma 14. For i  D \ {d}, knownVecmd [i] at any replica pmd
+in data center d is non-decreasing.
+Proof. Note that knownVecmd [i] (i  D \ {d}) can be updated
+only at lines A4:18 and A4:21. Therefore, this lemma holds due to lines A4:14 and A4:20.
+Lemma 15. For i  D, knownVecmd [i] at any replica pmd in
+data center d is non-decreasing.
+Proof. By Lemmas 13 and 14.
+Lemma 16. For any replica pmd in data center d,
+knownVecmd [d]  clockmd .
+
+30
+
+Proof. Note that knownVecmd [d] is updated only at lines A4:3 or A4:5.
+· CASE I: knownVecmd [d] is updated at line A4:3. By Assumption 1,
+knownVecmd [d]  clockmd .
+· CASE II: knownVecmd [d] is updated at line A4:5. By line A3:11, immediately after this update,
+knownVecmd [d] < clockmd .
+
+Lemma 17. Let knownVecmd ()[d
+
+pmd ] at
+
+be a time
+
+replica in data center  and transaction t 
+
+d. Consider Tcausal com-
+
+mitted at pmd after time . Then
+
+commitVec(t)[d] > knownVecmd ()[d].
+
+Proof. Suppose that before time , knownVecmd [d] is last updated at time  < . Therefore,
+
+knownVecmd ()[d] = knownVecmd ( )[d].
+
+We distinguish between two cases according to whether
+
+preparedCausalmd ( ) = 
+when knownVecmd [d] is updated at time  . · CASE I: preparedCausalmd ( ) = . By line A4:3,
+knownVecmd ( )[d] = clockmd ( ).
+
+By line A3:11, line A2:29, and Assumption 1,
+
+commitVec(t)[d] > clockmd ( ).
+
+Therefore,
+
+commitVec(t)[d] > knownVecmd ( )[d] = knownVecmd ()[d].
+· CASE II: preparedCausalmd ( ) = . We further distinguish between two cases according to whether
+
+tid(t), _, _  preparedCausalmd ( ).
+­ CASE II-1: tid(t), _, ts  preparedCausalmd ( ). By lines A4:5 and A2:29,
+
+commitVec(t)[d]  ts > knownVecmd ( )[d] = knownVecmd ()[d].
+­ CASE II-2: tid(t), _, _ / preparedCausalmd ( ). By Lemma 16, Assumption 1, line A3:11, and line A2:29,
+commitVec(t)[d] > knownVecmd ( )[d] = knownVecmd ()[d].
+
+Lemma 18. Let t  Tcausal be a causal transaction that originates at data center d and accesses partition m. If
+commitVec(t)[d]  knownVecmd [d],
+then log(t)[m]  opLogmd .
+Proof. Suppose that the value knownVecmd [d] is set at time . By Lemma 17, t is committed at pmd before time . Therefore, by line A3:19,
+log(t)[m]  opLogmd .
+The following lemmas consider the replication and forwarding of causal transactions. Lemma 19. Let pmd be a replica in data center d. Let t1 and t2 be two transactions replicated by pmd to sibling replicas at time 1 and 2 (line A4:8), respectively. Then
+1 < 2  commitVec(t1)[d] < commitVec(t2)[d].
+Proof. Since t1 is replicated at time 1, by line A4:6, commitVec(t1)[d]  knownVecmd (1)[d].
+Assume that 1 < 2. We distinguish between two cases according to whether
+tid(t2), _, _, _  committedCausalmd (1)[d]. · CASE I: tid(t2), _, _, _  committedCausalmd (1)[d].
+Since t2 is not replicated at time 1, by line A4:6, commitVec(t2)[d] > knownVecmd (1)[d].
+· CASE II: tid(t2), _, _, _, / committedCausalmd (1)[d]. Thus, t2 is committed at pmd after time 1. By Lemma 17, commitVec(t2)[d] > knownVecmd (1)[d].
+Therefore, in either case,
+commitVec(t1)[d] < commitVec(t2)[d].
+Lemma 20. Let pmd be a replica in data center d. Consider a heartbeat knownVecmd (1)[d] sent by pmd at time 1 (line A4:11). Let t be a transaction replicated by pmd at time 2 (line A4:8). Then
+1 < 2  knownVecmd (1)[d] < commitVec(t)[d].
+
+31
+
+Proof. We first show that 1 < 2  knownVecmd (1)[d] < commitVec(t)[d].
+Assume that 1 < 2. We distinguish between two cases according to whether
+tid(t), _, _, _  committedCausalmd (1)[d]. · CASE I: tid(t), _, _, _  committedCausalmd (1)[d].
+By line A4:6, commitVec(t)[d] > knownVecmd (1)[d].
+· CASE II: tid(t), _, _, _ / committedCausalmd (1)[d]. Thus, t is committed at pmd after time 1. By Lemma 17, commitVec(t)[d] > knownVecmd (1)[d].
+Next we show that (note that 1 = 2) 2 < 1  commitVec(t)[d]  knownVecmd (1)[d].
+Since t is replicated by pmd at time 2, by line A4:6, commitVec(t)[d]  knownVecmd (2)[d].
+Assume that 2 < 1. By Lemma 13, knownVecmd (2)[d]  knownVecmd (1)[d].
+Putting it together yields commitVec(t)[d]  knownVecmd (1)[d].
+Lemma 21. Let pmd be a replica in data center d. Then i = d.  tid(t), _, _, _  committedCausalmd [i]. commitVec(t)[i]  knownVecmd [i].
+Proof. By lines A4:17 and A4:18 and Lemma 14. Lemma 22. For j = d and i / {d, j}, globalMatrixmd [i][ j] at any replica pmd in data center d is non-decreasing. Proof. Note that globalMatrixmd [i][ j] can be updated only at line A5:17. Therefore, by Lemma 14, it is non-decreasing.
+Lemma 23. Let pmd be a replica in data center d. Let t1 and t2 be two transactions that originate at data center j = d and are forwarded by pmd to sibling replica pmi in data center i / {d, j} at time 1 and 2 (line A4:25), respectively. Then
+1 < 2  commitVec(t1)[ j] < commitVec(t2)[ j].
+
+Proof. Since t1 is forwarded by pmd at time 1, by line A4:23, tid(t1), _, _, _  committedCausalmd (1)[ j].
+
+By Lemmas 21 and 14,
+
+commitVec(t1)[ j]  knownVecmd (1)[ j].
+
+(8)
+
+Assume that 1 < 2. We first argue that
+
+tid(t2), _, _, _ / committedCausalmd (1)[ j]. (9)
+
+Otherwise, by line A4:23,
+
+commitVec(t2)[ j]  globalMatrixmd (1)[i][ j].
+
+By Lemma 22,
+
+commitVec(t2)[ j]  globalMatrixmd (2)[i][ j].
+
+Therefore, by line A4:23, t2 would not be forwarded by pmd to pmi at time 2. Thus, (9) holds. Since t2 is forwarded by pmd to pmi at time 2,
+tid(t2), _,, _  committedCausalmd (2)[ j].
+
+By Lemma 14 and line A4:14,
+
+commitVec(t2)[ j] > knownVecmd (1)[ j].
+
+(10)
+
+Putting (8) and (10) together yields
+
+commitVec(t1)[ j] < commitVec(t2)[ j].
+
+La ehmeamrtbae2a4t .knLoewt npVmd ebcmde (a1re)[pjl]ic(aj
+
+in =
+
+data center d. d) sent by pmd
+
+Consider to sibling
+
+replica pmi in data center i / {d, j} at time 1 (line A4:27).
+
+Let t be a transaction that originates at data center j and is
+
+forwarded by pmd to pmi at time 2 (line A4:25). Then
+
+1 < 2  knownVecmd (1)[ j] < commitVec(t)[ j].
+
+Proof. We first show that
+
+1 < 2  knownVecmd (1)[ j] < commitVec(t)[ j].
+
+Assume that 1 < 2. We first argue that
+
+tid(t), _, _, _ / committedCausalmd (1)[ j]. (11)
+
+Otherwise, since t is not forwarded at time 1, by line A4:23,
+
+commitVec(t)[ j]  globalMatrixmd (1)[i][ j].
+
+By Lemma 22,
+
+commitVec(t)[ j]  globalMatrixmd (2)[i][ j].
+
+32
+
+Therefore, by line A4:23, t would not be forwarded by pmd to pmi at time 2. Thus, (11) holds. Since t is forwarded by pmd to pmi at time 2,
+tid(t), _, _, _  committedCausalmd (2)[ j].
+By Lemma 14 and line A4:14,
+knownVecmd (1)[ j] < commitVec(t)[ j].
+Next we show that (note that 1 = 2) 2 < 1  commitVec(t)[ j]  knownVecmd (1)[ j].
+Since t is forwarded by pmd to pmi at time 2, by line A4:23, tid(t), _, _, _  committedCausalmd (2)[ j].
+By Lemmas 21 and 14,
+commitVec(t)[ j]  knownVecmd (2)[ j].
+Assume that 2 < 1. By Lemma 14, knownVecmd (2)[ j]  knownVecmd (1)[ j].
+Putting it together yields
+commitVec(t)[ j]  knownVecmd (1)[ j].
+Lemma 25. Let t  Tcausal be a causal transaction that originates at data center i and accesses partition m. If
+commitVec(t)[i]  knownVecmd [i] for replica pmd in data center d = i, then
+log(t)[m]  opLogmd .
+Proof. Note that for i  D \ {d}, knownVecmd [i] can be up-
+dated only at lines A4:18 or A4:21 due to replication of transactions or heartbeats respectively, either directly from data center i (line A4:1) or indirectly from a third data center j = i (line A4:22).
+We proceed by induction on the length of the execution. In
+the following, for replica pmd in data center d  D, we denote
+the value of knownVecmd (resp. opLogmd ) after k steps in an execution by knownVecmd (k) (resp. opLogmd (k)).
+· Base Case. k = 0. It holds trivially, since for replica pmd in any data center d = i,
+knownVecmd (0)[i] = 0.
+· Induction Hypothesis. Suppose that for any execution of length k, we have
+d  D \ {i}. t  Tcausal.
+commitVec(t)[i]  knownVecmd (k)[i]  log(t)[m]  opLogmd (k) .
+
+· Induction Step. Consider an execution of length k + 1. If the (k + 1)-st step of this execution does not update knownVecmd [i] for replica pmd in any data center d = i, then by the induction hypothesis,
+d  D \ {i}. t  Tcausal.
+commitVec(t)[i]  knownVecmd (k + 1)[i]  log(t)[m]  opLogmd (k + 1) .
+Otherwise, we perform a case analysis according to how knownVecmd [i] of replica pmd in data center d = i is updated in the (k + 1)-st step.
+­ CASE I: knownVecmd [i] is updated due to delivery of a message from data center i. By Lemmas 13, 19, and 20, local transactions and heartbeats are propagated by pmi to sibling replicas in increasing order of their local timestamps commitVec[i] and knownVecmi [i] values. Therefore, by Assumption 2 and the induction hypothesis,
+t  Tcausal. commitVec(t)[i]  knownVecmd (k + 1)[i]  log(t)[m]  opLogmd (k + 1) .
+­ CASE II: knownVecmd [i] is updated due to delivery of a message from a third data center j = i. By Lemmas 14, 23, and 24, transactions originating at data center i and heartbeats are forwarded by some replica, say pmj ( j = i), to sibling replicas in increasing order of their local timestamps commitVec[i] and knownVecmj [i] values. Therefore, by Assumption 2 and the induction hypothesis,
+t  Tcausal. commitVec(t)[i]  knownVecmd (k + 1)[i]  log(t)[m]  opLogmd (k + 1) .
+Lemma 26 (PROPERTY 1). Let t  Tcausal be a causal transaction that originates at data center i and accesses partition m. If
+commitVec(t)[i]  knownVecmd [i] for replica pmd in data center d, then
+log(t)[m]  opLogmd .
+Proof. By Lemmas 18 and 25.
+D.3.2 Properties of stableVec
+Lemma 27. For i  D, stableVecmd [i] at any replica pmd in
+data center d is non-decreasing.
+
+33
+
+Proof. Note that stableVecmd [i] (i  D) can be updated only
+at line A5:8. By Lemma 15 and Assumption 2, stableVecmd [i] is non-decreasing.
+Lemma 28 (PROPERTY 2). For any replica pmd in data center d,
+i  D. n  P . stableVecmd [i]  knownVecnd[i].
+Proof. Note that stableVecmd [i] (i  D) can be updated only
+at line A5:8. By the way stableVecmd [i] is updated and Lemmas 13 and 14,
+n  P . stableVecmd [i]  knownVecnd[i].
+
+Lemma 29. Let t  Tcausal be a causal transaction that originates at data center i and accesses partition n. If
+
+commitVec(t)[i]  stableVecmd [i] for some replica pmd in data center d, then
+log(t)[n]  opLognd.
+
+Proof. By Lemma 28,
+
+stableVecmd [i]  knownVecnd[i].
+
+Therefore,
+
+commitVec(t)[i]  knownVecnd[i].
+
+By Lemma 25,
+
+log(t)[n]  opLognd.
+
+D.3.3 Properties of uniformVec
+Lemma 30. For i  D, uniformVecmd [i] at any replica pmd in
+data center d is non-decreasing.
+Proof. Note that whenever uniformVecmd [i] is updated at lines A2:3, A3:3, A3:10, or A5:15, we take the maximum of it and some scalar value.
+Lemma 31. Let e  E be an event issued by client cl to replica pmd in data center d. Then
+e  E \Q 
+i  D \ {d}. (pastVeccl)e[i]  (uniformVecmd )e[i],
+and
+e  Q  (pastVeccl)e[d]  (uniformVecmd )e[d].
+Proof. We perform a case analysis according to the type of event e.
+
+· CASE I: e  S. By line A2:3,
+i  D \ {d}. (pastVeccl)e[i]  (uniformVecmd )e[i].
+· CASE II: e  R U. In this case, (pastVeccl)e = (pastVeccl)st(e).
+By CASE I,
+i  D \ {d}. (pastVeccl)st(e)[i]  (uniformVecmd )st(e)[i].
+By Lemma 30,
+i  D \ {d}.(uniformVecmd )st(e)  (uniformVecmd )e.
+Putting it together yields
+i  D \ {d}. (pastVeccl)e[i]  (uniformVecmd )e[i].
+· CASE III: e  Ccausal. By line A1:16, (pastVeccl)e = vc(COMMIT_CAUSAL_TX,e).
+By lines A2:24, A2:26, and A2:31,
+i  D \ {d}.
+vc(COMMIT_CAUSAL_TX,e)[i] = (snapVecmd )e[tx(e)][i]. By line A2:5,
+i  D \ {d}.
+(snapVecmd )e[tx(e)][i] = (uniformVecmd )st(e)[i]. By Lemma 30,
+i  D \ {d}.(uniformVecmd )st(e)  (uniformVecmd )e.
+Putting it together yields
+i  D \ {d}. (pastVeccl)e[i]  (uniformVecmd )e[i].
+· CASE IV: e  Cstrong. By line A1:22, (pastVeccl)e = vc(COMMIT_STRONG_TX,e).
+By (5),
+i  D \ {d}.
+vc(COMMIT_STRONG_TX,e)[i] = (snapVecmd )e[tx(e)][i]. Therefore, similar to CASE III, we have
+i  D \ {d}. (pastVeccl)e[i]  (uniformVecmd )e[i].
+· CASE V: e  Q. By line A3:22, (pastVeccl)e[d]  (uniformVecmd )e[d].
+
+34
+
+· CASE VI: e  A. By line A3:24,
+i  D \ {d}. (pastVeccl)e[i]  (uniformVecmd )e[i].
+Lemma 32. Let cl be a client and d cur_dc(cl). At any time,
+i  D \ {d}. pastVeccl[i]  uniformVecmd [i]
+for some replica pmd in data center d. Proof. By a simple induction on the number of events that cl issues and Lemmas 31 and 30.
+Lemma 33. Let t be a transaction that originates at data center d. At any time,
+i  D \ {d}. snapshotVec(t)[i]  uniformVecmd [i]
+for some replica pmd in data center d. Proof. By line A2:5 and Lemma 30.
+Lemma 34 (PROPERTY 3). For any replica pmd in data center d,
+i  D. g  D. |g|  f + 1  d  g 
+ j  g. n  P . uniformVecmd [i]  knownVecnj [i] .
+Proof. Fix i  D. We proceed by induction on the length
+of the execution. In the following, we denote the value of knownVecmd , stableVecmd , uniformVecmd , stableMatrixmd , and pastVeccl (for some client cl) after k steps of an execution by knownVecmd (k), stableVecmd (k), uniformVecmd (k), stableMatrixmd (k), and pastVeccl(k), respectively.
+· Base Case. k = 0. It holds trivially since uniformVecmd (0)[i] = 0.
+· Induction Hypothesis. Suppose that for any execution of length k, for any replica pmd in data center d,
+g  D. |g|  f + 1  d  g 
+ j  g. 1  n  N. uniformVecmd (k)[i]  knownVecnj (k)[i] .
+· Induction Step. Consider an execution of length k + 1. If the (k + 1)-st step of this execution does not update uniformVecmd [i] for any replica pmd in data center d, then by the induction hypothesis and Lemma 15,
+g  D. |g|  f + 1  d  g 
+ j  g. 1  n  N. uniformVecmd (k + 1)[i] = uniformVecmd (k)[i]  knownVecnj (k)[i]  knownVecnj (k + 1)[i] .
+Otherwise, we perform a case analysis according to how uniformVecmd [i] is updated.
+35
+
+­ CASE I: uniformVecmd [i] is updated at line A5:15. By line A5:12,
+
+g  D. |g |  f + 1  d  g 
+
+(12)
+
+uniformVecmd (k + 1)[i] =
+
+max uniformVecmd (k)[i],
+
+min
+jg
+
+stableMatrixmd (k
+
++
+
+1)[
+
+j][i]
+
+.
+
+By the induction hypothesis and Lemma 14,
+
+g  D. |g |  f + 1  d  g 
+
+(13)
+
+ j  g . n  P .
+uniformVecmd (k)[i]  knownVecnj (k)[i]  knownVecnj (k + 1)[i] .
+
+By Lemma 27, for the particular g  D in (12),
+
+ j  g . stableMatrixmd (k + 1)[ j][i] (14)  stableVecmj (k + 1)[i].
+By Lemmas 28 and 14, for any replica pmj in data center j,
+
+n  P . stableVecmj (k + 1)[i]
+
+(15)
+
+ knownVecnj (k + 1)[i].
+
+Therefore, for the particular g  D in (12),
+
+j
+
+
+
+g
+
+.
+
+n
+
+
+
+P
+
+.
+
+min
+jg
+
+stableMatrixmd (k
+
++
+
+1)[
+
+j][i]
+
+ knownVecnj (k + 1)[i]. (16)
+
+By (12), (13), and (16), we can either take g = g in (12) or g = g in (13) such that
+
+ j  g. n  P .
+uniformVecmd (k + 1)[i]  knownVecnj (k + 1)[i].
+
+Therefore,
+
+g  D. |g|  f + 1  d  g 
+ j  g. n  P .
+uniformVecmd (k + 1)[i]  knownVecnj (k + 1)[i] .
+­ CASE II: uniformVecmd [i] (i  D \ {d}) is updated
+at line A2:3. Then there exists some client cl with d = cur_dc(cl) such that
+
+uniformVecmd (k + 1)[i] =
+
+(17)
+
+max pastVeccl(k)[i], uniformVecmd (k)[i] .
+
+By the induction hypothesis and Lemma 14,
+
+g  D. |g |  f + 1  d  g 
+
+(18)
+
+ j  g . n  P .
+
+uniformVecmd (k)[i]  knownVecnj (k)[i]  knownVecnj (k + 1)[i] .
+
+By Lemma 32, the induction hypothesis, and Lemma 15,
+
+g  D. |g |  f + 1  d  g 
+
+(19)
+
+ j  g . n  P .
+
+pastVeccl(k)[i]  knownVecnj (k + 1)[i].
+
+By (17), (18), and (19), we can take g = g in (18) or g = g in (19) such that
+
+ j  g. n  P .
+uniformVecmd (k + 1)[i]  knownVecnj (k + 1)[i].
+
+Therefore,
+
+g  D. |g|  f + 1  d  g   j  g. n  P .
+uniformVecmd (k + 1)[i]  knownVecnj (k + 1)[i] .
+­ CASE III: uniformVecmd [i] (i  D \ {d}) is updated
+at lines A3:3 or A3:10. Therefore, there exists some transaction t originating at data center d such that
+
+uniformVecmd (k + 1)[i] =
+
+(20)
+
+max snapshotVec(t)[i], uniformVecmd (k)[i] .
+
+By the induction hypothesis and Lemma 15,
+
+g  D. |g |  f + 1  d  g 
+
+(21)
+
+ j  g . n  P .
+uniformVecmd (k)[i]  knownVecnj (k)[i]  knownVecnj (k + 1)[i] .
+
+By Lemma 33, the induction hypothesis, and Lemma 15,
+
+g  D. |g |  f + 1  d  g 
+
+(22)
+
+ j  g . n  P .
+snapshotVec(t)[i]  knownVecnj (k + 1)[i].
+
+By (20), (21), and (22), we can take g = g in (21) or g = g in (22) such that
+
+ j  g. n  P .
+uniformVecmd (k + 1)[i]  knownVecnj (k + 1)[i].
+
+Therefore,
+
+g  D. |g|  f + 1  d  g   j  g. n  P .
+uniformVecmd (k + 1)[i]  knownVecnj (k + 1)[i] .
+
+Lemma 35. For any replica pmd in data center d,
+i  D. n  P . uniformVecmd [i]  knownVecnd[i].
+
+Proof. By Lemma 34.
+
+Lemma 36. Let t  Tcausal be a causal transaction that originates at data center i and accesses partition n. If
+
+commitVec(t)[i]  uniformVecmd [i] for some replica pmd in data center d, then
+log(t)[n]  opLognd.
+
+Proof. By Lemma 35,
+
+uniformVecmd [i]  knownVecnd[i].
+
+Therefore,
+
+commitVec(t)[i]  knownVecnd[i].
+
+By Lemma 25,
+
+log(t)[n]  opLognd.
+
+Lemma 37. For any replica pmd in data center d, uniformVecmd [d]  clockmd .
+Proof. By Lemma 35, uniformVecmd [d]  knownVecmd [d].
+By Lemma 16, knownVecmd [d]  clockmd .
+Putting it together yields uniformVecmd [d]  clockmd .
+
+D.3.4 Properties of pastVec
+Lemma 38. Let e  S be a START event of transaction t issued by client cl. Then
+(pastVeccl)e  snapshotVec(t).
+Proof. By Definition 10 of snapshotVec(t) and lines A2:2­ A2:7.
+Lemma 39. For i  D, pastVeccl[i] at any client cl is non-
+decreasing.
+Proof. Note that pastVeccl[i] (i  D) is updated only at
+lines A1:16 or A1:22 when some transaction is committed. Therefore, the lemma holds due to Lemmas 12 and 38.
+
+36
+
+D.4 Metadata for Strong Transactions Lemma 40. For any replica pmd in any data center d, knownVecmd [strong] is non-decreasing.
+Proof. By (R6) and line A6:6.
+
+Lemma 41. For stableVecmd [strong]
+
+any replica pmd in is non-decreasing.
+
+any
+
+data
+
+center
+
+d,
+
+Proof. By Lemma 40, Assumption 2, and line A5:9.
+
+Lemma 42 (PROPERTY 6). Let t  Tstrong be a strong transaction that originates at data center i and accesses partition m. If
+commitVec(t)[strong]  knownVecmd [strong]
+for some replica pmd in data center d, then
+log(t)[m]  opLogmd .
+Proof. Note that knownVecmd [strong] can be updated only at line A6:9. By (R6), all committed strong transactions with strong timestamps less than or equal to knownVecmd [strong] have been delivered to pmd . By line A6:8,
+log(t)[m]  opLogmd .
+
+D.5 Timestamps Definition 43 (Timestamps of Events). Let e  Ccausal  Cstrong  Q  A be an event issued by client cl. We define its timestamp ts(e) as
+ts(e) (pastVeccl)e.
+Let e  S be a START event of transaction t. Let d dc(t) and m coord(t). We define its timestamp ts(e) as
+ts(e) (snapVecmd )e[t].
+See lines A1:3, A1:16, A1:22, A1:27, and A1:32 for START, COMMIT_CAUSAL_TX, COMMIT_STRONG_TX, CL_UNIFORM_BARRIER, and CL_ATTACH events, respectively.
+Definition 44 (Timestamps of Transactions). The timestamp ts(t) of a transaction t is that of its commit event, i.e.,
+t  T. ts(t) ts(ct(t)).
+Lemma 45. Let e  S be a START event. Let d dc(tx(e)) and m coord(tx(e)). Then
+(i  D. ts(e)[i]  (uniformVecmd )e[i]) 
+ts(e)[strong]  (stableVecmd )e[strong].
+Proof. By lines A2:5, A2:6, and A2:7.
+
+Lemma 46. Let e  REXT be an external read event. Let d dc(tx(e)) and m coord(tx(e)). Then
+
+ts(st(e)) = snapshotVec(tx(e)) = snapVec(GET_VERSION,e) = (snapVecmd )st(e)[tx(e)].
+Proof. By Definition 43 of timestamps, line A2:13, and line A2:6.
+
+Lemma 47. Let e  REXT be an external read event which reads from transaction t. Then
+
+ts(t)  ts(st(e)).
+
+Proof. By line A3:5,
+
+commitVec(GET_VERSION,e)  snapVec(GET_VERSION,e). Since e reads from t,
+
+ts(t) = commitVec(GET_VERSION,e). By Lemma 46,
+
+Therefore,
+
+ts(st(e)) = snapVec(GET_VERSION,e). ts(t)  ts(st(e)).
+
+Lemma 48.
+e  (CRW  Ccausal)  Cstrong. ts(e) = ts(tx(e)) = commitVec(tx(e)).
+Proof. By Definition 43 of timestamps and Definition 11 of commitVec(tx(e)).
+
+Lemma 49.
+
+t  T. ts(t)  ts(st(t)).
+
+Proof. By Lemmas 12, 46, and 48.
+
+D.6 Session Order
+
+Lemma 50. s1, s2  X . s1 -so s2  ts(s1)  ts(s2)  s2  T  ts(s1)  ts(st(s2))  ts(s2) .
+
+Proof. By Definitions 43 and 44 of timestamps and
+
+Lemma 39,
+
+ts(s1)  ts(s2),
+
+and
+
+s2  T  ts(s1)  ts(st(s2)).
+
+Besides, by Lemma 12,
+
+s2  T  ts(st(s2))  ts(s2).
+
+Therefore,
+
+s2  T  ts(s1)  ts(st(s2))  ts(s2).
+
+37
+
+D.7 Lamport Clocks Definition 51 (Lamport Clocks of Events). Let e  Ccausal  Cstrong  Q  A be an event issued by client cl. We define its Lamport clock lclock(e) as
+lclock(e) (lccl)e.
+See lines A1:14, A1:23, A1:28, and A1:33 for COMMIT_CAUSAL_TX, COMMIT_STRONG_TX, CL_UNIFORM_BARRIER, and CL_ATTACH events, respectively.
+Definition 52 (Lamport Clocks of Transactions). The Lamport clock lclock(t) of a transaction t is that of its commit event, i.e.,
+t  T. lclock(t) lclock(ct(t)).
+Lemma 53. Let e  REXT be an external read event issued by client cl. Then
+(lccl)e < lclock(tx(e)).
+Proof. If tx(e) is a causal transaction, by line A1:14,
+lclock(e) < lclock(ct(e)) = lclock(tx(e)).
+If tx(e) is a strong transaction, by line A1:19 and (6),
+lclock(e) < lclock(ct(e)) = lclock(tx(e)).
+
+Definition 54 (Lamport Clock Order). The Lamport clock order lc on X is the total order defined by their Lamport clocks, with their client identifiers for tie-breaking.
+
+Lemma 55.
+
+so  lc.
+
+Proof. By lines A1:14, A1:19, (6), A1:23, A1:28, and A1:33.
+
+D.8 Visibility Relation Definition 57 (Visibility Relation).
+s1, s2  X . s1 -vis s2  (s2  T  ts(s1)  ts(st(s2)))  (s2  Q  A  ts(s1)  ts(s2))  s1 -lc s2.
+Theorem 58. A |= CONFLICTORDERING.
+Proof. We need to show that t1, t2  Tstrong. t1 t2  t1 -vis t2  t2 -vis t1.
+Consider the history h of TCS. By Theorem 9, h | committed(h) has a legal permutation . Suppose that
+certify(tid(t1), _, _, _, _)  certify(tid(t2), _, _, _, _). Since t1 t2 and t2 is committed, by (4),
+commitVec(t1)  snapshotVec(t2). By Lemmas 46 and 48,
+ts(t1)  ts(st(t2)). On the other hand, by (6),
+lclock(t1) < lclock(t2). By Definition 54 of lc,
+t1 -lc t2. Therefore, by Definition 57 of vis,
+t1 -vis t2.
+
+Lemma 56. Let e  REXT be an external read event which reads from transaction t. Then
+t -lc tx(e).
+
+Proof. Suppose that e is issued by client cl. By line A1:8,
+
+lclock(t)  (lccl)e.
+
+By Lemma 53,
+
+(lccl)e < lclock(tx(e)).
+
+Therefore,
+
+lclock(t) < lclock(tx(e)).
+
+By Definition 54 of lc,
+
+t -lc tx(e).
+
+Lemma 59.
+
+so  vis.
+
+Proof. By Lemmas 50 and 55.
+
+Lemma 60. The visibility relation vis is a partial order.
+
+Proof. We need to show that
+· vis is irreflexive. This holds because lc is irreflexive. · vis is transitive. Suppose that s1 -vis s2 -vis s3. By Defi-
+nition 57 of vis,
+
+s1 -lc s2 -lc s3.
+
+By Definition 54 of lc,
+
+s1 -lc s3.
+
+Regarding timestamps, we distinguish between the following four cases and use Lemma 49.
+
+38
+
+­ s2  Q  A  s3  Q  A. ts(s1)  ts(s2)  ts(s3).
+­ s2  Q  A  s3  T . ts(s1)  ts(s2)  ts(st(s3)).
+­ s2  T  s3  Q  A. ts(s1)  ts(st(s2))  ts(s2)  ts(s3).
+­ s2  T  s3  T . ts(s1)  ts(st(s2))  ts(s2)  ts(st(s3)).
+By Definition 57 of vis, s1 -vis s3.
+
+Theorem 61. A |= CAUSALVISIBILITY.
+Proof. By Lemmas 59 and 60, (so  vis)+ = vis+ = vis.
+
+Lemma 62 (PROPERTY 5). For any two conflicting transactions t1 and t2,
+t1 -vis t2  commitVec(t1)[strong] < commitVec(t2)[strong].
+
+Proof. We first show that
+
+t1 -vis t2 
+
+(23)
+
+commitVec(t1)[strong] < commitVec(t2)[strong].
+
+Assume that t1 -vis t2. By Definition 57 of vis,
+
+ts(t1)  ts(st(t2)).
+
+By Lemmas 46 and 48,
+
+commitVec(t1)  snapshotVec(t2).
+
+Therefore,
+
+commitVec(t1)[strong]  snapshotVec(t2)[strong].
+
+By (5),
+
+commitVec(t2)[strong] > snapshotVec(t2)[strong].
+
+Putting it together yields
+
+commitVec(t1)[strong] < commitVec(t2)[strong].
+
+Next we show that
+t1 -vis t2 = commitVec(t1)[strong] < commitVec(t2)[strong].
+
+Assume that
+
+commitVec(t1)[strong] < commitVec(t2)[strong]. (24)
+
+Since t1 t2, by Theorem 58, t1 -vis t2  t2 -vis t1.
+
+By (23) and (24), Therefore,
+
+¬(t2 -vis t1). t1 -vis t2.
+
+D.9 Execution Order Definition 63 (Execution Points). Let k be a key. The "execution point" ep(e, k) of event e  (REXT  Rk) Ck is defined as follows:
+· If e  REXT  Rk, then ep(e, k) is at line A3:5; · If e  Ck Ccausal, then ep(e, k) is at line A3:19 for this
+particular key k; · If e  Ck Cstrong then ep(e, k) is at line A6:8 for delivery
+of the update of tx(e) on this particular key k. Note that DELIVER is asynchronous with the commit event e.
+Definition 64 (Per-key Execution Order). Let k be a key. Suppose that {e1, e2}  (REXT Rk)Ck. Event e1 is executed before event e2, denoted e1 -e-ok e2, if ep(e1, k) is executed before ep(e2, k) in real time.
+Lemma 65. Let k  Key be a key, t  Tk be a transaction, and e  REXT  Rk be an external read event. Suppose that d dc(t) = dc(tx(e)). Then
+t -vis tx(e)  ct(t) -e-ok e.
+Proof. By Definition 57 of vis,
+ts(t)  ts(st(e)).
+Since e  REXT, by Lemma 46,
+ts(t)  snapVec(GET_VERSION,e).
+In the following, we distinguish between two cases according to whether t  Tcausal or t  Tstrong. Let m partition(k).
+
+39
+
+· CASE I: t  Tcausal. By Lemma 48,
+
+ts(t) = commitVec(t)  snapVec(G . ET_VERSION,e)
+
+Therefore, after line A3:4 for e,
+
+(knownVecmd )e[d]  snapVec(GET_VERSION,e)[d]
+
+ commitVec(t)[d].
+
+(25)
+
+By Lemma 18, COMMIT of Algorithm A3 for ws(t)[m]
+
+k, _ finishes before e starts at replica pmd . By Defini-
+
+tion 64 of eok,
+
+ct(t) -e-ok e.
+
+· CASE II: t  Tstrong. By Lemma 48,
+
+ts(t) = commitVec(t)  snapVec(G . ET_VERSION,e) Therefore, after line A3:4 for e,
+(knownVecmd )e[strong]  snapVec(GET_VERSION,e)[strong]  commitVec(t)[strong]. (26)
+
+By Lemma 42, DELIVER of Algorithm A6 for ws(t)[m] k, _ finishes before e starts at replica pmd . By Definition 64 of eok,
+ct(t) -e-ok e.
+
+D.10 Arbitration Relation Definition 66 (Arbitration Relation). We define the arbitration relation ar on X as the Lamport clock order between them, i.e.,
+ar = lc.
+Theorem 67.
+A |= CAUSALARBITRATION.
+Proof. By Definition 57 of vis and Definition 66 of ar,
+vis  lc = ar.
+
+D.11 Return Values
+It is straightforward to show that INTRVAL holds for internal read events.
+
+Theorem 68.
+
+A |= INTRVAL.
+
+Proof. Let e  RINT  Rk be an internal read event. The transaction tx(e) contains update events on k. By line A2:12, e reads from the last update event on k preceding e in tx(e).
+
+Now let e be an external read event. For notational convenience, we define Ve to be the set of update transactions on k that are visible to tx(e), and Se the set of update transactions on k that are safe to read at line A3:5. By Assumption 6, (R5), and (R3), all transactions in Se are committed. Formally,
+Definition 69 (Visibility Set). Let e  REXT  Rk be an external read event on key k.
+Ve vis-1(tx(e))  Tk.
+Definition 70 (Safe Set). Let e  REXT  Rk be an external read event on key k. Suppose that e is issued to replica pmd in data center d.
+
+Se {t  Tk : ts(t)  snapVec(GET_VERSION,e)  log[t][k]  (opLogmd )e[k]}.
+
+Lemma 71. Let e  REXT  Rk be an external read event on key k. Suppose that e is issued to replica pmd in data center d. When e returns at pmd (line A3:5), we have
+
+Ve  Se.
+
+Proof. For each t  Ve, we need to show that t  Se. That is,
+
+ts(t)  snapVec(GET_VERSION,e)
+
+(27)
+
+and
+
+log[t][k]  (opLogmd )e[k].
+
+(28)
+
+We first show that (27) holds. Since t  Ve,
+
+t -vis tx(e).
+
+By Definition 57 of vis,
+
+ts(t)  ts(st(e)).
+
+By Lemma 46,
+
+ts(t)  snapVec(GET_VERSION,e).
+To show that (28) holds, we perform a case analysis according to whether t is a local transaction in data center d or a remote one in data center i = d.
+· CASE I: t is a local transaction in data center d. Since t -vis tx(e), by Lemma 65,
+ct(t) -e-ok e.
+
+Therefore,
+log[t][k]  (opLogmd )e[k].
+· CASE II: t is a remote transaction in data center i = d. We distinguish between two cases according to whether t  Tcausal or t  Tstrong.
+
+40
+
+­ CASE I: t  Tcausal. Since i = d, by line A3:3, snapVec(GET_VERSION,e)[i]  (uniformVecmd )e[i].
+By (27), ts(t)[i]  (uniformVecmd )e[i].
+By Lemma 36, log[t][k]  (opLogmd )e[k].
+­ CASE II: t  Tstrong. By line A3:4, snapVec(GET_VERSION,e)[strong]  (knownVecmd )e[strong].
+By (27), ts(t)[strong]  (knownVecmd )e[strong].
+By Lemma 42, log[t][k]  (opLogmd )e[k].
+
+Theorem 72.
+
+A |= EXTRVAL.
+
+Proof. Let e  REXT  Rk be an external read event on key k. Suppose that e reads from transaction t in Se. Since all transactions in Se are committed, t is committed. By Lemma 47,
+
+ts(t)  ts(st(e)).
+
+By Lemma 56,
+
+t -lc tx(e).
+
+By Definition 57 of vis,
+
+t -vis tx(e).
+
+By Definition 69 of Ve,
+
+t  Ve.
+
+Both Ve and Se are totally ordered by lc. Since t is the latest one in Se and Ve  Se (Theorem 71), t is also the latest one in Ve. Thus, e reads from t in Ve. That is, e reads from the update event ud(t, k) of Ve.
+
+Theorem 73.
+
+A |= RVAL.
+
+Proof. By Theorems 68 and 72.
+
+D.12 Uniformity
+D.12.1 Uniformity of Causal Transactions Originating at Correct Data Centers
+
+Lemma 74. For any
+d  C , knownVecmd [d]
+
+replica pmd in any correct grows without bound.
+
+data
+
+center
+
+Proof. Since data center d is correct, by Assumption 4, PROPAGATE_LOCAL_TXS of Algorithm A4 will be executed infinitely often.
+· CASE I: Line A4:3 is executed infinitely often. By Assumption 1, knownVecmd [d] grows without bound.
+· CASE II: Line A4:5 is executed infinitely often. That is, it is infinitely often that
+
+preparedCausalmd = .
+
+By Assumption 4, causal transactions in preparedCausalmd will eventually be committed and removed from preparedCausalmd (line A3:17). Thus, it is infinitely often that new causal transactions are prepared and added into preparedCausalmd (line A3:12) with larger and larger prepare timestamps (line A3:11).
+Therefore,
+
+min{ts | _, _, ts  preparedCausalmd }
+
+and
+
+knownVecmd [d] = min{ts | _, _, ts  preparedCausalmd } - 1
+
+grow without bound.
+
+Lemma 75. Let pmd be a replica in a correct data center d  C . If for some j  D and some value x  N
+knownVecmd [ j]  x,
+then eventually
+c  C . knownVecmc [ j]  x.
+Proof. Since data center d is correct, by Assumption 4, for each other data center i = d, replica pmd will keep
+· replicating to data center i the write sets
+_, wbuff , commitVec, _  committedCausalmd [ j]
+that have not been received by i from the perspective of d (commitVec[d]  knownVecmd [d] at line A4:6 and commitVec[ j] > globalMatrixmd [i][ j] at line A4:23); · or sending heartbeats with up-to-date knownVecmd [ j] to data center i (lines A4:11 and A4:27).
+
+41
+
+By Assumption 2, knownVecmc [ j] at replica pmc of each correct
+data center c  C will eventually be updated (lines A4:18 and
+A4:21) such that
+knownVecmc [ j]  knownVecmd [ j]  x.
+Lemma 76. Let d  C be a correct data center. For any replica pmc in any correct data center c  C , uniformVecmc [d] grows
+without bound.
+Proof. By Lemmas 74 and 75, for any replica pmc in any
+correct data center c  C , knownVecmc [d] grows without
+bound. By lines A5:2 and A5:8, for any replica pmc in
+any correct data center c  C , stableVecmc [d] grows without
+bound. By line A5:3, Assumptions 2 and 3, and lines A5:12­
+A5:15, for any replica pmc in any correct data center c  C ,
+uniformVecmc [d] grows without bound. Lemma 77 (PROPERTY 4). Let pmd be any replica in any data center d. For any time , there exists some time  such that
+i  D. c  C . n  P .
+uniformVecnc( )[i]  uniformVecmd ()[i].
+Proof. By Lemma 34, Assumption 3, and the fact that at most f data centers may fail,
+i  D. c  C . n  P .
+uniformVecmd ()[i]  knownVecnc()[i].
+By Lemma 75, there exists some time  such that
+i  D. c  C . n  P .
+uniformVecmd ()[i]  knownVecnc( )[i].
+By Algorithm A5 and Assumption 3, there exists some time  such that
+i  D. c  C . n  P .
+uniformVecnc( )[i]  uniformVecmd ()[i].
+Lemma 78. Let d  C be a correct data center and t  Tcausal
+be a causal transaction that originates at d. Then for any
+replica pmc in any correct data center c  C , eventually i  D. ts(t)[i]  uniformVecmc [i].
+Proof. Since d is correct, by Lemma 76, there exists some time  such that
+ts(t)[d]  uniformVecmc ( )[d].
+
+On the other hand, by Definition 43 of timestamps and Lemma 31 (let n coord(t) and cl client(t)),
+i  D \ {d}. ts(t)[i] = (pastVeccl)ct(t)[i]
+ (uniformVecnd)ct(t)[i]. By Lemma 77, there exists some time  such that
+i  D \ {d}. ts(t)[i]  (uniformVecmc )( )[i].
+Let  max{ ,  }.
+By Lemma 30,
+i  D. ts(t)[i]  uniformVecmc ()[i].
+D.12.2 Uniformity of Causal Transactions Visible to CL_UNIFORM_BARRIER events
+Lemma 79. Let t  Tcausal be a causal transaction and q  Q be a CL_UNIFORM_BARRIER event. If t -vis q, then for any
+replica pmc in any correct data center c  C , eventually i  D. ts(t)[i]  uniformVecmc [i].
+Proof. Since t -vis q, by Definition 57 of vis,
+ts(t)  ts(q). Suppose that q is issued by client cl to replica pnd in data center d and is returned at time q. By Definition 43 of timestamps and Lemma 31,
+ts(t)[d]  ts(q)[d]  (uniformVecnd)q[d]. By Lemma 77, there exists some time  such that
+ts(t)[d]  (uniformVecmc )( )[d].
+On the other hand, by Definition 43 of timestamps and Lemma 32,
+i  D \ {d}. ts(t)[i]  ts(q)[i]
+= (pastVeccl)q[i]  uniformVecld(q)[i] for some replica pld in data center d. By Lemma 77, there exists some time  such that
+i  D \ {d}. ts(t)[i]  (uniformVecmc )( )[i].
+Let  max{ ,  }.
+By Lemma 30,
+i  D. ts(t)[i]  uniformVecmc ()[i].
+
+42
+
+D.12.3 Uniformity of Strong Transactions Lemma 80. For any replica pmc in any correct data center
+c  C , knownVecmc [strong] grows without bound.
+Proof. By Assumption 4 and Theorem 9, replica pmc will either deliver committed strong transactions infinitely often (DELIVER of Algorithm A6) or submit dummy strong transactions infinitely often (HEARTBEAT_STRONG of Algorithm A6). Thus, knownVecmc [strong] grows without bound.
+Lemma 81. Let t  T be a transaction. Then for any replica
+pmc in any correct data center c  C , eventually
+ts(t)[strong]  stableVecmc [strong].
+Proof. By Lemma 80 and lines A5:2 and A5:9, stableVecmc [strong] grows without bound. Therefore, there exists some time  such that
+ts(t)[strong]  stableVecmc ()[strong].
+Lemma 82. Let t  Tstrong be a strong transaction. Then for
+any replica pmc in any correct data center c  C , eventually i  D. ts(t)[i]  uniformVecmc [i].
+Proof. Let d dc(t), n coord(t), and cl client(t). By Definition 43 of timestamps,
+ts(t) = (pastVeccl)ct(t).
+On the one hand, by Lemma 31,
+i  D \ {d}. ts(t)[i] = (pastVeccl)ct(t)[i]
+ (uniformVecnd)ct(t)[i].
+By Lemma 77, there exists some time  such that
+i  D \ {d}. ts(t)[i]  (uniformVecmc )( )[i].
+On the other hand, by Lemma 48,
+ts(t)[d] = commitVec(t)[d].
+By (5),
+commitVec(t)[d] = snapshotVec(t)[d].
+By lines A6:2 and A3:22, snapshotVec(t)[d]  (uniformVecnd)ct(t)[d].
+Putting it together yields, ts(t)[d]  (uniformVecnd)ct(t)[d].
+
+By Lemma 77, there exists some time  such that
+
+ts(t)[d]  (uniformVecmc )( )[d].
+
+Let By Lemma 30,
+
+ max{ ,  }.
+
+i  D. ts(t)[i]  uniformVecmc ()[i].
+
+D.13 Eventual Visibility Theorem 83.
+
+A |= EVENTUALVISIBILITY.
+
+Proof. Consider a transaction t  T such that
+
+dc(t)  C  (q  Q. t -vis q)  t  Tstrong.
+By Lemma 59, it suffices to show that for any client cl,
+
+T |cl =   t  T |cl. t -vis t .
+
+By Lemmas 78, 79, 81, and 82, there exists some time  such that
+
+c  C . n  P .
+
+(i  D. ts(t)[i]  uniformVecnc()[i]) 
+
+ts(t)[strong]  stableVecnc()[strong].
+
+(29)
+
+Since T |cl = , there exists some correct data center d  C
+to which cl issues an infinite number of transactions. Let t  T be the first transaction issued by client cl to data center d which starts after time  such that
+
+lclock(t) < lclock(t ).
+
+Thus, by Definition 54 of lc,
+
+t -lc t .
+
+Let m coord(t ). Since d is correct, by (29),
+(i  D. ts(t)[i]  uniformVecmd ()[i]) 
+ts(t)[strong]  stableVecmd ()[strong]. By Lemma 30,
+i  D. uniformVecmd ()[i]  (uniformVecmd )st(t )[i].
+By Lemma 41, stableVecmd ()[strong]  (stableVecmd )st(t )[strong].
+
+43
+
+By Lemma 45,
+(i  D. (uniformVecmd )st(t )[i]  ts(st(t ))[i]) 
+(stableVecmd )st(t )[strong]  ts(st(t ))[strong]. Putting it together yields
+ts(t)  ts(st(t )).
+By Definition 57 of vis, t -vis t .
+
+D.14 UNISTORE Correctness
+
+Theorem 84.
+
+UNISTORE |= POR.
+
+Proof. By Theorems 58, 61, 67, 73, and 83.
+
+D.15 UNISTORE Liveness
+Lemma 85. Each client migration CL_ATTACH to a correct data center will eventually terminate, provided that the client managed to complete its CL_UNIFORM_BARRIER call at its original data center just before CL_ATTACH.
+Proof. Suppose that client cl in its current data center d cur_dc(cl) issues a CL_ATTACH event a to replica pmc in cor-
+rect data center c  C .
+Let e  C be the last commit event issued by client cl before a. If e does not exist, then
+i  D. pastVeccl[i] = 0.
+Therefore, the wait condition
+i  D \ {c}. uniformVecmc [i]  0
+at line A3:24 at replica pmc will eventually hold. Thus, the CL_ATTACH event a eventually terminates.
+Otherwise, suppose that e is issued to replica pnd in data center d . By Lemma 31,
+i  D \ {d }. (uniformVecnd )e[i]  (pastVeccl)e[i]. (30)
+Note that it is possible that d = d, since there may exist other CL_ATTACH events between e and a. Therefore, we distinguish between the following two cases:
+· CASE I: d = d. By (30),
+i  D \ {d}. (uniformVecnd )e[i]  (pastVeccl)e[i].
+(31)
+
+· CASE II: d = d. Consider the last CL_ATTACH event,
+
+denoted a , before a. Suppose that a is issued to replica pnd in data center d. By Lemma 31, when a terminates,
+
+i  D \ {d}. (uniformVecnd)a [i]  (pastVeccl)a [i]
+
+= (pastVeccl)e[i].
+
+(32)
+
+Let q  Q be the CL_UNIFORM_BARRIER event issued by
+client cl just before a. Suppose that q is issued to replica pld in data center d. By Lemma 31,
+
+(uniformVecld)q[d]  (pastVeccl)q[d]
+
+= (pastVeccl)e[d].
+
+(33)
+
+By (31), (32), (33), and Lemma 77, eventually for the correct data center c,
+
+i  D. uniformVecmc [i]  (pastVeccl)e[i].
+
+Therefore, the wait condition
+
+i  D \ {c}. uniformVecmc [i]  (pastVeccl)e[i]
+at line A3:24 at replica pmc will eventually hold. Thus, the CL_ATTACH event a eventually terminates.
+
+Theorem 86. Any client event issued at a correct data center will eventually terminate.
+
+Proof. Consider any event e issued by client cl at a correct
+data center c  C . It suffices to show that each wait condition
+in the execution of e, if any, will eventually hold. In the following, we perform a case analysis according to the type of event e.
+· CASE I: e  S. The theorem holds trivially. · CASE II: e  R. If e  RINT, the theorem holds trivially.
+Otherwise, e  REXT. By Lemmas 74 and 80, the wait condition at line A3:4 for e will eventually hold. · CASE III: e  U. The theorem holds trivially. · CASE IV: e  Ccausal. Since data center c is correct, the wait condition at line A2:28 will eventually hold. · CASE V: e  Cstrong. By Lemma 76, the wait condition at line A3:22 will eventually hold. Thus, line A6:2 will eventually terminate. Then, by Assumption 6, the procedure CERTIFY and thus the event e will eventually terminate. · CASE VI: e  CL_UNIFORM_BARRIER. By Lemma 76, the wait condition at line A3:22 will eventually hold. · CASE VII: e  CL_ATTACH. The theorem holds due to CASE VI and Lemma 85.
+
+44
+
+

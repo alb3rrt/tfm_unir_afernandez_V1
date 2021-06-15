@@ -1,0 +1,761 @@
+Learning to Rehearse in Long Sequence Memorization
+
+arXiv:2106.01096v1 [cs.LG] 2 Jun 2021
+
+Zhu Zhang * 1 2 Chang Zhou * 2 Jianxin Ma 2 Zhijie Lin 1 Jingren Zhou 2 Hongxia Yang 2 Zhou Zhao 1
+
+Abstract
+Existing reasoning tasks often have an important assumption that the input contents can be always accessed while reasoning, requiring unlimited storage resources and suffering from severe time delay on long sequences. To achieve efficient reasoning on long sequences with limited storage resources, memory augmented neural networks introduce a human-like write-read memory to compress and memorize the long input sequence in one pass, trying to answer subsequent queries only based on the memory. But they have two serious drawbacks: 1) they continually update the memory from current information and inevitably forget the early contents; 2) they do not distinguish what information is important and treat all contents equally. In this paper, we propose the Rehearsal Memory (RM) to enhance long-sequence memorization by self-supervised rehearsal with a history sampler. To alleviate the gradual forgetting of early information, we design self-supervised rehearsal training with recollection and familiarity tasks. Further, we design a history sampler to select informative fragments for rehearsal training, making the memory focus on the crucial information. We evaluate the performance of our rehearsal memory by the synthetic bAbI task and several downstream tasks, including text/video question answering and recommendation on long sequences.
+1. Introduction
+In recent years, the tremendous progress of neural networks has enabled machines to perform reasoning given the input contents X and a query Q, e.g., infer the answer of given questions from the text/video stream in text/video question answering (Seo et al., 2016; Jin et al., 2019a; Le et al.,
+*Equal contribution 1Zhejiang University, China 2DAMO Academy, Alibaba Group, China. Correspondence to: Zhou Zhao <zhaozhou@zju.edu.cn>.
+Proceedings of the 38 th International Conference on Machine Learning, PMLR 139, 2021. Copyright 2021 by the author(s).
+
+2020b), or predict whether a user will click the given item based on the user behavior sequence in recommender systems (Ren et al., 2019; Pi et al., 2019; Zhang et al., 2021). Studies that achieve top performances at such reasoning tasks usually have an important assumption that the raw input contents X can be always accessed while answering the query Q. In this setting, the complex interaction between X and Q can be designed to extract query-relevant information from X with little loss, such as co-attention interaction (Xiong et al., 2016; Jin et al., 2019b). Though these methods (Seo et al., 2016; Le et al., 2020b) can effectively handle these reasoning tasks, they require unlimited storage resources to hold the original input X. Further, they have to encode the whole input contents and develop the elaborate interaction from scratch, which are time-consuming. This is not acceptable for online services that require instant response such as recommender systems, as the input sequence becomes extremely long (Ren et al., 2019).
+To achieve efficient reasoning on long sequences with limited storage resources, memory augmented neural networks (MANNs) (Graves et al., 2014; 2016) introduce a write-read memory M with fixed-size capacity (size much smaller than |X|) to compress and remember the input contents X. In the inference phase, they can capture queryrelevant clues directly from the memory M , i.e., the raw input X is not needed at the time of answering Q. This procedure is very similar to the daily situation of our human beings, i.e., we may not know the tasks Q that we will answer in the future when we are experiencing current events, but we have the instincts to continually memorize our experiences within the limited memory capacity, from which we can rapidly recall and draw upon past events to guide our behaviors given the present tasks (Moscovitch et al., 2016; Baddeley, 1992). Such human-like memory-based methods bring three benefits for long-sequence reasoning: 1) storage efficiency: we only need to maintain the limited memory M rather than X; 2) reasoning efficiency: inference over M and Q is more lightweight than inference over X and Q from scratch ; 3) high reusability: the maintained memory M can be reused for any query Q.
+However, existing MANNs have two serious drawbacks for memory-based long-sequence reasoning. First, these approaches ignore the long-term memorization ability of the memory. They learn how to maintain the memory M only
+
+Learning to Rehearse in Long Sequence Memorization
+
+by back-propagated losses to the final answer and do not design any specific training target for long-term memorization, which inevitably lead to the gradual forgetting of early contents (Le et al., 2019a). That is, when dealing with the long input sequences, these approaches may fail to answer the query relevant to early contents due to the lack of long-term memorization. Second, determining what to remember in the memory with limited capacity is crucial to retain sufficient clues for subsequent Q. This is especially challenging since the information compression procedure in M is totally not aware of Q. But existing MANNs do not distinguish what information is important and treat all contents equally. Thus, due to lack of information discrimination, these approaches may store too much meaningless information but lose vital evidence for subsequent reasoning.
+In this paper, we propose the Rehearsal Memory (RM) to enhance long-sequence memorization by self-supervised rehearsal with a history sampler. To overcome gradual forgetting of early information and increase the generalization ability of the memorization technique, we develop two extra self-supervised rehearsal tasks to recall the recorded history contents from the memory. The two tasks are inspired by the observation that human beings can recall details nearby some specific events and distinguish whether a series of events happened in the history, which respectively correspond to two different memory processes revealed in cognitive, neuropsychological, and neuroimaging studies, i.e., recollection and familiarity (Yonelinas, 2002; Moscovitch et al., 2016). Concretely, the recollection task aims to predict the masked items in history fragments H, which are sampled from the original input stream and parts of items are masked as the prediction target. This task tries to endow the memory with the recollection ability that enables one to relive past episodes. And the familiarity task tries to distinguish whether a historical fragment H ever appears in the input stream, where we directly sample positive fragments from the input stream and replace parts of the items in positive ones as negative fragments. This task resembles the familiarity process that recognizes experienced events or stimulus as familiar.
+To make the rehearsal memory have the ability of remembering the crucial information, we further train an independent history sampler to select informative fragments H for selfsupervised rehearsal training. Similar to the teacher-student architecture in knowledge distillation (Hinton et al., 2015), we expect the history sampler (i.e. the teacher) to capture the characteristic of important fragments in the current environment and guide the rehearsal memory (i.e. the student) to remember task-relevant clues. Concretely, we independently train a conventional reasoning model that can access raw contents X while answering the query Q as the history sampler. The model contains the attention interaction between history fragments H and the query Q, where the attention
+
+weight can be regarded as the importance of each fragment. After training, the history sampler can select the vital fragments based on the attention weights for self-supervised rehearsal training. This is similar to the procedure where human beings learn to memorize meaningful experiences, i.e., we have gone through a lot of tasks to slowly understand which information is likely to be used in future tasks and pay more attention to them during memorization (Moscovitch et al., 2016).
+In conclusion, we propose the self-supervised memory rehearsal to enhance the long-sequence memorization for subsequent reasoning. We design the self-supervised recollection and familiarity tasks to solve how to rehearse, which can alleviate the gradual forgetting of early information. Further, we adopt a history sampler to decide what to rehearse, which guides the memory to remember critical information. We illustrate the ability of our rehearsal memory via the synthetic bAbI task and several downstream tasks, including text/video question answering and recommendation on long sequences.
+2. Related Works
+Memory augmented neural networks (MANNs) introduce the external memory to store and access the past contents by differentiable write-read operators. Neural Turing Machine (NTM) (Graves et al., 2014) and Differentiable Neural Computer (DNC) (Graves et al., 2016) are the typical MANNs for human-like memorization and reasoning, whose inferences rely only on the memory with limited capacity rather than starting from the original input. In this line of research, Rae et al. (2016) adopt the sparse memory accessing to reduce computational cost. Csorda´s & Schmidhuber (2019) introduce the key/value separation problem of content-based addressing and adopt a mask for memory operations as a solution. Le et al. (2019b) manipulate both data and programs stored in memory to perform universal computations. And Santoro et al. (2018); Le et al. (2020a) consider the complex relational reasoning with the information they remember.
+However, these works exploit MANNs mainly to help capture complex dependencies in dealing with input sequences, but do not explore the potential of MANNs in the field of memory-based long-sequence reasoning. They learn how to maintain the memory only by back-propagated losses to the final answer but do not design specific training target for long-term memorization, inevitably incurring gradual forgetting of early contents during memorizing long sequences (Le et al., 2019a). Recently, there are a few works trying to alleviate this problem. Le et al. (2019a) propose to measure "remember" ability by the final gradient on the early input, and adopt a uniform writing operation on the memory to balance between maximizing memorization and forgetting. Munkhdalai et al. (2019) design the meta-learned
+
+Learning to Rehearse in Long Sequence Memorization
+
+neural memory instead of the conventional array-structured memory and memorize the current and past information by reconstructing the written values via the memory function. Besides, Compressive Transformer (Rae et al., 2019) maps the past memory to a smaller compressed memory for long-range sequence learning, where the compressed memory preserves much original information by a high compression rate. But considering the compressed memory is implemented by a FIFO queue, it will completely forget the contents beyond a fixed range.
+Our approach is different and parallel to these techniques, we try to enhance long-sequence memorization by selfsupervised memory rehearsal, i.e., recall the recorded history contents from the memory to overcome gradual forgetting of early information. We design the recollection task to enable the memory to relive past episodes and adopt the familiarity task to make the memory recognize experienced events. A recent work (Park et al., 2020) also introduces a self-supervised memory loss to ensure how well the current input is written to the memory, but it only focuses on remembering the current information and ignoring the long-term memorization. Further, compared to previous techniques that have no assumptions on what behavior will be remembered the most, we propose a history sampler to distinguish the characteristic of important fragments in the current environment and guide the memory rehearsal to remember task-relevant clues.
+3. Rehearsal Memory
+3.1. Problem Formulation
+Given the input stream X = {x1, x2, · · · } and a query Q, the directly reasoning methods (Seo et al., 2016; Le et al., 2020b) learn the model T (X, Q) to predict the answer A. These is an important assumption that the input stream X can be always accessed while reasoning. And complex interaction between X and Q can be designed to extract query-relevant information in T (X, Q). Obviously, these methods have to store the original input X and infer the answer A from scratch when the query Q is known. In this paper, we explore the human-like memory-based reasoning on long sequences, where we compress the input stream X into a fixed-size memory M = {mk}Kk=1 with K memory slots and then infer the answer A for any relevant query Q by A = R(M, Q). Here we only need to store the compressed memory M, which can be updated in real-time and reused for a series of queries. Since the slot number K in the memory is irrelevant to the input length |X|, this setting only requires O(1) storage space rather than O(|X|) in directly reasoning model T (X, Q).
+As shown in Figure 1, we apply a rehearsal memory machine G(X) to compress the input stream X into rehearsal
+
+memory M = {mk}Kk=1 with K memory slots. During the training stage, we simultaneously develop self-supervised rehearsal training and task-specific reasoning training based on the memory M . For self-supervised rehearsal training, we develop a rehearsal model H(M, H) to reconstruct the masked history fragments (recollection task) and distinguish positive history fragments from negative ones (familiarity task), where H means the critical history fragments that are selected by the history sampler S(Q, X). For taskspecific reasoning training, we develop the task-specific reason model R(M, Q) to answer the given query Q. During the testing stage, we maintain the rehearsal memory M = G(X) from the stream X and then infer the answer A for any relevant query Q by A = R(M, Q), where the rehearsal model H(M, H) and the history sampler S(Q, X) are no longer needed.
+
+3.2. Rehearsal Memory Machine
+We deal with the input stream X from the segment level rather than item level, i.e., we cut the input sequence into fixed-length segments and memorize them into the rehearsal memory segment-by-segment. Compared to existing MANNs (Graves et al., 2014; 2016), which store the input stream item-by-item orderly with a RNN-based controller, our segment-level memorization can further capture the bidirectional context of each item and improve the modeling efficiency. We denote the t-th segment as Xt = {xtn}Nn=1 with N items and the current memory as Mt = {mtk}Kk=1, where we have recorded t-1 segments in Mt. The xtn and mtk have the same dimension dx.
+We first model the t-th segment by a Transformer encoder (Vaswani et al., 2017) and obtain the sequence features Ft = {fnt }Nn=1 with dimension dx. After it, we apply a memory update module to write Ft into Mt. We apply a slot-to-item attention to align the sequence features to slot features in the current memory Mt, and then develop the gate-based update. Concretely, we first calculate the slot-to-item attention matrix where each element means the relevance of a slot-item pair, and then learn aligned features Lt = {ltk}Kk=1 for each slot, given by
+
+kt n = wa tanh(W1amtk + W2afnt + ba),
+
+^kt n =
+
+exp(kt n)
+
+K j=1
+
+exp(jt n )
+
+,
+
+ltk
+
+=
+
+N
+^kt nfnt ,
+n=1
+
+(1)
+
+where W1a  Rdmodel×dx , W2a  Rdmodel×dx and ba  Rdmodel are the projection matrices and bias. wa is the row vector. Next, the k-th slot feature mtk is updated with its aligned feature ltk based on a GRU unit with dx-d hidden states, given by
+
+mtk+1 = GRU(mtk, ltk),
+
+(2)
+
+Learning to Rehearse in Long Sequence Memorization
+
+... ...
+
+x! x# x(
+Input Stream X
+
+Rehearsal Memory Machine
+
+m! m#
+m%
+Rehearsal Memory M
+
+Self-Supervised Rehearsal Training
+Task-Specific Reasoning Training
+
+f!"
+
+f#"
+
+......
+
+f$"
+
+m!"&!
+
+M!"#
+m#"&! ... ... m%"&!
+
+Transformer Encoder
+
+Memory Update Module
+
+x!"
+
+x#"
+
+......
+
+x$"
+
+the t-th segment X!
+
+m!"
+
+m#" ... ... m%"
+
+rehearsal memory M! at the t-th step
+
+Rehearsal Memory Machine
+
+Recollection Loss
+
+Familiarity Loss
+
+r[&*/+,/] r!&// r[&0//!] ... r$&//
+
+Rehearsal Memory
+M
+
+Bi-Directional Transformer Decoder
+
+h[&*/+,/] h!&// h[&0//!] ... h$&//
+masked history fragment
+Self-Supervised Rehearsal Training
+
+Figure 1. The Framework of Rehearsal Memory and Self-Supervised Rehearsal Training.
+
+where ltk is the current input of the GRU unit and mtk is the hidden state at the t-th step. And mtk+1 is the new slot feature after the gate-based update. After memorizing T segments, we can obtain rehearsal memory MT +1 and we denote it by M for convenience.
+3.3. Self-Supervised Rehearsal Training
+Based on the maintained memory M , we apply the memory rehearsal technique to enhance long-sequence memorization. We first design the self-supervised recollection and familiarity tasks to solve how to rehearse, which can alleviate the gradual forgetting of early information. We next adopt a history sampler to decide what to rehearse, which guides the memory to remember critical task-relevant clues.
+3.3.1. HOW TO REHEARSE: SELF-SUPERVISED RECOLLECTION AND FAMILIARITY TASKS
+We design the rehearsal model H(M, H) with recollection and familiarity tasks. The recollection task reconstructs the masked positive history fragments to enable the memory to relive past episodes. And the familiarity task tries to distinguish positive history fragments from negative ones for making the memory recognize experienced events.
+First, we apply an independent history sampler to select the B segments from the input stream as the history fragment set H = {Hb}Bb=1, which is illustrated in the next
+
+section. Each fragment Hb = {hb1, hb2, · · · , hbN } contains N items and each item h corresponds to a feature x. For the b-th fragment, we randomly mask 50% of items in the fragment and add an especial item [cls] at
+the beginning to obtain the masked positive history fragment Hb+ = {hb[c+ls], hb1+, hb[m+1], · · · , hbN+}, where hb[m+1] means the first masked item. In order to guarantee that the model H(M, H) reconstructs the masked fragment by utilizing the maintained memory M rather than only re-
+lying on fragment context, we set the mask ratio to 50%
+instead of 15% in BERT (Devlin et al., 2019). More-
+over, we construct the masked negative history fragment Hb- = {hb[c-ls], hb1-, hb[m-1], · · · , hbN-} by replacing 50% of unmasked items in the positive fragment, where the replace-
+ment items are sampled from other input stream to make the
+negative fragment distinguishable. Here we construct the positive fragment set H+ = {Hb+}Bb=1 and corresponding negative fragment set H- = {Hb-}Bb=1 from the original fragment set H. Next, we adopt a bidirectional Trans-
+former decoder (Vaswani et al., 2017) without the future masking to model each history fragment Hb+/Hb-. In the
+decoder, each history item can interact with all other items in the fragment. The rehearsal memory M is input to the
+"encoder-decoder multi-head attention sub-layer" in each
+decoder layer, where the queries come from the previous
+decoder layer and the memory slots are regarded as the keys
+and values. This allows each item in the decoder to attend over all slot features in the memory M . Finally, we obtain
+
+Learning to Rehearse in Long Sequence Memorization
+
+the features {rb[c+ls/]b-, rb1+/b-, rb[m+1/]b-, · · · , rbN+/b-} where each rb+/b- has the dimension dx.
+
+Recollection Task. We first predict the masked items of positive history fragments to build the item-level reconstruction for the recollection task. Considering there are too many item types, we apply the contrastive training (He et al., 2020; Chen et al., 2020; Zhang et al., 2020) based on the ground truth and other sampled items. For the N/2 masked items, we compute the recollection loss for the b-th fragment by
+
+Lbi
+
+=
+
+log exp(rb[m+i]
+
+·
+
+exp(rb[m+i] · yi)
+
+yi) +
+
+J j=1
+
+exp(rb[m+i]
+
+·
+
+, yj )
+
+(3)
+
+N/2
+
+Lbrec
+
+=
+
+2 -
+N
+
+Lbi
+
+i=1
+
+where yi  Rdx is the feature of ground truth of the i-th
+masked item, yj  Rdx is the feature of sampled items and rb[m+i] · y is the inner product of two features.
+
+Familiarity Task. Next, we predict whether the masked
+
+history fragment ever appears in the current input stream, i.e.
+
+distinguish positive history fragments from negative ones.
+
+This training objective makes the memory learn the ability
+
+of recognizing experienced events. Concretely, we project each feature rb[c+ls/]b- into a confident score sb+/b-  (0, 1) by a linear layer with the sigmoid activation, and calculate
+the familiarity loss by
+
+Lbfam = -log(sb+) + log(1 - sb-),
+
+(4)
+
+where Lbfam is the familiarity loss for the b-th pair of positive and negative fragments in H+/H-.
+
+3.3.2. WHAT TO REHEARSE: HISTORY SAMPLER
+
+raw contents X while answering the query Q. We first cut the entire input X into C history fragments {Hc}Cc=1 just like the rehearsal memory machine, where each fragment
+contains N items. Next, we obtain the fragment features {hc}Cc=1 by averaging the item features in each fragment. After it, we develop the attention-based reasoning for the
+query Q on these fragment features. The query feature q  Rdmodel is modeled by the task-specific encoder in dif-
+ferent downstream tasks, which is introduced in Section A
+of the supplementary material. Given the query feature q and fragment features {hc}Cc=1, we conduct the attention method to aggregate query-relevant clues from fragments,
+given by
+
+c = wh tanh(W1hq + W2hhc + bh),
+
+^c =
+
+exp(c)
+
+C j=1
+
+exp(j
+
+)
+
+,
+
+e
+
+=
+
+C
+^chc,
+c=1
+
+(5)
+
+where W1h  Rdmodel×dmodel , W2h  Rdmodel×dx and bh  Rdmodel are the projection matrices and bias. And wh is the row vector. We then obtain the reasoning feature a = [e; q] by concatenating the query and query-relevant
+fragment features, and design the final reasoning layer for
+different tasks, shown in Section A of the supplementary
+material. After independent training, the attention weights {c}Cc=1 can be regarded as the importance score of each fragment for the query Q. Thus, we can sample the vital his-
+tory fragments with high attention weights for each (X, Q)
+pair. Specifically, to guarantee the sampled fragments ap-
+pear in the entire input stream, we select B/2 fragments from {Hc}Cc=/12 with large weights and choose another B/2 fragments from {Hc}Cc=C/2 to constitute the fragment set H = {Hb}Bb=1. The final recollection loss Lrec and familiarity loss Lfam are computed by
+
+Existing MANNs (Graves et al., 2014; 2016) often have no assumptions on what information needs to be remembered the most. But due to the limited capacity of the memory, it is crucial to distinguish what contents are important for subsequent inference and pay more attention to them during memorization. Thus, we further train a history sampler S(Q, X) to select informative history fragments H for self-supervised rehearsal training, which is independent to the memory machine M = G(X). In knowledge distillation (Hinton et al., 2015), the teacher model can access the privileged information and transfer the knowledge to the student model. Similar to it, our history sampler, which is the teacher and can access raw contents X while answering the query Q, learns the ability of distinguishing task-relevant important fragments and guides the rehearsal memory (i.e., the student) to remember critical clues.
+Concretely, we independently train a directly reasoning model as the history sampler S(Q, X), which can access
+
+Lrec = EbS [Lbrec], Lfam = EbS [Lbfam]. (6)
+
+3.4. Task-Specific Reasoning Training
+Besides self-supervised rehearsal training, we simultaneously develop task-specific reasoning training. For several downstream tasks, we propose different task-specific reason model R(M, Q) based on the memory M. Here we adopt the simple and mature components in the reason model for a fair comparison. The details are introduced in Section A of the supplementary material. Briefly, we first learn the query representation q by a task-specific encoder and then perform the multi-hop attention-based reasoning. Finally, we obtain the reason loss Lr from R(M, Q).
+Eventually, we combine the rehearsal and reason losses to train our model, given by
+
+Lrm = 1Lrec + 2Lfam + 3Lr,
+
+(7)
+
+Learning to Rehearse in Long Sequence Memorization
+
+where 1, 2 and 3 are applied to adjust the balance of three losses.
+4. Experiments
+In this section, we first verify our rehearsal memory on the widely-used short-sequence reasoning task bAbI. Next, we mainly compare our approach with diverse baselines on several long-sequence reasoning tasks. We then perform ablation studies on the memory rehearsal techniques and analyze the impact of crucial hyper-parameters.
+
+Table 1. Performance Comparisons for Synthetical bAbI Task: mean ± std. and best error over 10 runs.
+
+Method mean ± std error best error
+
+DNC
+
+16.7 ± 7.6
+
+3.8
+
+NUTM
+
+5.6 ± 1.9
+
+3.3
+
+DMSDNC 1.53 ± 1.33
+
+0.16
+
+STM
+
+0.39 ± 0.18
+
+0.15
+
+CT
+
+0.81 ± 0.26
+
+0.34
+
+RM
+
+0.33 ± 0.15
+
+0.12
+
+4.1. Experiment Setting
+Model Setting. We first introduce the common model settings for all downstream tasks. We set the layer number of the Transformer encoder and bi-directional Transformer decoder to 3. The head number in Multi-Head Attention is set to 4. We set 1, 2 and 3 to 1.0, 0.5 and 1.0, respectively. The number B of history fragments is set to 6. During training, we apply an Adam optimizer (Duchi et al., 2011) to minimize the multi-task loss Lrm, where the initial learning rate is set to 0.001.
+Baseline. We compare our rehearsal memory with the directly reasoning methods and the memory-based reasoning approaches. The directly reasoning baselines are different in downstream tasks and the memory-based baselines mainly are DNC (Graves et al., 2016), NUTM (Le et al., 2019b), DMSDNC (Park et al., 2020), STM (Le et al., 2020a) and Compressive Transformer (CT) (Rae et al., 2019). For a fair comparison, we modify the reasoning module of memorybased baselines to be consistent with our rehearsal memory, i.e. we conduct multi-hop attention-based reasoning based on the built memory. And the number of memory slots in these baselines is also set to K. Besides, we set the core number of NUTM to 4, the query number of STM to 8 and the memory block number of DMSDNC to 2. As for CT, the layer number of the Transformer is set to 3 as our rehearsal memory and the compression rate is set 5.
+4.2. Rehearsal Memory on Short-Sequence Reasoning
+The bAbI dataset (Weston et al., 2015) is a synthetic text question answering benchmark and widely applied to evaluate the memorization and reasoning performance of MANNs. This dataset contains 20 reasoning tasks and requires to be solved with one common model. Although most of these tasks only give short-sequence text input (less than 100 words) and existing methods (Park et al., 2020; Le et al., 2020a) have solved these tasks well, we still compare our rehearsal memory with other memory-based baselines to verify the short-sequence reasoning performance. We set the dx and dmodel to 128. The number K of memory slots is set to 20. And we naturally take each sentence in input
+
+texts as a segment and the maximum length N of segments is set to 15. Due to limited word types in this dataset, we sample all other words as negative items in Lrec.
+The results are summarized in Table 1. The RM model solves these bAbI tasks with near-zero error and outperforms existing baselines at the mean and best error rate of 10 runs, verifying that our RM method can conduct effective memorization and reasoning on short-sequence tasks. In these methods, DNC, NUTM and DMSDNC model the input contents word-by-word. STM processes input texts as a sentence-level sequence. And CT and RM methods cut the input texts into sentences for modeling. From the results, we can find STM, CT and RM achieve lower error rates than other baselines, suggesting the importance of sentencelevel modeling. Considering the bAbI tasks are close to being solved, we design another difficult synthetic task in Section B of the supplementary material to evaluate our RM model.
+4.3. Rehearsal Memory on Long-Sequence Reasoning
+We then compare our approach with diverse baselines on several long-sequence reasoning tasks.
+4.3.1. LONG-SEQUENCE TEXT QUESTION ANSWERING
+We apply the NarrativeQA dataset (Kocisky` et al., 2018) with long input contents for long-sequence text question answering. This dataset contains 1,572 stories and corresponding summaries generated by humans, where each summary contains more than 600 tokens on average. And there are 46,765 questions in total. We adopt the multi-choice form to answer the given question based on a summary, where other answers for questions associated with the same summary are regarded as answer candidates. We compute the mean reciprocal rank (MRR) as the metric, i.e., the rank of the correct answer among candidates. Besides the memory-based methods, we adopt directly reasoning model AS Reader (Kadlec et al., 2016) and E2E-MN (Sukhbaatar et al., 2015) as baselines. The AS Reader applies a pointer network to generate the answer and E2E-MN employs the end-to-end memory
+
+Learning to Rehearse in Long Sequence Memorization
+
+Table 2. Performance Comparisons for Long-Sequence Text Question Answering on NarrativeQA.
+
+Method
+AS Reader E2E-MN
+
+Setting
+Directly Directly
+
+Val MRR
+26.9 29.1
+
+Test MRR
+25.9 28.6
+
+DNC Memory-Based 25.8
+
+25.2
+
+NUTM Memory-Based 27.7
+
+27.2
+
+DMSDNC Memory-Based 28.1
+
+27.5
+
+STM Memory-Based 27.2
+
+26.7
+
+CT
+
+Memory-Based 28.7
+
+28.3
+
+RM
+
+Memory-Based 29.4
+
+28.7
+
+network to conduct multi-hop reasoning. For our rehearsal memory, we set the dx and dmodel to 256. The number K of memory slots is set to 20. We naturally take each sentence in summaries as a segment and the maximum length N of segments is set to 20. And we sample all other words as negative items in Lrec.
+We report the results in Table 2. Our RM method obtains the best performance among memory-based approaches, which demonstrates our self-supervised rehearsal training with the history sampler can effectively enhance long-sequence memorization and reasoning. Further, the RM model slightly outperforms early directly reasoning methods AS Reader and E2E-MN, showing the ability of efficient reasoning on long sequences with limited storage resources.
+
+Table 3. Performance Comparisons for Long-Term Video Question Answering on ActivityNet-QA.
+
+Method
+E-VQA E-MN E-SA HCRN
+
+Setting
+Directly Directly Directly Directly
+
+Accuracy
+25.2 27.9 31.8 37.6
+
+DNC Memory-Based 30.3
+
+NUTM Memory-Based 33.1
+
+DMSDNC Memory-Based 32.4
+
+STM Memory-Based 33.7
+
+CT
+
+Memory-Based 35.4
+
+RM Memory-Based 36.3
+
+Table 4. Performance Comparisons for Lifelong Sequence Recommendation on XLong.
+
+Method
+GRU4REC Caser RUM DIEN
+
+Setting
+Directly Directly Directly Directly
+
+AUC
+0.8702 0.8390 0.8649 0.8793
+
+HPMN MIMN
+RM
+
+Memory-Based Memory-Based
+Memory-Based
+
+0.8645 0.8731
+0.8817
+
+4.3.2. LONG-SEQUENCE VIDEO QUESTION ANSWERING
+The ActivityNet-QA dataset (Yu et al., 2019) contains 5,800 videos from the ActivityNet (Caba Heilbron et al., 2015). The average video duration of this dataset is about 180s and is the longest in VQA datasets. We compare our method with four directly reasoning baselines, including three basic models E-VQA, E-MN, E-SA from (Yu et al., 2019) and the SOTA model HCRN (Le et al., 2020b). For our rehearsal memory, we set the dx and dmodel to 256. The number K of memory slots and length N of segments are both set to 20. And in Lrec, we select 30 other frame features from the video as the sampled items.
+As shown in Table 3, the RM method obtains a better performance than other memory-based baselines. Compared to the best baseline CT, our RM model further achieves the 0.9% absolute improvement, showing the effectiveness of our model designs and self-supervised rehearsal training. Moreover, the RM method outperforms the basic directly reasoning baselines E-VQA, E-MN and E-SA, but slightly worse than the SOTA method HCRN. This suggests our rehearsal memory can reduce the gap between memory-based and directly reasoning paradigms.
+
+4.3.3. LIFELONG SEQUENCE RECOMMENDATION
+The lifelong sequence recommendation (Ren et al., 2019) aims to predict whether the user will click a given item based on long sequences, thus it can be regarded as a longsequence reasoning task. The XLong dataset (Ren et al., 2019) is sampled from the click logs on Alibaba. The length of historical behavior sequences in this dataset is 1000. We compare our method with four directly reasoning methods GRU4REC (Hidasi et al., 2015), Caser (Tang & Wang, 2018), DIEN (Zhou et al., 2019), RUM (Chen et al., 2018) and two memory-based methods HPMN (Ren et al., 2019) and MIMN (Pi et al., 2019), where the HPMN method builds the memory by hierarchical RNNs and the MIMN method introduces a write-read memory as in (Graves et al., 2014). For our rehearsal memory, we set the dx and dmodel to 64. The number K of memory slots and length N of segments are both set to 20. And in Lrec, we select 200 items from the large item set as the sampled items.
+The results are shown in Table 4. our RM method not only outperforms other memory-based approaches, but also achieves better performance than directly reasoning base-
+
+Learning to Rehearse in Long Sequence Memorization
+
+MRR
+Acc
+Acc
+
+Table 5. Ablation Results about the Rehearsal Losses and History Sampler.
+
+Method
+
+NarrativeQA ActNet-QA XLong
+
+Val Test
+
+Acc.
+
+AUC
+
+w/o. rehearsal 27.9 27.5
+
+only Lrec
+
+29.2 28.6
+
+only Lfam 28.6 28.1
+
+random sampler 28.7 28.3
+
+24.6
+
+0.8745
+
+36.0
+
+0.8802
+
+35.4
+
+0.8776
+
+35.7
+
+0.8813
+
+Full
+
+29.4 28.7
+
+36.3
+
+0.8817
+
+30
+
+28
+
+26
+
+24
+
+STM
+
+22
+
+CT
+
+RM
+
+20
+
+10
+
+15
+
+20
+
+25
+
+Memory Slot Number K
+
+(a) NarrativeQA
+
+38
+
+36
+
+34
+
+32
+
+STM
+
+30
+
+CT
+
+RM
+
+28
+
+10
+
+15
+
+20
+
+25
+
+Memory Slot Number K
+
+(b) ActivityNet-QA
+
+Figure 2. Effect of the Memory Slot Number K.
+
+36.5
+
+Table 6. Ablation Results about the Transformer Encoder and Mask
+
+Ratio.
+
+36
+
+Method
+
+NarrativeQA ActNet-QA XLong
+
+35.5
+
+Val Test
+
+Acc.
+
+AUC
+
+GRU Encoder 29.1 28.3 15% Mask Ratio 29.0 28.5
+
+Full
+
+29.4 28.7
+
+35.9
+
+0.8789
+
+36.0
+
+0.8809
+
+36.3
+
+0.8817
+
+lines. This is because our rehearsal memory can aggregate and organize the long-term interests from user behavior sequences and these interests can be activated during nextitem prediction. But the directly reasoning approaches may fail to learn such informative interest representations.
+4.4. Ablation Study for Self-Supervised Rehearsal
+We next perform ablation studies on the self-supervised rehearsal losses and history sampler. Concretely, we first completely discard the self-supervised rehearsal training to produce the ablation model RM (w/o. rehearsal). We then remove the recollection or familiarity loss to produce two ablation models RM (only Lfam) and RM (only Lrec), where the history sampler is still retained. Next, we replace the independent history sampler with a random sampler to generate the ablation model RM (random sampler), which randomly selects B history fragments from the input stream for rehearsal training.
+We conduct the ablation experiments on NarrativeQA, ActivityNet-QA and XLong datasets. The results are reported in Table 5. We can find the full model outperforms the model RM (w/o. rehearsal), demonstrating the selfsupervised rehearsal training with the history sampler can further boost the long-sequence memorization and reasoning ability of rehearsal memory. Further, the full model has better performance than RM (only Lfam) and RM (only Lrec) on all metrics, which illustrates two rehearsal tasks are both helpful for alleviating the issue of gradual forgetting. And RM (only Lrec) achieves better results than RM
+
+35
+
+RM
+
+10
+
+15
+
+20
+
+25
+
+30
+
+Segment Length N
+
+Figure 3. Effect of the Segment Length N on the ActivityNet-QA dataset.
+
+(only Lfam), showing the recollection task that enables the memory to relive past episode is more important for rehearsal training. Moreover, the ablation model RM (random sampler) has the performance degradation than the full model. This fact indicates it is critical to select informative history fragments for rehearsal training. By the guidance of the history sampler, the rehearsal memory can remember task-relevant clues for subsequent reasoning.
+4.5. Ablation Study for Model Setting
+In this section, we conduct ablation study aboout the model settings. Existing MANNs often use a RNN as their controller, but we apply a Transformer encoder to improve the sequential modeling ability of RM. Thus, we replace the Transformer encoder in the rehearsal memory machine with a bi-directional GRU encoder. As shown in Table 6, the full model achieves better performance than the model with the GRU Encoder, verifying the effectiveness of the Transformer encoder.
+For the masked history fragments, we set the mask ratio to 50% instead of 15% in BERT. We compare the results of two mask ratios in Table 6. We can find the full model with the 50% mask ratio outperforms the one with the 15% mask ratio. This fact suggests that the large mask ratio makes the rehearsal model H(M, H) utilize the maintained memory M than only relying on fragment context, and is beneficial for the self-supervised rehearsal training of RM.
+
+Learning to Rehearse in Long Sequence Memorization
+
+4.6. Hyper-Parameters Analysis
+We then explore the effect of two crucial hyper-parameters: the memory slot number K and the segment length N . We first set the slot number K to [10, 15, 20, 25] and compare our RM method with two baselines STM and CT on the NarrativeQA and ActivityNet-QA datasets. We display the results in Figure 2. We note that the performance of all three methods gradually improves with the increase of slot number and slowly reaches the bottleneck. When the number of memory slots exceeds 20, more slots can not bring much improvement. By comparison, we can find our RM method achieves the best performance on different slot numbers, verifying the effectiveness and stability of our rehearsal memory. Moreover, the performance of CT is terrible when the slot number is too few. This is because the CT method implements the compressed memory by a FIFO queue and completely forgets the contents beyond the queue, i.e., its memorization range severely depends on the slot number.
+We then set the segment length N to [10, 15, 20, 25, 30] and report the results on the ActivityNet-QA dataset in Figure 3. We can find that when the segment length is set to 10, the RM method achieves poor results and the performance is relatively stable when the segment length changes between 20 and 30. This is because when the segment is too short, important evidence may be scattered in different segments, and the model cannot effectively capture the evidence and infer the answer.
+5. Conclusions
+In this paper, we propose the self-supervised rehearsal to enhance long-sequence memorization. We design the selfsupervised recollection and familiarity tasks to alleviate the gradual forgetting of early information. Further, we adopt a history sampler to guide the memory to remember critical information. Extensive experiments on a series of downstream tasks verify the performance of our method. For future work, we will further explore the property of rehearsal memory.
+Acknowledgments
+This work is supported by the National Key R&D Program of China under Grant No. 2018AAA0100603. This research is supported by the National Natural Science Foundation of China under Grant No.61836002 and No.62072397, and the Zhejiang Natural Science Foundation LR19F020006.
+References
+Baddeley, A. Working memory. Science, 255(5044):556­ 559, 1992.
+
+Caba Heilbron, F., Escorcia, V., Ghanem, B., and Carlos Niebles, J. Activitynet: A large-scale video benchmark for human activity understanding. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 961­970, 2015.
+Chen, T., Kornblith, S., Norouzi, M., and Hinton, G. A simple framework for contrastive learning of visual representations. arXiv preprint arXiv:2002.05709, 2020.
+Chen, X., Xu, H., Zhang, Y., Tang, J., Cao, Y., Qin, Z., and Zha, H. Sequential recommendation with user memory networks. In Proceedings of the eleventh ACM international conference on web search and data mining, pp. 108­116, 2018.
+Csorda´s, R. and Schmidhuber, J. Improving differentiable neural computers through memory masking, deallocation, and link distribution sharpness control. arXiv preprint arXiv:1904.10278, 2019.
+Devlin, J., Chang, M.-W., Lee, K., and Toutanova, K. Bert: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of the Conference on The North American Chapter of the Association for Computational Linguistics, 2019.
+Duchi, J., Hazan, E., and Singer, Y. Adaptive subgradient methods for online learning and stochastic optimization. Journal of Machine Learning Research, 12(Jul):2121­ 2159, 2011.
+Graves, A., Wayne, G., and Danihelka, I. Neural turing machines. arXiv preprint arXiv:1410.5401, 2014.
+Graves, A., Wayne, G., Reynolds, M., Harley, T., Danihelka, I., Grabska-Barwin´ska, A., Colmenarejo, S. G., Grefenstette, E., Ramalho, T., Agapiou, J., et al. Hybrid computing using a neural network with dynamic external memory. Nature, 538(7626):471­476, 2016.
+He, K., Fan, H., Wu, Y., Xie, S., and Girshick, R. Momentum contrast for unsupervised visual representation learning. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 2020.
+Hidasi, B., Karatzoglou, A., Baltrunas, L., and Tikk, D. Session-based recommendations with recurrent neural networks. arXiv preprint arXiv:1511.06939, 2015.
+Hinton, G., Vinyals, O., and Dean, J. Distilling the knowledge in a neural network. arXiv preprint arXiv:1503.02531, 2015.
+Jin, W., Zhao, Z., Gu, M., Yu, J., Xiao, J., and Zhuang, Y. Multi-interaction network with object relation for video question answering. In Proceedings of the ACM International Conference on Multimedia, pp. 1193­1201, 2019a.
+
+Learning to Rehearse in Long Sequence Memorization
+
+Jin, W., Zhao, Z., Gu, M., Yu, J., Xiao, J., and Zhuang, Y. Video dialog via multi-grained convolutional selfattention context networks. In Proceedings of the International ACM SIGIR Conference on Research and Development in Information Retrieval, pp. 465­474, 2019b.
+Kadlec, R., Schmid, M., Bajgar, O., and Kleindienst, J. Text understanding with the attention sum reader network. arXiv preprint arXiv:1603.01547, 2016.
+Kocisky`, T., Schwarz, J., Blunsom, P., Dyer, C., Hermann, K. M., Melis, G., and Grefenstette, E. The narrativeqa reading comprehension challenge. Transactions of the Association for Computational Linguistics, 6:317­328, 2018.
+Le, H., Tran, T., and Venkatesh, S. Learning to remember more with less memorization. arXiv preprint arXiv:1901.01347, 2019a.
+Le, H., Tran, T., and Venkatesh, S. Neural stored-program memory. arXiv preprint arXiv:1906.08862, 2019b.
+Le, H., Tran, T., and Venkatesh, S. Self-attentive associative memory. arXiv preprint arXiv:2002.03519, 2020a.
+Le, T. M., Le, V., Venkatesh, S., and Tran, T. Hierarchical conditional relation networks for video question answering. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 9972­9981, 2020b.
+Moscovitch, M., Cabeza, R., Winocur, G., and Nadel, L. Episodic memory and beyond: the hippocampus and neocortex in transformation. Annual review of psychology, 67:105­134, 2016.
+Munkhdalai, T., Sordoni, A., Wang, T., and Trischler, A. Metalearned neural memory. In Advances in Neural Information Processing Systems, pp. 13331­13342, 2019.
+Park, T., Choi, I., and Lee, M. Distributed memory based self-supervised differentiable neural computer. arXiv preprint arXiv:2007.10637, 2020.
+Pi, Q., Bian, W., Zhou, G., Zhu, X., and Gai, K. Practice on long sequential user behavior modeling for click-through rate prediction. In Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining, pp. 2671­2679, 2019.
+Rae, J., Hunt, J. J., Danihelka, I., Harley, T., Senior, A. W., Wayne, G., Graves, A., and Lillicrap, T. Scaling memoryaugmented neural networks with sparse reads and writes. In Advances in Neural Information Processing Systems, pp. 3621­3629, 2016.
+Rae, J. W., Potapenko, A., Jayakumar, S. M., and Lillicrap, T. P. Compressive transformers for long-range sequence modelling. arXiv preprint arXiv:1911.05507, 2019.
+
+Ren, K., Qin, J., Fang, Y., Zhang, W., Zheng, L., Bian, W., Zhou, G., Xu, J., Yu, Y., Zhu, X., et al. Lifelong sequential modeling with personalized memorization for user response prediction. In Proceedings of the International ACM SIGIR Conference on Research and Development in Information Retrieval, pp. 565­574, 2019.
+Santoro, A., Faulkner, R., Raposo, D., Rae, J., Chrzanowski, M., Weber, T., Wierstra, D., Vinyals, O., Pascanu, R., and Lillicrap, T. Relational recurrent neural networks. In Advances in neural information processing systems, pp. 7299­7310, 2018.
+Seo, M., Kembhavi, A., Farhadi, A., and Hajishirzi, H. Bidirectional attention flow for machine comprehension. arXiv preprint arXiv:1611.01603, 2016.
+Sukhbaatar, S., Weston, J., Fergus, R., et al. End-to-end memory networks. In Advances in Neural Information Processing Systems, pp. 2440­2448, 2015.
+Tang, J. and Wang, K. Personalized top-n sequential recommendation via convolutional sequence embedding. In Proceedings of the Eleventh ACM International Conference on Web Search and Data Mining, pp. 565­573, 2018.
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L., and Polosukhin, I. Attention is all you need. In Advances in Neural Information Processing Systems, pp. 5998­6008, 2017.
+Weston, J., Bordes, A., Chopra, S., Rush, A. M., van Merrie¨nboer, B., Joulin, A., and Mikolov, T. Towards ai-complete question answering: A set of prerequisite toy tasks. arXiv preprint arXiv:1502.05698, 2015.
+Xiong, C., Zhong, V., and Socher, R. Dynamic coattention networks for question answering. arXiv preprint arXiv:1611.01604, 2016.
+Yonelinas, A. P. The nature of recollection and familiarity: A review of 30 years of research. Journal of memory and language, 46(3):441­517, 2002.
+Yu, Z., Xu, D., Yu, J., Yu, T., Zhao, Z., Zhuang, Y., and Tao, D. Activitynet-qa: A dataset for understanding complex web videos via question answering. In Proceedings of the American Association for Artificial Intelligence, volume 33, pp. 9127­9134, 2019.
+Zhang, S., Yao, D., Zhao, Z., Chua, T.-S., and Wu, F. Causerec: Counterfactual user sequence synthesis for sequential recommendation. In Proceedings of the International ACM SIGIR Conference on Research and Development in Information Retrieval, 2021.
+
+Learning to Rehearse in Long Sequence Memorization
+Zhang, Z., Zhao, Z., Lin, Z., He, X., et al. Counterfactual contrastive learning for weakly-supervised visionlanguage grounding. Advances in Neural Information Processing Systems, 33:18123­18134, 2020.
+Zhou, G., Mou, N., Fan, Y., Pi, Q., Bian, W., Zhou, C., Zhu, X., and Gai, K. Deep interest evolution network for click-through rate prediction. In Proceedings of the American Association for Artificial Intelligence, volume 33, pp. 5941­5948, 2019.
+
+Learning to Rehearse in Long Sequence Memorization
+
+A. Task-Specific Reason Models
+
+In this section, we introduce the task-specific reason model R(M, Q), where M is the built memory and Q is the given query. Specifically, we first model the query feature q  Rdmodel by a task-specific encoder. For the synthetic task, the given query Q is a one-hot vector and we directly obtain q by an embedding layer. For long-sequence text and video QA tasks, the query Q is a sentence and we apply a bi-directional GRU to learn the sentence feature q. As for the recommendation task with long sequences, the given query is a target item with the unique id and we likewise learn an embedding layer to obtain the feature q.
+Next, we develop the multi-hop attention-based reasoning on rehearsal memory M. Concretely, at each step c, we capture the importance memory feature ec  Rdx from M based on the current query qc-1 using an attention method, given by
+
+kc = wc tanh(W1cqc-1 + W2cmk + bc),
+
+^kc =
+
+exp(kc )
+
+K j=1
+
+exp(jc)
+
+,
+
+ec
+
+=
+
+K
+^kc mk ,
+k=1
+
+where W1c
+
+
+
+R , W dmodel×dmodel
+
+c
+
+2
+
+
+
+Rdmodel ×dx
+
+and bc  Rdmodel are the projection matrices and bias.
+
+And wc is the row vector. We then produce the next query qc = Wq[ec; qc-1]  R , dmodel where Wq  Rdmodel×(dx+dmodel) is the projection matrix and q0 is the original q. After C steps, we obtain the reason feature qC.
+
+The hyper-parameter C is set to 2, 2, 2 and 1 for synthetic
+
+experiments, text QA, video QA and sequence recommen-
+
+dation, respectively.
+
+After it, we design the final reasoning layer for different tasks. For synthetic experiments and long-sequence video QA with fixed answer sets, we directly apply a classification layer to select the answer and develop the cross-entropy loss Lr. But the text QA dataset NarrativeQA provides different candidate answers for each query, we first model each candidate feature ai by another bi-directional GRU and then concatenate ai with qC to predict the conference score for each candidate. Finally, we also learn the cross-entropy loss Lr based on answer probabilities. As for the sequence recommendation task, we can directly compute a confidence score based on qC by a linear layer and build the binary loss function Lr.
+
+B. Synthetic Experiment
+Synthetic Dataset. We first introduce the setting of the synthetic task. Here we abstract the general concepts of reasoning tasks (QA/VQA/Recommendation) to construct the synthetic task. We define the input sequence as a Stream and each item in the sequence as a Fact, where the stream
+
+Table 7. Performance Comparisons on Synthetic Data. Rf =400, Rl=200, Rq=40, Ra=30, Rc=5.
+
+Method
+
+Setting
+
+Early Later
+
+Directly Reason Multi-Hop Reason
+
+Directly Directly
+
+13.57 13.41 34.38 34.50
+
+DNC NUTM STM DMSDNC
+RM (w/o. rehearsal) RM
+
+Memory-Based Memory-Based Memory-Based Memory-Based
+Memory-Based Memory-Based
+
+20.56 24.31 23.55 24.92
+25.79 28.42
+
+26.59 29.71 29.64 30.74
+31.38 31.71
+
+and fact can correspond to the text sequence and word token in text QA. We set the number of fact types to Rf , that is, each fact can be denoted by a Rf -d one-hot vector and obtain the fact feature by a trainable embedding layer. Considering reasoning tasks often need to retrieve vital clues related to the query from the given input and then infer the answer, we define the query-relevant facts in the stream as the Evidence and regard the Evidence-Query-Answer triple as the Logic Chain. Given a stream and a query, we need to infer the answer if the stream contains the evidence. Specifically, we set the number of query types to Rq and each query can be denoted by a Rq-d one-hot vector. For each query, we set the number of answer types to Ra. That is, there are totally Rq  Ra query-answer pairs and we need to synthesize Rq  Ra corresponding evidences of each pair. Each evidence is denoted by a sequence of facts {fact1, · · · , factRc }, which continuously appear in the input stream. And Rc is the length of the evidence. During the evidence synthesis, we first define 20 different groups and uniformly split these facts and queries to 20 groups. Next, if a query belongs to group k, we randomly sample Rc facts from the group as the evidence, and then assign the evidence to a query-answer pair to generate a fixed logic chain.
+Eventually, we synthetic 400 data samples for each logic chain to train the models. Each sample contains the input stream with Rl items, a query and an answer. Concretely, we first sample Rl facts as a sequence and then place the evidence in the sequence, where we guarantee each streamquery pair corresponds to a unique answer.
+Baselines and Model Details. The Directly Reason method first models the input stream by RNN to obtain the stream feature, then concatenates the stream feature with the query feature and predicts the answer by a linear layer. The Multi-Hop Reason method further applies multiple attention layers after RNN-based stream modeling to capture the query-relevant clues. In the main experiment,
+
+Learning to Rehearse in Long Sequence Memorization
+we set the dataset hyper-parameters Rf , Rl, Rq, Ra and Rc to 400, 200, 40, 30, and 5, respectively. The facts of the evidence may appear in different stages of the input stream. Early means the facts appear in the preceding 50% of the stream and Later means the facts appear in the subsequent 50%. For our rehearsal memory, we set the dx and dmodel to 128. The number K of memory slots and length N of segments are set to 20 and 10, respectively. And we sample all other facts as negative items in Lrec.
+Evaluation Results. Table 7 reports the performance comparison between our method and baselines, where RM is the full model and RM (w/o. rehearsal) only employs the task-specific reasoning training. Overall, directly reasoning methods have close early and later performance, but memory-based approaches DNC, NUTM, STM, DMSDNC and RM (w/o. rehearsal) achieve the terrible early performance due to the gradual forgetting. By the self-supervised rehearsal training, our RM significantly improves the early accuracy and achieves the best memory-based reasoning performance. This fact suggests our proposed memory rehearsal can alleviate the gradual forgetting of early information and make the memory remember critical information from the input stream. Besides, RM (w/o. rehearsal) outperforms other memory-based methods, which indicates our rehearsal memory machine can better memorize the long-term information even without the rehearsal training. Moreover, we can find the Directly Reason approach achieves the worst performance but the Multi-Hop Reason method has a high accuracy, which demonstrates the performance of directly reasoning methods mainly depends on the complicated interaction between the input contents and queries.
+
+

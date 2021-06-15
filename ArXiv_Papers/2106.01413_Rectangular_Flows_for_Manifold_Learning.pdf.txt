@@ -1,0 +1,1012 @@
+Rectangular Flows for Manifold Learning
+
+arXiv:2106.01413v1 [stat.ML] 2 Jun 2021
+
+Anthony L. Caterini University of Oxford & Layer 6 AI
+anthony@layer6.ai
+Geoff Pleiss Columbia University gmp2162@columbia.edu
+
+Gabriel Loaiza-Ganem Layer 6 AI
+gabriel@layer6.ai
+John P. Cunningham Columbia University jpc2181@columbia.edu
+
+Abstract
+Normalizing flows are invertible neural networks with tractable change-of-volume terms, which allows optimization of their parameters to be efficiently performed via maximum likelihood. However, data of interest is typically assumed to live in some (often unknown) low-dimensional manifold embedded in high-dimensional ambient space. The result is a modelling mismatch since ­ by construction ­ the invertibility requirement implies high-dimensional support of the learned distribution. Injective flows, mapping from low- to high-dimensional space, aim to fix this discrepancy by learning distributions on manifolds, but the resulting volume-change term becomes more challenging to evaluate. Current approaches either avoid computing this term entirely using various heuristics, or assume the manifold is known beforehand and therefore are not widely applicable. Instead, we propose two methods to tractably calculate the gradient of this term with respect to the parameters of the model, relying on careful use of automatic differentiation and techniques from numerical linear algebra. Both approaches perform end-to-end nonlinear manifold learning and density estimation for data projected onto this manifold. We study the trade-offs between our proposed methods, empirically verify that we outperform approaches ignoring the volume-change term by more accurately learning manifolds and the corresponding distributions on them, and show promising results on out-ofdistribution detection.
+1 Introduction
+In recent years, Normalizing Flows (NFs) have become a staple of generative modelling, being widely used for density estimation [12, 13, 42, 25, 14], variational inference [49, 27], maximum entropy modelling [34], and more [43, 28]. In density estimation, we typically have access to a set of points living in some high-dimensional space RD. NFs model the corresponding data-generating distribution as the pushforward of a simple distribution on RD ­ often a Gaussian ­ through a smooth bijective mapping. Clever construction of these bijections allows for tractable density evaluation and thus maximum likelihood estimation of the parameters. However, as an immediate consequence of this choice, the learned distribution has support homeomorphic to RD; in particular, the resulting distribution is supported on a set of dimension D. This is not a realistic assumption in practice ­ especially for density estimation ­ as it directly contradicts the manifold hypothesis [5] which states that high-dimensional data lives on a lower-dimensional manifold embedded in ambient space.
+A natural idea to circumvent this misspecification is to consider injective instead of bijective flows, which now push forward a random variable on Rd with d < D to obtain a distribution on some
+Authors contributed equally.
+Preprint. Under review.
+
+d-dimensional manifold embedded in RD. These mappings admit a change-of-variable formula bearing resemblance to that of bijective flows, but unfortunately the volume-change term becomes computationally prohibitive, which then impacts the tractability of maximum likelihood. While there have been recent efforts towards training flows where the resulting distribution is supported on a low-dimensional manifold [16, 50, 6, 32, 37, 10], these approaches either assume that the manifold is known beforehand or propose various heuristics to avoid the change-of-variable computation. Both of these are undesirable, because, while we should expect most high-dimensional data of interest to exhibit low-dimensional structure, this structure is almost always unknown. On the other hand, we argue that avoiding the volume-change term may result in learning a manifold to which it is difficult to properly assign density, and this approach further results in methods which do not take advantage of density evaluation, undermining the main motivation for using NFs in the first place.
+We show that density estimation for injective flows based on maximum likelihood can be made tractable. By carefully leveraging forward- and backward-mode automatic differentiation [3], we propose two methods that allow backpropagating through the volume term arising from the injective change-of-variable formula. The first method involves exact evaluation of this term and its gradient which incurs a higher memory cost; the second uses conjugate gradients [40] and Hutchinson's trace estimator [20] to obtain unbiased stochastic gradient estimates. Unlike previous work, our methods do not need the data manifold to be specified beforehand, and simultaneously estimate this manifold along with the distribution on it end-to-end, thus enabling maximum likelihood training to occur. To the best of our knowledge, ours are the first methods to scale backpropagation through the injective volume-change term to ambient dimensions D close to 1,000. We study the trade-off between memory and variance introduced by our methods and show empirical improvements over injective flow baselines for density estimation. We also show that injective flows obtain state-of-the-art performance for likelihood-based Out-of-Distribution (OoD) detection, assigning higher likelihoods to Fashion-MNIST (FMNIST) [53] than to MNIST [33] with a model trained on the former.
+
+2 Background
+
+2.1 Square Normalizing Flows
+
+A normalizing flow [49, 13] is a diffeomorphism f~ : RD  RD parametrized by , that is, a
+differentiable bijection with differentiable inverse. Starting with a random variable Z  pZ for a simple density pZ supported on RD, e.g. a standard Gaussian, the change-of-variable formula states that the random variable X := f~(Z) has density pX on RD given by:
+
+pX (x) = pZ f~-1(x) det J f~
+
+f~-1(x)
+
+-1
+,
+
+(1)
+
+where J[·] is the differentiation operator, so that J[f~](f~-1(x))  RD×D is the Jacobian of f~ (with respect to the inputs and not ) evaluated at f~-1(x). We refer to this now standard setup as square flows since the Jacobian is a square matrix. The change-of-variable formula is often written in terms
+
+of the Jacobian of f~-1, but we use the form of (1) as it is more applicable for the next section. NFs are typically constructed in such a way that not only ensures bijectivity, but also so that the Jacobian
+
+determinant in (1) can be efficiently evaluated. When provided with a dataset {xi}i  RD, an NF
+
+models its generating distribution as the be estimated via maximum likelhood as
+
+pushforward of pZ  := arg max
+
+nit=h1roluogghpXf~(,xain)d.
+
+thus
+
+the
+
+parameters
+
+can
+
+2.2 Rectangular Normalizing Flows
+
+As previously mentioned, square NFs unrealistically result in the learned density pX having D-
+dimensional support. We follow the injective flow construction of Brehmer and Cranmer [6], where a smooth and injective mapping g : Rd  RD with d < D is constructed. In this setting, Z  Rd is the low-dimensional variable used to model the data as X := g(Z). A well-known result from
+differential geometry [29] provides an applicable change-of-variable formula:
+
+-1/2
+
+pX (x) = pZ g-1(x) det J[g] g-1(x) J[g] g-1(x)
+
+1(x  M), (2)
+
+where M := {g(z) : z  Rd}. The Jacobian-transpose-Jacobian determinant now characterizes the change in volume from Z to X. We make several relevant observations: (i) The Jacobian matrix
+
+2
+
+J[g](g-1(x))  RD×d is no longer a square matrix, and we thus refer to these flows as rectangular. (ii) Note that g-1 : M  Rd is only properly defined on M and not RD, and pX is now supported on the d-dimensional manifold M. (iii) We write the indicator 1(x  M) explicitly to highlight the fact that this density is not a density with respect to the Lebesgue measure; rather, the dominating
+measure is the Riemannian measure on the manifold M [45]. (iv) One can clearly verify as a sanity check that when d = D, equation (2) reduces to (1).
+
+Since data points x will almost surely not lie exactly on M, we use a left inverse g : RD  Rd in place of g-1 such that g (g(z)) = z for all z  Rd, which exists because g is injective. This is properly defined on RD, unlike g-1 which only exists over M. Equation (2) then becomes:
+
+pX (x) = pZ g (x) det J[g]
+
+g (x) J[g]
+
+g (x)
+
+-1/2
+.
+
+(3)
+
+Note that (3) is equivalent to projecting x onto M as x  g(g (x)), and then evaluating the density from (2) at the projected point.
+
+Now, g is injectively constructed as follows:
+
+g = f~  pad  h
+
+and
+
+g = h- 1  pad  f~-1,
+
+(4)
+
+where f~ : RD  RD and h : Rd  Rd are both square flows,  := (, ), and pad : Rd  RD and pad : RD  Rd are defined as pad(z) = (z, 0) and pad(z, z ) = z, where 0, z  RD-d. Now, M depends only on  and not , so we write it as M from now on. Applying (3) yields:
+
+pX (x) = pZ g (x)
+
+det J[h]
+
+g (x)
+
+-1
+det J[f]
+
+f(x)
+
+J[f] f(x)
+
+-1/2
+,
+
+(5)
+
+where f = f~  pad and f = pad  f~-1. We include a derivation of (5) in Appendix A, along with a note on why injective transformations cannot be stacked as naturally as bijective ones.
+
+Evaluating likelihoods is seemingly intractable since constructing flows with a closed-form volume-
+change term is significantly more challenging than in the square case, even if the relevant matrix is now d × d instead of D × D. Brehmer and Cranmer [6] thus propose a two-step training procedure to promote tractability wherein f and h are trained separately. After observing that there is no term encouraging x  M, and that x  M  x = g(g (x))  x = f(f(x)), they decide to simply train f by minimizing the reconstruction error to encourage the observed data to lie on M:
+
+n
+
+ = arg min
+
+xi - f f(xi)
+
+
+
+i=1
+
+2
+.
+2
+
+(6)
+
+Note that the above requires computing both f and f, so that f~ should be chosen as a flow allowing fast evaluation of both f~ and f~-1. Architectures such as the Real NVP [13] or follow-up work [25, 14] are thus natural choices for f~, while architectures with an autoregressive component [42, 27] should be avoided. Then, since h does not appear in the challenging determinant term in (5), h can be chosen as any normalizing flow, and optimization ­ for a fixed  ­ can be tractably achieved by
+maximum likelihood over the lower-dimensional space:
+
+n
+
+ = arg max
+
+log pZ g (xi) - log det J[h] g (xi) .
+
+(7)
+
+
+
+i=1
+
+In practice, gradients steps in  and  are alternated. This entire procedure circumvents evaluation of the Jacobian-transpose-Jacobian determinant term in (5), but as we show in section 3, avoiding this term by separately learning the manifold and the density on it comes with its downsides. We then show how to tractably estimate this term in section 4.
+
+3 Related Work and Motivation
+Low-dimensional and topological pathologies The mismatch between the dimension of the modelled support and that of the data-generating distribution has been observed throughout the literature
+
+3
+
+in different ways. Dai and Wipf [11] show, in the context of variational autoencoders [26], that using flexible distributional approximators supported on RD to model data living in a low-dimensional manifold results in pathological behavior where the manifold itself is learned, but not the distribution on it. Cornish et al. [9] demonstrate the drawbacks of using normalizing flows for estimating the density of topologically-complex data, and provide a new method learning NFs with supports which are not homeomorphic to RD, but they still model the support as being D-dimensional. Behrmann et al. [4] show numerical instabilities associated with NFs ­ particularly a lack of numerical invertibility, as also explained theoretically by Cornish et al. [9]. This is not too surprising, as attempting to learn a smooth invertible function mapping RD to some low-dimensional manifold is an intrinsically ill-posed problem. This body of work strongly motivates the development of models whose support has matching topology ­ including dimension ­ to that of the true data distribution.
+Manifold flows A challenge to overcome for obtaining NFs on manifolds is the Jacobian-transposeJacobian determinant computation. Current approaches for NFs on manifolds approach this challenge in one of two ways. The first assumes the manifold is known beforehand [16, 50, 37], severely limiting its general applicability to low-dimensional data where the true manifold can realistically be known. The second group circumvents the computation of the Jacobian-transpose-Jacobian entirely through various heuristics. Kumar et al. [32] use a potentially loose lower bound of the log-likelihood, and do not explicitly enforce injectivity, resulting in a method for which the change-of-variable almost surely does not hold. Cunningham et al. [10] propose to convolve the manifold distribution with Gaussian noise, which results in the model having high-dimensional support. Finally, Brehmer and Cranmer [6] propose the method we described in subsection 2.2, where manifold learning and density estimation are done separately in order to avoid the log determinant computation.
+Why optimize the volume-change term? Learning f and h separately without the Jacobian of f is concerning: even if f maps to the correct manifold, it might unnecessarily expand and contract volume in such a way that makes correctly learning h much more difficult than it needs to be. Looking ahead to our experiments, Figure 1 exemplifies this issue: the top-middle panel shows the ground truth density on a 1-dimensional circle in R2, and the top-right panel the distribution recovered by the two-step method of Brehmer and Cranmer [6]. We can see that, while the manifold is correctly recovered, the distribution on it is not. The bottom-right panel shows the speed at which f maps R to M : the top of the circle, which should have large densities, also has high speeds. Indeed, there is nothing in the objective discouraging f to learn this behaviour, which implies that the corresponding low-dimensional distribution must be concentrated in a small region and thus making it harder to learn. The bottom-middle panel confirms this explanation: the learned low-dimensional distribution (dark red) does not match what it should (i.e. the distribution of {f (xi)}ni=1, in light red). This failure could have been avoided by learning the manifold in a density-aware fashion by including the Jacobian-transpose-Jacobian determinant in the objective.
+
+4 Maximum Likelihood for Rectangular Flows: Taming the Gradient
+
+4.1 Our Optimization Objective
+
+We have argued that including the Jacobian-transpose-Jacobian in the optimization objective is sensible. However, as we previously mentioned, (5) corresponds to the density of the projection of x onto M. Thus, simply optimizing the likelihood would not result in learning M in such a way that observed data lies on it, only encouraging projected data points to have high likelihood. We thus maximize the log-likelihood subject to the constraint that the reconstruction error should be smaller than some threshold. In practice, we use the KKT conditions [23, 31] and maximize the Lagrangian:
+
+n
+
+ = arg max
+
+
+
+i=1
+
+log pZ g (xi) - log det J[h] g (xi)
+
+1 - 2 log det J (xi)J(xi)
+
+(8)
+
+- xi - f f(xi)
+
+2
+,
+2
+
+where we treat  > 0 as a hyperparameter, and denote J[f](f(xi)) as J(xi) for simplicity. We have dropped the absolute value since J (xi)J(xi) is always symmetric positive definite, since J(xi) has full rank by injectivity of f. We now make a technical but relevant observation about
+
+4
+
+our objective: since our likelihoods are Radon-Nikodym derivatives with respect to the Riemannian measure on M, different values of  will result in different dominating measures. One should thus be careful to compare likelihoods for models with different values of . However, thanks to the smoothness of the objective over , we should expect likelihoods for values of  which are "close
+enough" to be comparable for practical purposes. In other words, comparisons remain reasonable
+locally, and the gradient of the volume-change term should still contain relevant information that helps learning M in such a way that h can easily learn a density on the pulled-back dataset {f(xi)}ni=1.
+
+4.2 Optimizing our Objective: Stochastic Gradients
+
+Note that all the terms in (8) are straightforward to evaluate and backpropagate through except for
+the third one; in this section we show how to obtain unbiased stochastic estimates of its gradient. In what follows we drop the dependence of the Jacobian on xi from our notation and write J, with the understanding that the end computation will be parallelized over a batch of xis. We assume access to an efficient matrix-vector product routine, i.e. computing J J can be quickly achieved for any
+ Rd. We elaborate on how we obtain these matrix-vector products in the next section. It is a well known fact from matrix calculus [46] that:
+
+ j log det J J = tr
+
+(J
+
+J
+
+)-1
+
+ j
+
+J
+
+J
+
+,
+
+(9)
+
+where tr denotes the trace operator and j is the j-th element of . Next, we can use Hutchinson's trace estimator [20], which states that for any matrix M  Rd×d, tr(M ) = E [ M ] for any Rd-valued random variable with zero mean and identity covariance matrix. We can thus obtain an
+
+unbiased stochastic estimate of our gradient as:
+
+ j
+
+log det J
+
+J 
+
+1K K
+k=1
+
+k (J
+
+J
+
+)-1
+
+ j
+
+J
+
+J
+
+k,
+
+(10)
+
+where 1, . . . , K are typically sampled either from standard Gaussian or Rademacher distributions.
+
+Naïve computation of the above estimate remains intractable without explicitly constructing J J.
+
+Fortunately, the J J terms can be trivially obtained using the given matrix-vector product routine,
+
+avoiding the construction of J J, and then /jJ J follows by taking the gradient w.r.t. .
+
+There is however still the issue of computing (J J)-1 = [(J J)-1 ] . We use conjugate gradients (CG) [40] in order to achieve this. CG is an iterative method to solve problems of the form Au = for given A  Rd×d (in our case A = J J) and  Rd; we include the CG algorithm in Appendix B for completeness. CG has several important properties. First, it is known to recover the solution (assuming exact arithmetic) after at most d steps, which means we can evaluate A-1 . The
+solution converges exponentially (in the number of iterations  ) to the true value [51], so often  d
+iterations are sufficient for accuracy to many decimal places. In practice, if we can tolerate a certain
+amount of bias, we can further increase computational speed by stopping iterations early. Second, CG
+only requires a method to compute matrix-vector products against A, and does not require access to A
+itself. One such product is performed at each iteration, and CG thus requires at most d matrix-vector products, though again in practice  d products usually suffice. This results in O( d2) solve complexity--less than the O(d3) required by direct inversion methods. We denote A-1 computed
+with conjugate gradients as CG(A; ). We can then compute the estimator from (10) as:
+
+
+
+1K
+
+
+
+j
+
+log det J
+
+J
+
+
+
+K
+
+CG
+k=1
+
+J J;
+
+k
+
+j J J k.
+
+(11)
+
+In practice, we implement this term by noting that CG(J J; ) /jJ J = /jstop_gradient(CG(J J; ) )J J , thereby taking advantage of the stop_gradient operation from Automatic Differentiation (AD) libraries and allowing us to avoid implementing a
+custom backward pass. We thus compute the contribution of a point x to the training objective as:
+
+log pZ g (x) - log det J[h] g (x)
+
+-  x - f f(x)
+
+2 2
+
+(12)
+
+1K
+
+- 2K
+
+stop_gradient CG J J; k
+
+k=1
+
+J J k
+
+which gives the correct gradient estimate when taking the derivative with respect to .
+
+5
+
+Linear solvers for Jacobian terms We note that linear solvers like CG have been used before to backpropagate through log determinant computations in the context of Gaussian processes [15], and more recently for square NFs with flexible architectures which do not allow for straightforward Jacobian determinant computations [19, 36]. However, none of these methods require the Jacobiantranspose-Jacobian-vector product routine that we derive in the next section, and to the best of our knowledge, these techniques have not been previously applied for training rectangular NFs. We also point out that recently Oktay et al. [41] proposed a method to efficiently obtain stochastic estimates of J . While their method cannot be used as a drop-in replacement within our framework as it would result in a biased CG output, we believe this could be an interesting direction for future work. Finally, we note that CG has recently been combined with the Russian roulette estimator [22] to avoid having to always iterate d times while maintaining unbiasedness, again in the context of Gaussian processes [47]. We also leave the exploration of this estimator within our method for future work.
+4.3 AD Considerations: The Exact Method and the Forward-Backward AD Trick
+In this section we derive the aforementioned routine for vector products against J J, as well as an exact method that avoids the need for stochastic gradients (for a given x) at the price of increased memory requirements. But first, let us ask: why are these methods needed in the first place? There is work using power series to obtain stochastic estimates of log determinants [17, 7], and one might consider using them in our setting. However, these series require knowledge of the singular values of J J, to which we do not have access (constructing J J to obtain its singular values would defeat the purpose of using the power series in the first place), and we would thus not have a guarantee that the series are valid. Additionally, they have to be truncated and thus result in biased estimators, and using Russian roulette estimators to avoid bias [7] can result in infinite variance [9]. Finally, these series compute and backpropagate (w.r.t. ) through products of the form (J J)m for different values of m, which can easily require more matrix-vector products than our methods.
+Having motivated our approach, we now use commonly-known properties of AD to derive it; we briefly review these properties in Appendix C, referring the reader to Baydin et al. [3] for more detail. First, we consider the problem of explicitly constructing J. This construction can then be used to evaluate J J and exactly compute its log determinant either for log density evaluation of a trained model, or to backpropagate (with respect to ) through both the log determinant computation and the matrix construction, thus avoiding having to use stochastic gradients as in the previous section. We refer to this procedure as the exact method. Naïvely, one might try to explicitly construct J using only backward-mode AD, which would require D vector-Jacobian products (vjps) of the form v J ­ one per basis vector v  RD (and then stacking the resulting row vectors vertically). A better way to explicitly construct J is with forward-mode AD, which only requires d Jacobian-vector products (jvps) J , again one per basis vector  Rd (and then stacking the resulting column vectors horizontally). We use a custom implementation of forward-mode AD in the popular PyTorch [44] library2 for the exact method, as well as for the forward-backward AD trick described below.
+We now explain how to combine forward- and backward-mode AD to obtain efficient matrix-vector products against J J in order to obtain the tractable gradient estimates from the previous section. Note that v := J can be computed with a single jvp call, and then J J = [v J] can be efficiently computed using only a vjp call. We refer to this way of computing matrix-vector products against J J as the forward-backward AD trick. Note that (12) requires K( + 1) such matrix-vector products, which is seemingly less efficient as it is potentially greater than the d jvps required by the exact method. However, the stochastic method is much more memory-efficient than its exact counterpart when optimizing over : of the K( + 1) matrix-vector products needed to evaluate (12), only K require gradients with respect to . Thus only K jvps and K vjps, along with their intermediate steps, must be stored in memory over a training step. In contrast, the exact method requires gradients (w.r.t. ) for every one of its d jvp computations, which requires storing these computations along with their intermediate steps in memory.
+Our proposed methods thus offer a memory vs. variance trade-off. Increasing K in the stochastic method results in larger memory requirements which imply longer training times, as the batch size must be set to a smaller value. On the other hand, the larger the memory cost, the smaller the variance
+2PyTorch has a forward-mode AD implementation which relies on the "double backward" trick, which is known to be memory-inefficient. See https://j-towns.github.io/2017/06/12/A-new-trick.html for a description.
+6
+
+Table 1: Number of jvps and vjps (with respect to inputs) needed for forward and backward passes (with respect to ), along with the corresponding variance of gradient entries.
+
+Method
+Exact (naive) Exact Stochastic
+
+FORWARD
+D vjps d jvps K( + 1)jvps +K( + 1) vjps
+
+BACKWARD
+D vjps d jvps Kjvps +Kvjps
+
+VARIANCE
+0 0  1/K
+
+of the gradient. This still holds true for the exact method, which results in exact gradients, at the cost of increased memory requirements (as long as K d; if K is large enough the stochastic method should never be used over the exact one). Table 1 summarizes this trade-off.
+5 Experiments
+We now compare our methods against the two-step baseline of Brehmer and Cranmer [6], and also study the memory vs. variance trade-off. We use the real NVP [13] architecture for all flows, except we do not use batch normalization [21] as it causes issues with vjp computations. We point out that all comparisons remain fair, including a detailed explanation of this phenomenon in Appendix D, along with all experimental details in Appendix F. Throughout, we use the labels RNFs-ML for our maximum likelihood training method, RNFs-TS for the two-step method, and RNFs for rectangular NFs in general. For most runs, we found it useful to anneal the likelihood term(s). That is, at the beginning of training we optimize only the reconstruction term, and then slowly incorporate the other terms. This likelihood annealing procedure helped avoid local optima where the manifold is not recovered (large reconstruction error) but the likelihood of projected data is high3.
+5.1 Simulated Data
+We consider a simulated dataset where we have access to ground truth, which allows us to empirically verify the deficiencies of RNFs-TS. We use a von Mises distribution, which is supported on the one-dimensional unit circle in R2. Figure 1 shows this distribution, along with its estimates from RNFs-ML (exact) and RNFs-TS. As previously observed, RNFs-TS correctly approximate the manifold, but fail to learn the right distribution on it. In contrast we can see that RNFs-ML, by virtue of including the Jacobian-transpose-Jacobian term in the optimization, manage to recover both the manifold and the distribution on it (top left panel), while also resulting in an easier-to-learn lowdimensional distribution (bottom middle panel) thanks to f mapping to M at a more consistent speed (bottom left panel). We do point out that, while the results presented here are representative of usual runs for both methods, we also had runs with different results which we include in Appendix F. We finish with the observation that even though the line and the circle are not homeomorphic and thus RNFs are not perfectly able to recover the support, they manage to adequately approximate it.
+5.2 Tabular Data
+We now turn our attention to the tabular datasets used by Papamakarios et al. [42], now a common benchmark for NFs as well. As previously mentioned, one should be careful when comparing models with different supports, as we cannot rely on test likelihoods as a metric. We take inspiration from the FID score [18], which is commonly used to evaluate quality of generated images when likelihoods are not available. The FID score compares the first and second moments of a well-chosen statistic from the model and data distributions using the squared Wasserstein-2 metric (between Gaussians). Instead of using the last hidden layer of a pre-trained classifier as is often done for images, we take the statistic to be the data itself: in other words, our metric compares the mean and covariance of generated data against those of observed data with the same squared Wasserstein-2 metric. We include the mathematical formulas for computing both FID and our modified version for tabular data in Appendix E. We use early stopping with our FID-like score across all models. Our results are summarized in Table 2, where we can see that RNFs-ML consistently do a better job at recovering the underlying distribution. Once again, these results emphasize the benefits of
+3Our code will be made available at https://github.com/layer6ai-labs/rectangular-flows upon publication.
+7
+
+RNFs-ML (exact) density
+
+von Mises ground truth
+
+RNFs-TS density
+
+RNFs-ML (exact) speed
+
+Distribution of f (X)
+
+RNFs-TS speed
+
+Figure 1: Top row: RNFs-ML (exact) (left), von Mises ground truth (middle), and RNF-TS (right). Bottom row: Speed at which f maps to M (measured as l2 distance between uniformly spaced consecutive points in R mapped through f ) for RNFs-ML (exact) (left), RNFs-TS (right), and distribution h has to learn in order to recover the ground truth, fixing  (middle). See text for discussion.
+
+Table 2: FID-like metric for tabular data (lower is better). Bolded runs are the best or overlap with it.
+
+Method
+RNFs-ML (exact) RNFs-ML (K = 1) RNFs-ML (K = 10) RNFs-TS
+
+POWER
+0.069 ± 0.014 0.083 ± 0.015 0.113 ± 0.037 0.178 ± 0.021
+
+GAS
+0.138 ± 0.021 0.110 ± 0.021 0.140 ± 0.013 0.161 ± 0.016
+
+HEPMASS
+0.486 ± 0.032 0.779 ± 0.191 0.495 ± 0.055 0.649 ± 0.081
+
+MINIBOONE
+0.978 ± 0.082 1.001 ± 0.051 0.878 ± 0.083 1.085 ± 0.0622
+
+including the Jacobian-transpose-Jacobian in the objective. Interestingly, except for HEPMASS, the results from our stochastic version with K = 1 are not significantly exceeded by the exact version or using a larger value of K, suggesting that the added variance does not result in decreased empirical performance. We highlight that no tuning was done (except on GAS for which we changed d from 4 to 2), RNFs-ML outperforming RNFs-TS out-of-the-box here (details are in Appendix F). We report training times in Appendix F, and observe that RNFs-ML take a similar amount of time as RNFs-TS to train for datasets with lower values of D, and while we do take longer to train for the other datasets, our training times remain reasonable and we often require fewer epochs to converge.
+5.3 Image Data and Out-of-Distribution Detection
+We also compare RNFs-ML to RNFs-TS for image modelling on MNIST and FMNIST. We point out that these datasets have ambient dimension D = 784, and being able to fit RNFs-ML is in itself noteworthy: to the best of our knowledge no previous method has scaled optimizing the Jacobian-transpose-Jacobian term to these dimensions. We use FID scores both for comparing models and for early stopping during training. We also used likelihood annealing and set d := 20, with all experimental details again given in Appendix F. We report FID scores in Table 3, where we can see that we outperform RNFs-TS. Our RNFs-ML (K = 1) variant also outperforms its decreased-variance counterparts. This is partially explained by the fact that we used this variant to tune RNFs-ML, but we also hypothesize that this added variance can be helpful because of the remaining (non-dimension-based) topological mismatch. Nonetheless, once again these results suggest that the variance induced by our stochastic method is not empirically harmful. We also report training times in Appendix F, where we can see the computational benefits of our stochastic method.
+8
+
+Table 3: FID scores (lower is better) and decision stump OoD accuracy (higher is better).
+
+Method
+RNFs-ML (exact) RNFs-ML (K = 1) RNFs-ML (K = 4) RNFs-TS
+
+FID
+
+MNIST FMNIST
+
+36.09 33.98 42.90 35.52
+
+296.01 288.39 342.91 318.59
+
+OoD ACCURACY
+
+MNIST  FMNIST FMNIST  MNIST
+
+92% 97% 77% 98%
+
+91% 78% 89% 96%
+
+We further evaluate the performance of RNFs for OoD detection. Nalisnick et al. [38] pointed out that square NFs trained on FMNIST
+
+Trained on FMNIST
+
+assign higher likelihoods to MNIST than they do to FMNIST. While
+
+there has been research attempting to fix this puzzling behaviour
+
+[1, 2, 8, 48], to the best of our knowledge no method has managed to
+
+correct it using only likelihoods of trained models. Figure 2 shows
+
+that RNFs remedy this phenomenon, and that models trained on
+
+FMNIST assign higher test likelihoods to FMNIST than to MNIST.
+
+This correction does not come at the cost of strange behaviour now
+
+emerging in the opposite direction (i.e. when training on MNIST, see
+
+Appendix F for a histogram). Table 3 quantifies these results (arrows
+
+point from in-distribution datasets to OoD ones) with the accuracy
+
+of a decision stump using only log-likelihood, and we can see that Figure 2: OoD detection with
+
+the best-performing RNFs models essentially solve this OoD task. RNFs-ML (exact).
+
+While we leave a formal explanation of this result for future work,
+
+we believe this discovery highlights the importance of properly specifying models and of ensuring the
+
+use of appropriate inductive biases, in this case low intrinsic dimensionality of the observed data. We
+
+point out that this seems to be a property of RNFs, rather than of our ML training method, although
+
+our exact method is still used to compute these log-likelihoods at test time. We include additional
+
+results on OoD detection using reconstruction errors ­ along with a discussion ­ in Appendix F,
+
+where we found the opposite unexpected behaviour: FMNIST always has smaller reconstruction
+
+errors, regardless of which dataset was used for training.
+
+6 Scope and Limitations
+In this paper we address the dimensionality-based misspecification of square NFs while properly using maximum likelihood as the training objective. We thus provide an advancement in the training of RNFs. Our methods, like current likelihood-based deep generative modelling approaches, remain however topologically misspecified: even though we can better address dimensionality, we can currently only learn manifolds homeomorphic to Rd. For example, one could conceive of the MNIST manifold as consisting of 10 connected components (one per digit), which cannot be learned by f. We observed during training in image data that the residuals of CG were not close to 0 numerically, even after d steps, indicating numerical non-invertibility of the matrix J J. We hypothesize that this phenomenon is caused by topological mismatch, which we also conjecture affects us more than the baseline as our CG-obtained (or from the exact method) gradients might point in an inaccurate direction. We thus expect our methods in particular to benefit from improved research on making flows match the target topology, for example via continuous indexing [9].
+Additionally, while we have successfully scaled likelihood-based training of RNFs far beyond current capabilities, our methods ­ even the stochastic one ­ remain computationally expensive for even higher dimensions, and further computational gains remain an open problem. We trained a single RNFs-ML (K = 1) model on the CIFAR-10 dataset [30], but doing this was computationally intensive and tuning hyperparameters has remained challenging. In this preliminary experiment, we did not observe good OoD performance (nor with RNFs-TS) for the SVHN dataset [39], although anecdotally we may have at least improved on the situation outlined by Nalisnick et al. [38].
+9
+
+7 Conclusions and Broader Impact
+In this paper we argue for the importance of likelihood-based training of rectangular flows, and introduce two methods allowing to do so. We study the benefits of our methods, and empirically show that they are preferable to current alternatives. Given the methodological nature of our contributions, we do not foresee our work having any negative ethical implications or societal consequences.
+Acknowledgements
+We thank Brendan Ross, Jesse Cresswell, and Maksims Volkovs for useful comments and feedback. We would also like to thank Rob Cornish for the excellent CIFs codebase upon which our code is built, and Emile Mathieu for plotting suggestions.
+References
+[1] A. A. Alemi, I. Fischer, J. V. Dillon, and K. Murphy. Deep variational information bottleneck. ICLR, 2017.
+[2] A. A. Alemi, I. Fischer, and J. V. Dillon. Uncertainty in the variational information bottleneck. arXiv preprint arXiv:1807.00906, 2018.
+[3] A. G. Baydin, B. A. Pearlmutter, A. A. Radul, and J. M. Siskind. Automatic differentiation in machine learning: a survey. Journal of machine learning research, 18, 2018.
+[4] J. Behrmann, P. Vicol, K.-C. Wang, R. Grosse, and J.-H. Jacobsen. Understanding and mitigating exploding inverses in invertible neural networks. In International Conference on Artificial Intelligence and Statistics, pages 1792­1800. PMLR, 2021.
+[5] Y. Bengio, A. Courville, and P. Vincent. Representation learning: A review and new perspectives. IEEE transactions on pattern analysis and machine intelligence, 35(8):1798­1828, 2013.
+[6] J. Brehmer and K. Cranmer. Flows for simultaneous manifold learning and density estimation. In Advances in Neural Information Processing Systems, volume 33, 2020.
+[7] R. T. Q. Chen, J. Behrmann, D. K. Duvenaud, and J.-H. Jacobsen. Residual flows for invertible generative modeling. In Advances in Neural Information Processing Systems, volume 32, 2019.
+[8] H. Choi, E. Jang, and A. A. Alemi. Waic, but why? generative ensembles for robust anomaly detection. arXiv preprint arXiv:1810.01392, 2018.
+[9] R. Cornish, A. Caterini, G. Deligiannidis, and A. Doucet. Relaxing bijectivity constraints with continuously indexed normalising flows. In International Conference on Machine Learning, pages 2133­2143. PMLR, 2020.
+[10] E. Cunningham, R. Zabounidis, A. Agrawal, I. Fiterau, and D. Sheldon. Normalizing flows across dimensions. arXiv preprint arXiv:2006.13070, 2020.
+[11] B. Dai and D. Wipf. Diagnosing and enhancing vae models. ICLR, 2019.
+[12] L. Dinh, D. Krueger, and Y. Bengio. Nice: Non-linear independent components estimation. arXiv preprint arXiv:1410.8516, 2014.
+[13] L. Dinh, J. Sohl-Dickstein, and S. Bengio. Density estimation using real nvp. ICLR, 2017.
+[14] C. Durkan, A. Bekasov, I. Murray, and G. Papamakarios. Neural spline flows. In Advances in Neural Information Processing Systems, volume 32, 2019.
+[15] J. Gardner, G. Pleiss, K. Q. Weinberger, D. Bindel, and A. G. Wilson. Gpytorch: Blackbox matrix-matrix gaussian process inference with gpu acceleration. Advances in Neural Information Processing Systems, 31, 2018.
+[16] M. C. Gemici, D. Rezende, and S. Mohamed. Normalizing flows on riemannian manifolds. arXiv preprint arXiv:1611.02304, 2016.
+10
+
+[17] I. Han, D. Malioutov, and J. Shin. Large-scale log-determinant computation through stochastic chebyshev expansions. In International Conference on Machine Learning, pages 908­917. PMLR, 2015.
+[18] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter. Gans trained by a two time-scale update rule converge to a local nash equilibrium. In Advances in Neural Information Processing Systems, volume 30, 2017.
+[19] C.-W. Huang, R. T. Chen, C. Tsirigotis, and A. Courville. Convex potential flows: Universal probability distributions with optimal transport and convex optimization. ICLR, 2021.
+[20] M. F. Hutchinson. A stochastic estimator of the trace of the influence matrix for laplacian smoothing splines. Communications in Statistics-Simulation and Computation, 18(3):1059­ 1076, 1989.
+[21] S. Ioffe and C. Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In International conference on machine learning, pages 448­456. PMLR, 2015.
+[22] H. Kahn. Use of different Monte Carlo sampling techniques. Rand Corporation, 1955.
+[23] W. Karush. Minima of functions of several variables with inequalities as side constraints. M. Sc. Dissertation. Dept. of Mathematics, Univ. of Chicago, 1939.
+[24] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. ICLR, 2015.
+[25] D. P. Kingma and P. Dhariwal. Glow: generative flow with invertible 1× 1 convolutions. In Advances in Neural Information Processing Systems, volume 31, 2018.
+[26] D. P. Kingma and M. Welling. Auto-encoding variational bayes. ICLR, 2014.
+[27] D. P. Kingma, T. Salimans, R. Jozefowicz, X. Chen, I. Sutskever, and M. Welling. Improved variational inference with inverse autoregressive flow. In Advances in Neural Information Processing Systems, volume 30, 2016.
+[28] I. Kobyzev, S. Prince, and M. Brubaker. Normalizing flows: An introduction and review of current methods. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2020.
+[29] S. G. Krantz and H. R. Parks. Geometric integration theory. Springer Science & Business Media, 2008.
+[30] A. Krizhevsky, G. Hinton, et al. Learning multiple layers of features from tiny images. 2009.
+[31] H. W. Kuhn and A. Tucker. W., 1951," nonlinear programming,". In Proceedings of the Second Berkeley Symposium on Mathematical Statistics and Probability(University of California Press, Berkeley, CA), volume 481492, 1951.
+[32] A. Kumar, B. Poole, and K. Murphy. Regularized autoencoders via relaxed injective probability flow. In International Conference on Artificial Intelligence and Statistics, pages 4292­4301. PMLR, 2020.
+[33] Y. LeChun. The mnist database of handwritten digits, 1998. URL http://yann. lecun. com/exdb/mnist, 1998.
+[34] G. Loaiza-Ganem, Y. Gao, and J. P. Cunningham. Maximum entropy flow networks. ICLR, 2017.
+[35] I. Loshchilov and F. Hutter. Decoupled weight decay regularization. ICLR, 2019.
+[36] C. Lu, J. Chen, C. Li, Q. Wang, and J. Zhu. Implicit normalizing flows. ICLR, 2021.
+[37] E. Mathieu and M. Nickel. Riemannian continuous normalizing flows. In Advances in Neural Information Processing Systems, volume 33, 2020.
+[38] E. Nalisnick, A. Matsukawa, Y. W. Teh, D. Gorur, and B. Lakshminarayanan. Do deep generative models know what they don't know? ICLR, 2019.
+11
+
+[39] Y. Netzer, T. Wang, A. Coates, A. Bissacco, B. Wu, and A. Y. Ng. Reading digits in natural images with unsupervised feature learning. 2011.
+[40] J. Nocedal and S. Wright. Numerical optimization. Springer Science & Business Media, 2006. [41] D. Oktay, N. McGreivy, J. Aduol, A. Beatson, and R. P. Adams. Randomized automatic
+differentiation. ICLR, 2021. [42] G. Papamakarios, T. Pavlakou, and I. Murray. Masked autoregressive flow for density estimation.
+In Advances in Neural Information Processing Systems, volume 30, 2017. [43] G. Papamakarios, E. Nalisnick, D. J. Rezende, S. Mohamed, and B. Lakshminarayanan. Nor-
+malizing flows for probabilistic modeling and inference. arXiv preprint arXiv:1912.02762, 2019. [44] A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, A. Desmaison, A. Kopf, E. Yang, Z. DeVito, M. Raison, A. Tejani, S. Chilamkurthy, B. Steiner, L. Fang, J. Bai, and S. Chintala. Pytorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems 32, volume 32. 2019. [45] X. Pennec. Intrinsic statistics on riemannian manifolds: Basic tools for geometric measurements. Journal of Mathematical Imaging and Vision, 25(1):127­154, 2006. [46] K. B. Petersen and M. S. Pedersen. The matrix cookbook, Oct. 2008. URL http://www2.imm. dtu.dk/pubdb/p.php?3274. Version 20081110. [47] A. Potapczynski, L. Wu, D. Biderman, G. Pleiss, and J. P. Cunningham. Bias-free scalable gaussian processes via randomized truncations. International Conference on Machine Learning, to appear, 2021. [48] J. Ren, P. J. Liu, E. Fertig, J. Snoek, R. Poplin, M. Depristo, J. Dillon, and B. Lakshminarayanan. Likelihood ratios for out-of-distribution detection. In Advances in Neural Information Processing Systems, volume 32, 2019. [49] D. Rezende and S. Mohamed. Variational inference with normalizing flows. In International Conference on Machine Learning, pages 1530­1538. PMLR, 2015. [50] D. J. Rezende, G. Papamakarios, S. Racaniere, M. Albergo, G. Kanwar, P. Shanahan, and K. Cranmer. Normalizing flows on tori and spheres. In International Conference on Machine Learning, pages 8083­8092. PMLR, 2020. [51] J. R. Shewchuk et al. An introduction to the conjugate gradient method without the agonizing pain, 1994. [52] C. Szegedy, W. Liu, Y. Jia, P. Sermanet, S. Reed, D. Anguelov, D. Erhan, V. Vanhoucke, and A. Rabinovich. Going deeper with convolutions. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 1­9, 2015. [53] H. Xiao, K. Rasul, and R. Vollgraf. Fashion-mnist: a novel image dataset for benchmarking machine learning algorithms. arXiv preprint arXiv:1708.07747, 2017.
+12
+
+A Injective Change-of-Variable Formula and Stacking Injective Flows
+
+We first derive (5) from (3). By the chain rule, we have:
+
+J[g] g (x) = J[f] f(x) J[h] g (x) .
+
+(13)
+
+The Jacobian-transpose Jacobian term in (3) thus becomes:
+
+det J[g] g (x) J[g] g (x) -1/2
+
+= det J[h] g (x) J[f] f(x) J[f] f(x) J[h] g (x) -1/2
+
+= det J[h]
+
+g (x)
+
+-1/2
+det J[f]
+
+f(x)
+
+J[f ]
+
+f(x)
+
+-1/2
+det J[h]
+
+= det J[h]
+
+g (x)
+
+-1
+det J[f]
+
+f(x)
+
+J[f ]
+
+f(x)
+
+-1/2
+,
+
+g (x)
+
+(14)
+-1/2
+
+where the second equality follows from the fact that J[h] (g (x)), J[f] (f(x))J[f](f(x)), and J[h](g (x)) are all square d × d matrices; and the third equality follows because determinants are invariant to transpositions. The observation that the three involved matrices are square is the reason behind why we can decompose the change-of-variable formula for g as applying first the change-of-variable formula for h, and then applying it for f.
+This property, unlike in the case of square flows, does not always hold. That is, the change-of-variable formula for a composition of injective transformations is not necessarily equivalent to applying the injective change-of-variable formula twice. To see this, consider the case where g1 : Rd  Rd2 and g2 : Rd2  RD are injective, where d < d2 < D and let g = g2  g1. Clearly g is injective by construction, and thus the determinant from its change-of-variable formula at a point z  Rd is given by:
+
+det J[g] (z)J[g](z) = det J[g1] (z)J[g2] (g1(z)) J[g2] (g1(z)) J[g1](z),
+
+(15)
+
+where now J[g1](z)  Rd2×d and J[g2](g1(z))  RD×d2 . Unlike the determinant from (14), this determinant cannot be easily decomposed into a product of determinants since the involved matrices are not all square. In particular, (15) need not match:
+
+det J[g1] (z)J[g1](z) · det J[g2] (g1(z))J[g2](g1(z)),
+
+(16)
+
+which would be the determinant terms from applying the change-of-variable formula twice. Note that this observation does not imply that a flow like g could not be trained with our method, it simply implies that the det J[g] (z)J[g](z) term has to be considered as a whole, and not decomposed into separate terms. It is easy to verify that in general, only an initial d-dimensional square flow can be separated from the overall Jacobian-transpose-Jacobian determinant.
+
+B Conjugate Gradients
+We outline the CG algorithm in Algorithm 1, whose output we write as CG(A; ) in the main manuscript. Note that CG does not need access to A, just a matrix-vector product routine against A, mvp_A(·). If A is symmetric positive definite, then CG converges in at most d steps, i.e. its output matches A-1 and the corresponding residual is 0, and CG uses thus at most d calls to mvp_A(·).
+13
+
+This convergence holds mathematically, but can be violated numerically if A is ill-conditioned, which is why the  < d condition is added in the while loop.
+Algorithm 1: CG
+Input :mvp_A(·), function for matrix-vector products against A  Rd×d  Rd
+  0, tolerance Output :A-1 u0  0  Rd // current solution r0  - // current residual q0  r0  0 while ||r ||2 >  and  < d do
+v  mvp_A(q )   (r r )/(q v ) u+1  u +  q r+1  r -  v   (r+1r+1)/(r r ) q+1  r+1 +  q   +1 end return u
+
+C Automatic Differentiation
+
+Here we summarize the relevant properties from forward- and backward-mode automatic differen-
+
+tiation (AD) which we use in the main manuscript. Let f be the composition of smooth functions
+
+f1, . . . , fL, i.e. f = fL  fL-1  · · ·  f1. For example, in our setting this function could be f, so that f1 = pad, and the rest of the functions could be coupling layers from a D-dimensional square flow (or the functions whose compositions results in the coupling layers). By the chain rule, the
+
+Jacobian of f is given by:
+
+J[f ](z) = J[fL](f¯L-1(z)) · · · J[f2](f¯1(z))J[f1](z),
+
+(17)
+
+where f¯l := fl  fl-1  · · ·  f1 for l = 1, 2, . . . , L - 1. Forward-mode AD computes products from right to left, and is thus efficient for computing jvp operations. Computing J[f ](z) is thus
+
+obtained by performing L matrix-vector multiplications, one against each of the Jacobians on the
+
+right hand side of (17). Backward-mode AD computes products from left to right, and would thus
+
+result in significantly more inefficient jvp evaluations involving L - 1 matrix-matrix products,
+
+and a single matrix-vector product. Analogously, backward-mode AD computes vjps of the form
+
+v J[f ](z) efficiently, using L vector-matrix products, while forward-mode AD would require L - 1
+
+matrix-matrix products and a single vector-matrix product.
+
+Typically, the cost of evaluating a matrix-vector or vector-matrix product against J[fl+1](f¯l) (or J[f1](z)) is the same as computing f¯l+1(z) from f¯l(z), i.e. the cost of evaluating fl+1 (or the cost of evaluating f1 in the case of J[f1](z)) [3]. jvp and vjp computations thus not only have the same computational cost, but this cost is also equivalent to a forward pass, i.e. computing f .
+
+When computing f , obtaining a jvp with forward-mode AD adds the same memory cost as another computation of f since intermediate results do not have to be stored. That is, in order to compute J[fl](f¯l-1(z)) · · · J[f1](z) , we only need to store J[fl-1](f¯l-2(z)) · · · J[f1](z) and f¯l-1(z) (which has to be stored anyway for computing f ) in memory. On the other hand, computing a vjp with backward-mode AD has a higher memory cost: One has to first compute f and store all the intermediate f¯l(z) (along with z), since computing v J[fL](f¯L-1(z)) · · · J[fl](f¯l-1(z)) from v J[fL](f¯L-1(z)) · · · J[fl+1](f¯l(z)) requires having f¯l-1(z) in memory.
+
+D Batch Normalization
+
+We now explain the issues that arise when combining batch normalization with vjps. These issues arise not only in our setting, but every time backward-mode AD has to be called to compute or
+
+14
+
+approximate the gradient of the determinant term. We consider the case with a batch of size 2, x1 and x2, as it exemplifies the issue and the notation becomes simpler. Consider applying f (without batch normalization) to each element in the batch, which we denote with the batch function F:
+
+F(x1, x2) := (f(x1), f(x2)) .
+
+(18)
+
+The Jacobian of F clearly has a block-diagonal structure:
+
+J[F](x1, x2) =
+
+J[f ](x1 ) 0
+
+0 J[f ](x2 )
+
+.
+
+(19)
+
+This structure implies that relevant computations such as vjps, jvps, and determinants parallelize over the batch:
+
+(v1, v2) J[F](x1, x2) = v1 J[f](x1), v2 J[f](x2)
+
+(20)
+
+J[F](x1, x2)
+
+1 2
+
+=
+
+J[f](x1) 1 J[f](x2) 2
+
+det J[F] (x1, x2)J[F](x1, x2) = det J[f] (x1)J[f](x1) det J[f] (x2)J[f](x2).
+
+In contrast, when using batch normalization, the resulting computation FBN (x1, x2) does not have a block-diagonal Jacobian, and thus this parallelism over the batch breaks down, in other words:
+
+(v1, v2) J F(BN) (x1, x2) = v1 J[f](x1), v2 J[f](x2)
+
+(21)
+
+J FBN (x1, x2)
+
+1 2
+
+=
+
+J[f](x1) 1 J[f](x2) 2
+
+det J FBN (x1, x2)J FBN (x1, x2) = det J[f] (x1)J[f](x1) det J[f] (x2)J[f](x2),
+
+where the above = signs should be interpreted as "not generally equal to" rather than always not equal to, as equalities could hold coincidentally in rare cases.
+
+In square flow implementations, AD is never used to obtain any of these quantities, and the Jacobian log determinants are explicitly computed for each element in the batch. In other words, this batch dependence is ignored in square flows, both in the log determinant computation, and when backpropagating through it. Elaborating on this point, AD is only used to backpropagate (with respect to ) over this explicit computation. If AD was used on FBN to construct the matrices and we then computed the corresponding log determinants, the results would not match with the explicitly computed log determinants: The latter would be equivalent to using batch normalization with a stop_gradient operation with respect to (x1, x2) but not with respect to , while the former would use no stop_gradient whatsoever. Unfortunately, this partial stop_gradient operation only with respect to inputs but not parameters is not available in commonly used AD libraries. While our custom implementation of jvps can be easily "hard-coded" to have this behaviour, doing so for vjps would require significant modifications to PyTorch. We note that this is not a fundamental limitation and that these modifications could be done to obtain vjps that behave as expected with a low-level re-implementation of batch normalization, but these fall outside of the scope of our paper. Thus, in the interest of performing computations in a manner that remains consistent with what is commonly done for square flows and that allows fair comparisons of our exact and stochastic methods, we avoid using batch normalization.
+
+E FID and FID-like Scores
+
+For a given dataset {x1, . . . , xn}  RD and a set of samples generated by a model {x(1g), . . . , x(mg)}  RD, along with a statistic T : RD  Rr, the empirical means and covariances are given by:
+
+1n
+
+µ^ := n
+
+T (xi),
+
+i=1
+
+µ^(g) := 1
+
+m
+T
+
+m
+
+x(ig)
+
+,
+
+i=1
+
+^ := 1 n-1
+
+n
+
+(T (xi) - µ^) (T (xi) - µ^)
+
+i=1
+
+^ (g) := 1
+
+m
+
+m-1
+
+T x(ig) - µ^(g)
+
+i=1
+
+T x(ig)
+
+- µ^(g)
+
+(22) . (23)
+
+15
+
+Table 4: Training times in seconds, "K > 1" means K = 10 for tabular data and K = 4 for images.
+
+Dataset
+POWER GAS HEPMASS MINIBOONE MNIST FMNIST
+
+RNFs-ML (exact)
+
+EPOCH TOTAL
+
+53.8 37.3 143 49.3 2.40e3 2.34e3
+
+4.13e3 2.51e3 1.01e4 4.16e3 2.59e5 2.59e5
+
+RNFs-ML (K = 1)
+
+EPOCH TOTAL
+
+67.4 62.7 146 26.3 1.71e3 1.72e3
+
+6.76e3 4.51e3 8.28e3 2.01e3 1.57e5 1.50e5
+
+RNFs-ML (K > 1)
+
+EPOCH TOTAL
+
+136 80.1 159 29.8 3.03e3 3.15e3
+
+1.14e4 5.24e3 1.20e4 2.94e3 3.20e5 2.10e5
+
+RNFs-TS
+
+EPOCH TOTAL
+
+45.1 43.2 29.1 4.61 2.13e2 1.04e2
+
+3.83e3 3.49e3 2.42e3 481 3.90e4 1.11e4
+
+The FID score takes T as the last hidden layer of a pretrained inception network [52], and evaluates
+
+generated sample quality by comparing generated moments against data moments. This comparison
+
+is done with the squared Wasserstein-2 distance between Gaussians with corresponding moments,
+
+which is given by:
+
+2
+
+1/2
+
+µ^ - µ^(g) + tr ^ + ^ (g) - 2 ^ ^ (g)
+
+,
+
+(24)
+
+2
+
+which is 0 if and only if the moments match. Our proposed FID-like score for tabular data is computed the exact same way, except no inception network is used. Instead, we simply take T to be the identity, T (x) = x.
+
+F Experimental Details
+
+First we will comment on hyperparameters/architectural choices shared across experiments. The D-dimensional square flow that we use, as mentioned in the main manuscript, is a RealNVP network [13]. In all cases, we use the ADAM [24] optimizer and train with early stopping against some validation criterion specified for each experiment separately and discussed further in each of the relevant subsections below. We use no weight decay. We also do not use batch normalization in any experiments for the reasons mentioned above in Appendix D. We use a standard Gaussian on d dimensions as pZ in all experiments.
+Compute We ran our two-dimensional experiments on a Lenovo T530 laptop with an Intel i5 processor, with negligible training time per epoch. We ran the tabular data experiments on a variety of NVIDIA GeForce GTX GPUs on a shared cluster: we had, at varying times, access to 1080, 1080 Ti, and 2080 Ti models, but never access to more than six cards in total at once. For the image experiments, we had access to a 32GB-configuration NVIDIA Tesla v100 GPU. We ran each of the tabular and image experiments on a single card at a time, except for the image experiments for the RNFs-ML (exact) and (K = 10) models which we parallelized over four cards.
+Table 4 includes training times for all of our experiments. Since we used FID-like and FID scores for ealy stopping, we include both per-epoch and total times. Per epoch times of RNFs-ML exclude epochs where the Jacobian-transpose-Jacobian log determinant is annealed with a 0 weight, although we include time added from this portion of training into the total time cost. Note throughout this section we also consider one epoch of the two-step baseline procedure to be one full pass through the data training the likelihood term, and then one full pass through the data training the reconstruction term.
+
+F.1 Simulated Data
+
+The
+
+data
+
+for
+
+this
+
+experiment
+
+is
+
+simulated
+
+from
+
+a
+
+von
+
+Mises
+
+distribution
+
+centred
+
+at
+
+ 2
+
+projected
+
+onto
+
+a circle of radius 1. We randomly generate 10,000 training data points and train with batch sizes
+
+of 1,000. We use 1,000 points for validation, performing early stopping using the value of the full
+
+objective and halting training when we do not see any validation improvement for 50 epochs. We
+
+create visualizations in Figure 1 and Figure 3 by taking 1,000 grid points equally-spaced between
+
+-3 and 3 as the low-dimensional space, project these into higher dimensions by applying the flow
+
+g, and then assign density to these points using the injective change-of-variable formula (2). In this
+
+low-dimensional example, we use the full Jacobian-transpose-Jacobian which ends up just being a
+
+16
+
+scalar as d = 1. We commence likelihood annealing (when active) on the 500-th training epoch and end up with a full likelihood term by the 1000-th.
+For the D-dimensional square flow f, we used a 5-layer RealNVP model, with each layer having a fully-connected coupler network of size 2 × 10, i.e. 2 hidden layers each of size 10, outputting the shift and (log) scale values. The baseline additionally uses a simple shift-and-scale transformation in d-dimensional space as h; we simply use the identity map for h in this simple example.
+We perform slightly different parameter sweeps for the two methods based on preliminary exploration. For the baseline two-step procedure, we perform runs over the following grid:
+· Learning rate: 10-3, 10-4. · Regularization parameter (): 100, 1,000, 10,000 (which for this method is equivalent to
+having a separate learning rate for the regularization objective).
+· Likelihood annealing: True or False.
+For our method, we search over the following, excluding learning rate since our method was stable at the higher rate of 10-3:
+· Regularization parameter (): 10, 50, 200.
+· Likelihood annealing: True or False.
+Empirically we found the two-step baseline performed better with the higher regularization, which also agrees with the hyperparameter settings from their paper.
+Divergences on RNFs-TS between our codebase and the implementation of [6] Although we were able to replicate the baseline RNF-TS method, there were some different choices made in the codebase of the baseline method (available here: https://github.com/johannbrehmer/ manifold-flow), which we outline below:
+· The baseline was trained for 120 epochs and then selects the model with best validation score, whereas we use early stopping over an (essentially) unlimited number of epochs.
+· The baseline weights the reconstruction term with a factor of 100 and the likelihood term with a factor of 0.1. This is equivalent in our codebase to setting  = 1,000, and lowering the learning rate by a factor of 10.
+· The baseline uses cosine annealing of the learning rate, which we do not use.
+· The baseline includes a sharp Normal base distribution on the pulled-back padded coordinates. We neglected to include this as it isn't mentioned in the paper and can end up resulting in essentially a square flow construction.
+· The baseline uses the ADAMW optimizer [35] to fix issues with weight decay within ADAM (which they also use). We stick with standard ADAM as we do not use weight decay.
+· The baseline flow reparametrizes the scale s of the RealNVP network as s = (s~+2)+10-3, where s~ is the unconstrained scale and  is the sigmoid function, but this constrains the scale to be less than 1 + 10-3. This appears to be done for stability of the transformation (cf. the ResNets below). We instead use the standard parametrization of s = exp(s~) as the fully-connected networks appear to be adequately stable.
+· The Baseline uses ResNets with ReLU activation of size 2 × 100 as the affine coupling networks. We use MLPs with tanh activation function instead.
+· The baseline uses a dataset which is not strictly on a manifold. The radius of a point on the circle is sampled from N (1, 0.012). We use a strictly one-dimensional distribution instead with a von Mises distribution on the angle as noted above.
+In general, we favoured more standard and simpler choices for modelling the circle, outside of the likelihood annealing which is non-standard.
+We note that, while the results reported in the main manuscript are representative of common runs, both for RNFs-ML (exact) and RNFs-TS; not every single run of RNFs-ML (exact) obtained results as good as the ones from the main manuscript. Similarly, some runs of RNFs-TS recovered better
+17
+
+RNFs-ML (exact) density
+
+RNFs-TS density
+
+RNFs-TS density
+
+RNFs-ML (exact) speed
+
+RNFs-TS speed
+
+RNFs-TS speed
+
+Figure 3: Densities (top row) and speeds (bottom row) for additional runs. Failed runs not recovering neither manifold nor the distribution on it, RNFs-ML (exact) (left column) and RNFs-TS (right column). Successful RNFs-TS run (middle column).
+
+likelihoods than the one from the main manuscript. We emphasize again that the results reported on the main manuscript are the most common ones: most RNFs-ML (exact) runs correctly recovered both the manifold and the distribution on it, and most RNFs-TS runs recovered only the manifold correctly. For completeness, we include in Figure 3 some of the rare runs where results were different than the ones reported in the main manuscript. Interestingly, we can see that the successful RNFs-TS run, which managed to recover the distribution on the manifold, had more constant speeds than other RNFs-TS runs.
+
+F.2 Tabular Data
+
+For the tabular data, we use the GAS, POWER, HEPMASS, and MINIBOONE datasets, preprocessed as in Papamakarios et al. [42], although we neglect to use a test dataset as we simply compared moments on the trained data, as is typically done with the FID score. We did not observe problems with overfitting in practice for any of the methods. We use the FID-like metric with the first and second moments of the generated and observed data as described in Appendix E for early stopping, halting training after 20 epochs of no improvement.
+
+We again use a RealNVP flow in D dimensions but now with 10 layers, with each layer having a fully-connected coupler network of hidden dimension 4 × 128. The d-dimensional flow here is also a RealNVP, but just a 5-layer network with couplers of size 2 × 32.
+
+In all methods, we use a regularization parameter of  = 50. We introduce the likelihood term with
+
+low weight after 25 epochs, linearly increasing its contribution to the objective until it is set to its
+
+full weight after 50 epochs. We select d as
+
+D 2
+
+, except for ML methods on D = 8 GAS which use
+
+d = 2 (noted below). We use a learning rate of 10-4. For the methods involving the Hutchinson
+
+estimator, we use a standard Gaussian as the estimating distribution. We also experimented with a
+
+Rademacher distribution here but found the Gaussian to be superior.
+
+Results reported on the main manuscript are the mean of 5 runs (with different seeds) plus/minus standard error. Occasionally, both RNFs-ML and RNFs-TS resulted in failed runs with FID-like scores at least an order of magnitude larger than other runs. In these rare instances, we did another run and ignored the outlier. We did this for both methods, and we do point out that RNFs-ML did not have a higher number of failed runs.
+
+As mentioned in the main manuscript, GAS required slightly more tuning as RNFs-ML did not outperform RNFs-TS when using d = 4. We instead use latent dimension d = 2, where this time RNFs-ML did outperform. Since RNFs-TS did better with d = 4, we report those numbers in the
+
+18
+
+main manuscript. Otherwise, our methods outperformed the baseline out-of-the-box, using parameter configurations gleaned from the image and circle experiments.
+We also include the batch sizes here for completeness, which were set to be reasonably large for the purposes of speeding up the runs:
+· POWER - 5,000 · GAS - 2,500 · HEPMASS - 750 · MINIBOONE - 400
+F.3 Image Data and Out-of-Distribution Detection
+In this set of experiments, we mostly tuned the RNFs-ML methods on MNIST for K = 1 ­ applying any applicable settings to RNFs-TS on MNIST as well ­ which is likely one of the main reasons that RNFs-ML perform so well for K = 1 vs. the exact method or K = 4. The reason why we spent so much time on K = 1 is that it was the fastest experiment to run and thus the easiest to iterate on. Our general strategy for tuning was to stick to a base set of parameters that performed reasonably well and then try various things to improve performance. A full grid search of all the parameters we might have wanted to try was quite prohibitive on the compute that we had available. Some specific details on settings follow below. For the D-dimensional square flow, we mainly used the 10-layer RealNVP model which exactly mirrors the setup that Dinh et al. [13] used on image data, except we neglect to include batch normalization (as discussed in Appendix D) and we also tried reducing the size of the ResNet coupling networks from 8 × 64 to 4 × 64 for computational purposes. For further computational savings, we additionally attempted to use a RealNVP with fewer layers as the D-dimensional square flow, but this performed extremely poorly and we did not revisit it. For the d-dimensional square component, we used another RealNVP with either 5 or 10 layers, and fully-connected coupler networks of size 4 × 32. We also looked into modifying the flow here to be a neural spline flow [14], but this, like the smaller D-dimensional RealNVP, performed very poorly as well. This may be because we did not constrain the norm of the gradients, although further investigation is required. We also looked into using no d-dimensional flow for our methods as in the circle experiment, but this did not work well at all. For padding, we first randomly (although this is fixed once the run begins) permute the d-dimensional input, pad to get to the appropriate length of vector, and then reshape to put into image dimension. We also pad with zeros when performing the inverse of the density split operation (cf. the z to x direction of Dinh et al. [13, Figure 4(b)]), so that the input is actually padded twice at various steps of the flow.
+When we used likelihood annealing, we did the same thing as for the tabular data: optimize only the reconstruction term for 25 epochs, then slowly and linearly introduce the likelihood term up until it has a weight of 1 in the objective function after epoch 50.
+We summarize our attempted parameters in Table 5. For some choices of parameters, such as likelihood annealing set to False, d = 15, 30,  = 10,000, and CG tolerance set to 1, we had very few runs because of computational reasons. However, we note that the run with low CG tolerance ends up being the most successful run on MNIST. We have included "SHORT NAMES" in the table for ease of listing hyperparameter values for the runs in Table 3, which we now provide for MNIST and FMNIST in Table 6 and Table 7 respectively. We also include batch sizes in the table. Note that  indicates that the run was launched on 2 GPU cards simultaneously, whereas  indicates that the run was launched on 4 GPU cards.
+19
+
+Table 5: Parameter combinations investigated for MNIST runs. Note that the final two rows are irrelevant for RNF-ML (exact) and RNF-TS. We include "short names" for ease of listing parameters for the runs in Table 3.
+
+PARAMETER
+Likelihood Annealing Reconstruction parameter Low dimension D-dim flow coupler d-dim flow layers Hutchinson distribution CG tolerance (normalized)
+
+SHORT NAME
+LA  d D NET d LAYERS HUTCH tol
+
+MAIN VALUE
+True 50 20 8 × 64 5 Gaussian 1
+
+ALTERNATIVES
+False 5, 500, 10000 10, 15, 30 4 × 64 10 Rademacher 0.001
+
+Table 6: Parameter choices for the MNIST runs reported in Table 3.
+
+METHOD
+
+LA  d D NET d LAYERS HUTCH tol BATCH
+
+RNFs-ML (exact) True 5 20 8 × 64 10
+
+RNFs-ML (K = 1) True 5 20 8 × 64 10
+
+RNFs-ML (K = 4) True 50 20 8 × 64 5
+
+RNFs-TS
+
+True 50 20 8 × 64 5
+
+N/A Gaussian Gaussian N/A
+
+N/A 0.001 1 N/A
+
+100
+200 100
+200
+
+Table 7: Parameter choices for the FMNIST runs reported in Table 3.
+
+METHOD
+
+LA  d D NET d LAYERS HUTCH
+
+tol BATCH
+
+RNFs-ML (exact) True 50 20 8 × 64 10
+
+RNFs-ML (K = 1) True 50 20 8 × 64 5
+
+RNFs-ML (K = 4) True 50 20 8 × 64 10
+
+RNFs-TS
+
+False 5 20 4 × 64 10
+
+N/A
+
+N/A 100
+
+Rademacher 1 200
+
+Rademacher 1
+
+200
+
+N/A
+
+N/A 200
+
+Further Out-of-Distribution Detection Results Figure 4 shows RNFs-ML log-likelihoods for models trained on MNIST (left panel), and we can see that indeed MNIST is assigned higher likelihoods than FMNIST. We also include OoD detection results when using reconstruction error instead of log-likelihoods, for models trained on FMNIST (middle panel) and MNIST (right panel). We observed similar results with RNFs-TS. Surprisingly, it is now the reconstruction error which exhibits puzzling behaviour: it is always lower on FMNIST, regardless of whether the model was trained on FMNIST or MNIST. Once again, this behaviour also happens for RNFs-TS, where the reconstruction error is optimized separately. We thus hypothesize that this behaviour is not due to maximum likelihood training, and rather is a consequence of inductive biases of the architecture.
+
+Trained on MNIST
+
+Trained on FMNIST
+
+Trained on MNIST
+
+Figure 4: OoD log-likelihood histograms trained on MNIST (left), and OoD reconstruction error histograms trained on FMNIST (middle) and MNIST (right). Log-likelihood results (left) are RNFsML (exact), and reconstruction results (middle and right) are RNFs-ML (K = 1). Note that green denotes in-distribution data, and blue OoD data; and colors do not correspond to datasets.
+20
+
+

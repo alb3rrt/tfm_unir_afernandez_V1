@@ -1,0 +1,1199 @@
+Single-query Path Planning Using Sample-efficient Probability Informed Trees
+Daniel Rakita1, Bilge Mutlu, Michael Gleicher
+
+arXiv:2106.00150v1 [cs.RO] 31 May 2021
+
+Abstract--In this work, we present a novel sampling-based path planning method, called SPRINT. The method finds solutions for high dimensional path planning problems quickly and robustly. Its efficiency comes from minimizing the number of collision check samples. This reduction in sampling relies on heuristics that predict the likelihood that samples will be useful in the search process. Specifically, heuristics (1) prioritize more promising search regions; (2) cull samples from local minima regions; and (3) steer the search away from previously observed collision states. Empirical evaluations show that our method finds shorter or comparable-length solution paths in significantly less time than commonly used methods. We demonstrate that these performance gains can be largely attributed to our approach to achieve sample efficiency.
+
+I. INTRODUCTION
+Solving high-dimensional path planning problems, such as for robot manipulator motion planning, remains a challenging and important problem. Many aspects of this problem are often addressed with sampling-based path planners, which sample a collision-check function in order to probe the configuration space and inform a search strategy. While, in theory, many sampling-based planners are guaranteed to eventually find a solution if one exists, in practice, even state-of-the-art approaches are unable to consistently solve challenging problems in reasonable amounts of time as they require many costly collision-check samples [1].
+In this work, we present a novel sampling-based path planning method, called SPRINT (Sample-efficient PRobability INformed Trees) that finds solutions for high dimensional planning problems significantly faster than many state-ofthe-art approaches. Our method uses heuristics designed to minimize the total number of collision-check samples required to find solutions by modeling how likely regions of the search space will yield useful samples. These heuristics, as part of newly proposed global and local tree searches, are used to (1) prioritize more promising search regions to foster a greedy first global search strategy, while still exploring broadly in the limit; (2) cull samples from local minima regions in the local search to avoid wasteful, unfruitful samples; and (3) steer the local search away from previously observed collision states toward search regions predicted to contain more useful free-space samples. Our heuristics can be implemented
+1Authors are with the Department of Computer Sciences, University of Wisconsin­Madison, Madison 53706, USA
+[rakita|bilge|gleicher]@cs.wisc.edu This work was supported by a Microsoft Research PhD Fellowship, National Science Foundation award 1830242, and a NASA University Leadership Initiative (ULI) grant awarded to the UW-Madison and The Boeing Company (Cooperative Agreement # 80NSSC19M0124).
+
+Fig. 1. (a) This 2D planning example shows the sample efficiency of the SPRINT planner, as many fewer collision-check samples were taken (left) compared to RRT-Connect (middle) and RRT (right). (b­c) This sample efficiency also makes path planning more efficient in high dimensions, such as for the illustrated robot manipulator motion planning problems.
+with efficient information storage and retrieval methods that further accelerate the search. Specifically, our method does not perform expensive nearest neighbor checking each time a node is added to the search graph structure.
+We assessed the efficacy of our method by running a large testbed of simulation experiments and compared our method to numerous path planners on single-arm and bimanual robot manipulation problems (§VII). Our method found shorter or comparable-length solution paths in significantly less time than the alternatives. We demonstrate that these performance advantages were, in large part, due to an increase in sample efficiency from our heuristics. We conclude our work by discussing the implications of our results in robotics applications and beyond. We provide open-source code for an implementation of our method.1
+II. RELATED WORKS
+In general, there are three main paradigms for solving path planning problems: sampling-based, local optimization, and search-based. Sampling-based planners, many of which
+1https://github.com/uwgraphics/lynx
+
+are extensions of Rapidly-Exploring Random Tree (RRT) [2], Probabilistic Roadmap (PRM) [3], or Expansive Space Tree (EST) [4] methods, often use random configuration-space samples to bootstrap a broad search strategy. These algorithms often have guarantees, such as probabilistic completeness or asymptotic optimality [5], [6], though they often over-explore the space with many unnecessary samples in order to achieve such guarantees.
+Our work shares particular similarities with informed-tree sampling-based approaches that iteratively build search strategies that trade-off between exploration and exploitation based on information gathered at run-time [7]­[11]. Our work draws on these approaches, but differs in two main ways: (1) these approaches generally use linear local search segments between samples, whereas our work proposes a new local search designed to maneuver through narrow passages and avoid over-sampling; and (2) the search strategies for these approaches are typically more focused on achieving asymptotic optimality, whereas the search strategies for our method are more singularly focused on reaching a first feasible solution as quickly as possible.
+Local optimization-based planners, such as CHOMP [12] or STOMP [13], use non-linear optimization to iteratively transform a trajectory into a higher quality path. These methods are designed to be greedier than sampling-based methods, though they often have fewer guarantees, strongly depend on the quality of the initial condition, and commonly do not converge on a feasible solution due to local minima.
+Search-based planners prioritize exploration based on a set heuristic, such as best-first search, depth-first search, breadthfirst search, or the A heuristic [14]. However, because these searches are often structured in a discrete, grid-like fashion, higher dimensional planning often scales intractably in terms of memory and run-time complexity.
+Our method draws on all of the above paradigms, and attempts to unite many of the discussed themes. To illustrate, SPRINT also uses random samples to bootstrap its search and explore broadly, but local optimization and search-based concepts are used to optimize and prioritize certain parts of the search to increase the probability of sample usefulness. We compare our method to other common approaches in our evaluation (§VII) to assess whether this bridging of concepts is effective for path planning.
+III. PRELIMINARIES
+A. Problem Statement
+Consider  as a d-dimensional configuration space with states within  denoted as q. Suppose obs is a subset of  considered to be infeasible space (i.e., obstacles). Feasible space can then be defined as the subset of  not in an obstacle region: free   \ obs. A path in  is a continuous function [qa, qb] : [0, 1]  , where [qa, qb](0) = qa, [qa, qb](1) = qb, and all points along the path are in . The goal in path planning is to find a feasible, C0 continuous path [qinit, qgoal] such that [qinit, qgoal](0) is a given start state, qinit; [qinit, qgoal](1) is a given goal state, qgoal; and [qinit, qgoal](u)  free, u  [0, 1].
+
+B. Graph-based Planning Structure
+A common structure to solve the problem described above is a graph-based search [2]­[6], [10]. This framework organizes the search into a set of collision-free edges, E, between pairs of nodes in a set N to form a graph G = (N, E). The goal in these searches is to construct G such that a feasible path [qinit, qgoal] is contained as some connected sequence of edge traversals between nodes within the graph. The feasibility of each edge is checked prior to its addition to the graph using a collision-check function. SPRINT interleaves global and local graph-based searches, overviewed in §IV-A.
+C. Search-space Regions and Useful Samples
+The overall goal of SPRINT is to minimize the number of collision-check samples by incorporating probability heuristics that model how likely regions of the search space will yield useful samples.
+A search-space region is a segment of the configuration space  loosely thought of as states in the vicinity of the line segment between two specified end-points. These regions are used to characterize and model where the planner has previously searched and where the planner could search in the future. Their loose definition is sufficient for these use cases. We denote a search-space region as R[qa, qb], where qa and qb serve as the end-point markers of the region.
+Intuitively, a useful sample is a sample that plays an integral role in constructing a final solution path. More formally, we consider a sample to be ­useful if it achieves two criteria: (1) it is in free-space, free; and (2) it ultimately lies within a distance of  of the final solution path, [qinit, qgoal]. Note that this definition implies that it is unknowable if a sample is ­useful until a solution path is found. However, our method uses heuristics to predict the probability that a particular search-space region will contain at least one ­useful sample, which we will denote as Pr(U(R[qa, qb])). The following sections will detail the structure and functionalities of these probability heuristics.
+IV. TECHNICAL OVERVIEW
+This section outlines the search structure and overall strategy of the SPRINT method. Pseudocode of the SPRINT planning sub-processes can be found in Alg. 1­7.
+A. SPRINT Global planning Level
+The global planning level in SPRINT (Alg. 1) uses a treegraph as a search structure, Tg = (Ng, Eg), rooted at qinit. A set of sampled collision-free milestone points, M, serve as intermediary goals for the global search to reach en route to qgoal, reminiscent of FMT [6]. On each global planning level loop, the planner selects a best search-space region for the next local search, R[qn, qm] (qn  Ng, qm  M). Milestones that are reached via local searches to form global edges in Eg from already established nodes in Ng are added as global nodes in Ng. If the current set of milestone points does not foster a path to qgoal, more milestone points are added to M, and the search
+
+Algorithm 1: sprint(qinit, qgoal)
+
+1 Ng  {qinit} ; Eg   ; M  {qgoal} ; Rlocalmin   ; k  50 2 Loop either indefinitely or until some run-time limit is met
+
+3
+
+while |M| < k do
+
+4
+
+M + randomly sampled state from free
+
+5
+
+Loop
+
+6 7
+
+iRf[Rqn[q, nq,mq]m] protbhaenbility_heuristic_1(Ng, M, Rlocalmin)
+
+8
+
+k  1.5  k
+
+9
+
+break // go to line 2 to add more milestones to M
+
+10
+
+(success, T )  local_tree_search(qn , qm)
+
+11
+
+if success then
+
+12 13
+
+Nif gq m+ qmqg;oal
+
+Eg + then
+
+[qn , qm]
+
+;
+
+M ­ qm
+
+14
+
+return [qinit, qgoal] // solution found
+
+15
+
+else
+
+16
+
+Rlocalmin + R[qn , qm] // remember that this search-space
+
+region appears to be a local minimum trap
+
+Algorithm 2: local_tree_search(qn , qm)
+
+1 N  {qn }; E  ; Nstack  ; Ncheckpoints  {qn }; qx  qn 2 Hexploit   // hashmap with (q, (float, float)) key-value pairs
+
+3 Hexplore   // hashmap with (q, (float, float)) key-value pairs
+
+4 Hobs   // hashmap with (q, {q} sets) key-value pairs
+
+5 Hnum   // hashmap with (q, float) key-value pairs
+
+6 add checkpoint  true // the root node is always labeled as a checkpoint
+
+7 Loop
+
+8
+
+if probability_heuristic_2(qx, T ,  ) then
+
+9
+
+if add checkpoint then
+
+10
+
+Ncheckpoints + qx // label qx as checkpoint
+
+11
+
+exploit  ||qx ­ qm||; explore  ||qn ­ qx||
+
+12
+
+Hexploit + (qx, (0, exploit)); Hexplore + (qx, (0, explore))
+
+13 14 15
+
+Rif[qixn,fqo_Hcrc]ooab llsl l q+isp(iqrNoxo,cnbh(ea)cqk;bpcoiHi)nlntsuitmhteyn+_[hq(eqn ux, ,qr1xi)]s/t/iacl_l3c(hqecxk, pToi,nts
+
+)
+on
+
+the
+
+path from qx back to qn
+
+16
+
+do
+
+17
+
+Hexploit[q][0] += 1; Hexplore[q][0] += 1; Hobs[q] + qc
+
+18
+
+if Nstack.is_empty() then
+
+19
+
+return (false, T ) // if the stack is empty, the local
+
+search has failed
+
+20
+
+qx  Nstack.pop_last_added()
+
+21
+
+add checkpoint  true
+
+22
+
+else
+
+23
+
+// if
+[qx ,
+
+qqcc
+
+is not
+]  qx
+
+in collision
++ u  (qc ­ qx)
+
+,
+
+u
+
+
+
+[0,
+
+1]
+
+24 25
+
+N if
+
++ qc
+
+qc q;m
+
+E + then
+
+[qx ,
+
+qc ]
+
+;
+
+Nstack + qx ;
+
+qx  qc
+
+26
+
+return (true, T ) // local search solution was found
+
+27 28
+
+exploit for all
+
+q||Nqcche­ckpqomin|ts|;exp[lqonre,
+
+ qx ]
+
+||qn ­ qc ||
+// all checkpoints
+
+on
+
+the
+
+path from qx back to qn
+
+29
+
+do
+
+// update checkpoints with information about qc
+
+30
+
+Hnum[q] += 1
+
+31
+
+if exploit < Hexploit[q][1] then
+
+32
+
+Hexploit[q][0]  0; Hexploit[q][1]  exploit
+
+33
+
+else
+
+34
+
+Hexploit[q][0] += 1
+
+35
+
+if explore > Hexplore[q][1] then
+
+36
+
+Hexplore[q][0]  0; Hexploit[q][1]  explore
+
+37
+
+else
+
+38
+
+Hexplore[q][0] += 1
+
+39
+
+add checkpoint  false
+
+40
+
+else
+
+// if Probability Heuristic 2 considered the most recent qx as
+
+not worthwhile to extend, try the next node on the stack
+
+41
+
+if Nstack.is_empty() then
+
+42
+
+return (false, T ) // if the stack is empty, the local
+
+search has failed
+
+43
+
+qx  Nstack.pop_last_added()
+
+proceeds. This process iterates until qgoal is reached via Tg, provided a solution exists.
+In general, the global planning level is intended to be a simple wrapper around the more sophisticated local search, outlined below. While the global planning level achieves probabilistic completeness in the limit (§VI), in practice, the
+
+default starting set of 50 milestone points is sufficient to quickly solve all problems that we have ever tried.
+B. SPRINT Local Planning Level
+The local planning level in SPRINT (Alg. 2) also uses a tree-graph as a search structure, T = (N , E ). The root of the local tree is the first boundary point of the search-space region selected by the global planning level, qn, and the goal state that the local tree is trying to reach is the second boundary point of this region, qm.
+The local planning level in SPRINT is a greedy, depth-firstsearch-like algorithm that uses heuristics to intelligently select branching directions, backtrack to fruitful parts of the search tree, and stop as early as possible when a solution is unlikely to be found. The local search was designed to be particularly adept at steering around approximately convex-shaped obstacle sections and navigating through narrow passages (as seen in Figure 1a). While the local search has no guarantees and needs the global search to route around local minima regions, in practice, it is effective and solves many problems on its own, even in high dimensions.
+The local planning level progresses in three steps: (1) Select a node from the tree to extend from, qx  N ; (2) Decide if qx is worthwhile to extend (if not, return to step 1); and (3) If qx is worthwhile to extend, calculate a candidate node to extend toward, qc . After qc is calculated, it is checked for collision (Alg. 2, line 14). If qc is in free-space, it is added as a node to the tree, the algorithm assesses and stores information about how the search has improved or worsened given the addition of the new node, and it becomes the next qx to extend (Alg. 2, lines 23­39). If qc is in collision, the collision-point is stored by the algorithm to help prevent the tree from colliding with the same region again and a next qx is popped off of a stack of nodes to extend from, Nstack (Alg. 2, lines 15­21). These steps repeat until either the local goal is reached or Nstack becomes empty.
+The heuristics used in the local search often rely on its ability to efficiently assess and characterize sub-trees within the tree. Therefore, the local search tree stores information allowing fast responses to queries such as "has the sub-tree rooted at node q recently progressed toward the goal qm?"; or "what previously observed collision points are in close proximity to the sub-tree rooted at node q?". To achieve these quick assessments, our method labels certain nodes in the local search tree as data checkpoints, then stores and accesses information at these checkpoints throughout the search. It would be highly inefficient for all nodes to be labeled as checkpoints. Thus, only the root node, qn, and nodes that have more than one child node are labeled as checkpoints, which reduces the overall number of checkpoints and structurally places them as roots of salient sub-trees where distinct branching decisions were made.
+When pertinent information is processed during the search, e.g., a node is added or a collision point is detected, this information is back-propagated through the tree and stored at all checkpoint nodes that reside on the path from the current extend node to the local tree root, qn. This process can be
+
+a
+
+b
+
+Algorithm 3: probability_heuristic_1(Ng, M, Rlocalmin)
+
+obs
+
+1 R[qn , qm]   ; best value = ­
+
+obs
+
+2 c1  1 ; c2  0.25 ; w1  1 ; w2  1.5 3 for all qn  Ng do
+
+4
+
+for all qm  M do
+
+5
+
+if R[qn, qm] / Rlocalmin then
+
+c
+
+d
+
+6
+
+x1
+
+
+
+||qm ­qgoal || ||qn ­qgoal ||
+
+//
+
+characterizes
+
+how
+
+much
+
+closer
+
+region
+
+would be getting to qgoal
+
+7
+
+g1  exp( ­x21 / 2c21) // first Gaussian term
+
+8
+
+x2  1 // initialization, iteratively constructed in for
+
+obs
+
+obs 9
+
+loop below
+for all R[qa, qb]  Rlocalmin do
+
+10
+
+p1  proj+(qn, R[qb, qa]) // projection point 1
+
+11
+
+p2  proj+(qm, R[qa, qb]) // projection point 2
+
+12
+
+d1  ||p1 ­ qn|| ; d2  ||p2 ­ qm|| // distances to
+
+e
+
+obs
+
+f
+
+obs
+
+13
+
+projection points
+
+x2
+
+
+
+x2
+
+
+
+(
+
+d1 +d2 0.5||qinit ­qgoal
+
+||
+
+)
+
+14
+
+g2  ( ­exp( ­x22 / 2c22) + 1 ) // second Gaussian term
+
+15
+
+if (w1  g1)  (w2  g2) > best value then
+
+16 17
+
+best value R[qn , qm]
+
+= (w1   R[qn
+
+g1 ) , qm
+
+ ]
+
+(w2  g2)
+// update
+
+best
+
+search-space
+
+region found thus far
+18 return R[qn , qm] // return best overall search-space region found
+
+g
+
+h
+
+obs
+
+obs
+
+
+
+Fig. 2. (a) - (d) The detected collision states (red dots) get stored (dotted lines) in all checkpoint nodes (dots with purple outlines) along the path from the current extend node, qx to the root, qn . (e) - (f) Each added node passes its exploitation and exploration progress information back to its predecessor checkpoints until (g) the search decides that it is stuck in a local minimum trap based on lack of progress. (h) A new search-space region is selected by the global search to route around the local minimum region.
+seen in Alg. 2 lines 17 and 30­39 where information is updated in four hashmap data structures (Hexploit, Hexplore, Hobs, Hnum, explained more below) on checkpoint nodes q  Ncheckpoints  [qn, qx]. This procedure ensures that checkpoints have access to information that has been processed "downstream" at newer, more distal parts of its sub-tree (illustrated in Figure 2).
+V. PROBABILITY HEURISTICS
+In this work, our method uses three probability heuristics, one in the global planning level and two in the local planning level (highlighted in green in Alg. 1 and 2). Each heuristic tries to guide the search into search-space regions with a high probability of containing ­useful samples. In this section, we describe each of these three heuristics.
+A. Probability Heuristic 1
+Probability Heuristic 1 is used by the global search to select which search-space region would be best to next attempt a local search. This assessment is based on two criteria: (1) A good search-space region should have an end-point qm  M that gets closer to qgoal. Intuitively, global edges that make progress toward the goal are more likely to have useful samples; and (2) A good search-space region should be far from any regions that already fostered local searches that did not reach their respective goals. The goal of this second
+
+Fig. 3. Projection procedure of a search-space region R[qn, qm] onto a region already deemed to be a local minimum trap, R[qa, qb].
+criterion is to de-prioritize the search from repeating a local search in a region already estimated to be a local minimum trap (stored in the Rlocalmin set in Alg. 1).
+We model the two criteria outlined above as a mixture of two respective Gaussian functions:
+
+Pr1( U(R[qg, qm]) | Tg ) =
+
+­1  [(w1  g1(qn, qm, Tg))  (w2  g2(qn, qm, Tg))]
+
+(1)
+
+These Gaussian functions can be seen in Alg. 3, lines
+
+7 and 8­14. The  scalar is a normalization constant, and
+
+the w scalars signify weights that adjust the peaks of their
+
+Gaussian terms. The default values for w1 and w2 were handtuned, though our experiments below show that performance
+
+is not overly sensitive to these parameters. The c scalar is the
+
+standard deviation over these Gaussian functions, which we
+
+set as the Euclidean distance from start to goal.
+
+The g1 function uses Euclidean distances to achieve the first criterion discussed above. Specifically, x1, the input variable
+of the g1 Gaussian function, is designed such that the closer a search-space region gets to qgoal compared to where it
+started, the higher the probability value will be from g1. The g2 function achieves the second criterion by projecting all candidate search-space regions onto rays cast from the end-
+
+points of prior unfruitful search-space regions (stored in the
+
+set Rlocalmin) and deprioritizing candidate regions with endpoints close to any of these projections (Alg. 3, lines 9­14,
+
+seen illustrated in Figure 3).
+
+B. Probability Heuristic 2
+Probability Heuristic 2 is used by the local search to decide whether a particular node in the local tree search, qx, is
+
+Algorithm 4: probability_heuristic_2(qx, T ,  )
+
+1 if qx  Ncheckpoints then
+
+2
+
+return false // prevents a node from being extended more than twice
+
+3   0.3 // lower bound for allowable probability 4 for all q  Ncheckpoints  [(qn , qx)] // all checkpoints on the path from qx
+back to qn
+5 do
+
+6
+
+x1  Hexploit[q][0] / Hnum[q]; x2  Hexplore[q][0] / Hnum[q]
+
+7
+
+x  min(x1, x2)
+
+8
+
+c  log2(Hnum[q])­1
+
+9
+
+g  exp( ­x2 / 2c2) // Gaussian value
+
+10
+
+if g <  then
+
+11
+
+return false // if even one checkpoint is below the probability
+
+threshold, the node is considered invalid to extend
+12 return true
+
+worthwhile to extend. This decision is made by checking
+information stored at all checkpoints along the path from qx back to qn. At a high level, qx is deemed worthwhile to extend if either (1) all of the sub-trees rooted at checkpoints along the path from qx back to qn have shown recent progress in terms of getting closer to the goal, qm. Throughout this work, we refer to this kind of progress as exploitation (stored and
+tracked in the Hexploit hashmap in Alg. 2); or (2) all of the sub-trees rooted at checkpoints along the path from qx back to qn have shown recent progress in terms of getting further from the tree root, qn. Throughout this work, we refer to this kind of progress as exploration (stored and tracked in the
+Hexplore hashmap in Alg. 2). If the sub-trees that qx is a part of show no sign of recent exploitation or exploration progress,
+the heuristic considers this region of the local tree trapped in
+a local minimum, and qx is culled prior to extension. We model Probability Heuristic 2 as the minimum of a set
+of probability functions:
+
+Pr2( U(R[qx, qm]) | T ) =
+
+min(
+qB
+
+g(qx, q, T
+
+)
+
+),
+
+B  Ncheckpoints  [qn , qx]
+
+(2)
+
+The probability functions are modeled as Gaussian functions, constructed in Alg. 4, lines 4 ­ 9. Here, x1 and x2 are the number of collision-check samples since a node has made exploitation and exploration progress, respectively. These values are stored and updated in the Hexploit and Hexplore hashmaps in Alg. 2, lines 17 and 31­38. We model this subtree assessment process by taking the minimum of x1 and x2 in Alg. 4, line 7. Taking the minimum ensures that if either exploitation or exploration progress are occurring in the given sub-tree (i.e., either x1 or x2 are near 0), the sub-tree as a whole will still be considered promising. This value is inputted into the Gaussian function in line 9 to output the approximate probability value g  [0, 1]. The standard-deviation c value is attenuated based on the number of nodes in a given sub-tree (stored and updated in the hashmap Hnum in Alg. 2) such that new sub-trees with few nodes do not fail too abruptly even if they do not immediately show exploitation or exploration progress. In our prototype system, we use a probability cutoff of  = 0.3, though our experiments below suggest that performance is not overly sensitive to this parameter selection.
+
+C. Probability Heuristic 3
+Probability Heuristic 3 is used by the local search to calculate which search-space region the local tree should extend
+
+Algorithm 5: Common Functions
+
+1
+
+proj_scalar(q, R[qa, qb])
+
+=
+
+(q­qa )·(qb ­qa ) (qb ­qa )·(qb ­qa )
+
+2 proj(q, R[qa, qb]) = qa + proj_scalar(q, R[qa, qb])  (qb ­ qa)
+
+3 proj+(q, R[qa, qb]) = qa + max(proj_scalar(q, R[qa, qb]), 0)  (qb ­ qa)
+
+0 if x  0
+
+4 hvs(x) =
+
+// Heaviside step function
+
+1 if x > 0
+
+Algorithm 6: probability_heuristic_3(qx, T ,  )
+
+1 w1  0.5; w2  1; w3  1.2
+
+2 qc  qx + (qx ­ qp) // initial condition prior to gradient ascent
+
+3 Nobs  get_nearby_collision_points(qx, T ,  ) if
+
+|Nobs| > 0 then
+
+4
+
+qc +=  // small amount of noise
+
+5 for 0...num iters do
+
+6
+
+qc
+
++=
+
+(w1
+
+g1 qc
+
+)
+
++
+
+(w2
+
+ 
+
+g2 qc
+
+)
+
++ (hvs(|Nobs|)  w3
+
+g3 qc
+
+)
+
+//
+
+Equations
+
+4,
+
+5, and 6, respectively
+
+7
+
+qc
+
+ qx +  
+
+qc ­qx ||qc ­qx ||
+
+//
+
+re-set
+
+to
+
+length
+
+
+
+8 return R[qx, qc]
+
+into from an extend node qx. This region is computed based
+
+on three criteria: (1) A good search-space region should follow
+
+a straight line path with respect to the predecessor edge of qx.
+
+This criterion prevents the local search from making drastic
+
+turns and unnecessarily turning back on its own path; (2) A
+
+good search-space region should get closer to the local goal, qm. Intuitively, making progress toward the goal is estimated
+to be useful; and (3) A good search-space region should move
+
+away from previously observed collision points nearby (stored
+
+in the Hobs hashmap in Alg. 2). A search-space region that is pointing in the direction of a previously observed collision
+
+point is also likely to collide, and thus, is less likely to lead
+
+to a useful sample.
+
+Instead of explicitly modeling a Pr3 model, we implicitly
+
+define the model through its gradient with respect to a search-
+
+space
+
+region
+
+end-point,
+
+qc:
+
+Pr3(
+
+U (R[qx ,qc ]) qc
+
+).
+
+Then,
+
+given
+
+this gradient, we perform gradient ascent to steer local edges
+
+in a way that would approximately optimize a Pr3. We model this gradient as proportional to the sum of three weighted sub-
+
+term gradients, each trying to achieve one of the three criteria
+
+from Probability Heuristic 3 above, respectively:
+
+Pr3( U(R[qx, qc])) | T qc
+
+)
+
+
+
+w1
+
+g1 qc
+
++
+
+w2
+
+g2 qc
+
++
+
+w3
+
+g3 qc
+
+(3)
+
+The
+
+g1 qc
+
+sub-term
+
+gradient
+
+pulls
+
+the
+
+search-space
+
+region
+
+in
+
+a straight line with respect to its predecessor edge. Here, qp
+
+denotes the predecessor node of the extend node, qx:
+
+g1 = qx ­ qp
+
+(4)
+
+qc ||qx ­ qp||
+
+The toward
+
+g2 qc
+the
+
+sub-term local goal,
+
+gradient qm:
+
+pulls
+
+the
+
+search-space
+
+region
+
+g2 qc
+
+= 2 
+
+qm ­ qc ||qm ­ qc||
+
+(5)
+
+2 = exp(­||qm ­ qc||2 / 42) + 1
+
+Here,
+
+2
+
+increases
+
+the
+
+pull
+
+from
+
+g2 qc
+
+as
+
+the
+
+local
+
+tree
+
+approaches its goal which helps avoid overshoot when doing
+
+gradient ascent. The  scalar is the fixed length of all local
+
+search edges.
+
+Algorithm 7: get_nearby_collision_points(qx, T ,  )
+
+1 Nobs   2 for qcheckpoint  Ncheckpoints  [qn , qx] // Ordered set of checkpoints from qx
+back to qn
+3 do
+
+4
+
+for qobs  Hobs[qcheckpoint] do
+
+5
+
+if qobs / Nobs then
+
+6
+
+Nobs + qobs // add collision point to Nobs
+
+7
+
+if |Nobs| > m then
+
+// m is some maximum capacity of Nobs, e.g. 10
+
+8
+
+return Nobs
+
+9 return Nobs
+
+The
+
+g3 qc
+
+sub-term
+
+gradient
+
+pushes the
+
+candidate
+
+edge
+
+away
+
+from a set of nearby, previously observed collision points
+
+qobs  Nobs (utility functions used in this sub-term gradient
+
+can be found in Alg. 5):
+
+g3 qc
+
+=
+
+1 |Nobs| qobsNobs 3,1  3,2 
+
+proj(qobs, R[qx, qc]) ­ qobs ||proj(qobs, R[qx, qc]) ­ qobs||
+
+(6)
+
+3,1 = hvs(proj_scalar(qobs, R[qx, qc]))
+
+3,2 = 5  exp(­||proj(qobs, R[qx, qc]) ­ qobs||2 / 42)
+
+The push from a particular collision point, qobs, is given in the direction of qobs towards its projection onto the candidate search-space region, R[qx, qc]. If this projection point lies
+"behind" qx, i.e., proj_scalar(qobs, R[qx, qc]) < 0, the collision point is considered already passed, and the 3,1 term removes this collision point's effect on the gradient. If qobs lies "ahead" of qx, 3,2 attenuates the push strength away from qobs such that a smaller distance between qobs and its projection point corresponds to a stronger push, and vice versa.
+
+The scalar 5 coefficient on the 3,2 term raises the peak of its corresponding Gaussian to further strengthen the push away
+
+from qobs if it is close to its projection onto R[qx, qc]. The set of nearby collision states, Nobs, is efficiently accessed in constant time, i.e., without using a heavy data structure
+
+like a kd-tree, by using the checkpoint data back-propagation
+
+technique outlined in §IV-B (Alg. 7). Here, collision points are
+
+stored and accessed at checkpoint nodes in the Hobs hashmap
+
+throughout
+
+Alg.
+
+2.
+
+Note
+
+that
+
+if
+
+|Nobs|
+
+
+
+0,
+
+the
+
+effect
+
+of
+
+g3 qc
+
+is cancelled by the Heaviside step coefficient in Alg. 6, line
+
+6,
+
+and
+
+thus,
+
+g3 qc
+
+does
+
+not
+
+need
+
+to
+
+be
+
+computed
+
+in
+
+this
+
+case.
+
+The
+
+Pr3( U(R[qx,qc]) ) qc
+
+gradient
+
+is
+
+used
+
+in
+
+gradient
+
+ascent
+
+iterations to steer the local tree, as seen in Alg. 6. Because
+
+this gradient ascent occurs at such a performance critical inner-
+
+loop process, we only do one or two iterations per local search
+
+loop in practice. By default, we use the point qx + (qx ­ qp)
+
+as the initial condition for qc in the gradient ascent. Also, if
+
+|Nobs| > 0, we add a small amount of noise to this initial
+
+condition. In our prototype system, this noise vector is drawn
+
+from
+
+a
+
+d-dimensional
+
+uniform
+
+distribution
+
+
+
+
+
+Ud(
+
+­ 100
+
+,
+
+ 100
+
+).
+
+Without this small random push, the local search would just
+
+stay on a single plane embedded in the configuration space.
+
+We also re-set the edge length to  after each gradient ascent
+
+iteration (Alg. 6, line 7).
+
+Sketch Proof : Consider [qinit, qgoal] as any feasible solution path found by a probabilistically complete planner parameterized by a set of k nodes, N  {q1, q2, ..., qk}, connected by linear edges, E. For example, solution paths found by RRT or PRM would fit this definition. Now, suppose ddimensional open balls of radii r1 . . . rk, are centered around nodes q1 . . . qk, which we will denote as Br1 (q1) . . . Brk (qk). Each radius rj will be selected such that all of Brj (qj) lies in free-space and all points in Brj (qj) can be connected by collision-free lines with all points in Brj+1 (qj+1) j  [1, 2, ..., k ­ 1]. Note that because [qinit, qgoal] is feasible, a radius of rj > 0 must exist for all Brj (qj) [15].
+Observation 1: Because milestone points are uniformly sampled from free and each radius rj > 0, each Brj (qj) will become dense with milestones in the limit [15]. Observation 2: SPRINT will process a local search between all current global node and milestone point pairs each loop through Algorithm 1 lines 2­16. Observation 3: If a collision-free, straight-line path exists between a global node qn and a milestone qm, the local search in SPRINT resolves to a straight-line. From these observations, it can be seen that the following recursive sequence will always happen in SPRINT: a milestone point will eventually be sampled in Brj (qj), which will be reached by a straight line local search from a global node in Brj­1 (qj­1) j  [2, 3, ..., k]. Note that qinit, i.e., q1, and qgoal, i.e., qk, start as a global node and milestone point, respectively, so these points bootstrap the recursive process and never have to be exactly sampled. Therefore, SPRINT must inherit the probabilistic completeness of any algorithm that would eventually find a feasible path [qinit, qgoal] as a homotopically equivalent path will always eventually be found by SPRINT.
+VII. EVALUATION
+We have assessed the efficacy of our approach in three empirical experiments. Although we demonstrate that SPRINT is able to solve low-dimensional testbed problems used to validate planning algorithms, as illustrated in Figure 1, we focus our assessment on higher dimensional problems with robot manipulators. In this section, we overview our experiments and share results.
+A. Implementation Details
+Our prototype SPRINT implementation is implemented in the Rust programming language. Robot manipulator selfcollisions and environment collisions are detected using the ncollide Rust library. Configurations that exceed joint position limits are also considered in a collision state. All evaluations throughout this work were run on a Lenovo Legion laptop with an i7-9750H processor and 32GB RAM. All parameters used in SPRINT were held constant at their default values for all problems in our evaluation.
+
+VI. ANALYSIS
+In this section, we show the probabilistic completeness property of SPRINT in Rd.
+
+B. Evaluation Benchmark
+We developed a set of seven benchmark tasks to compare our method against alternative path planners. The benchmark
+
+a
+
+Benchmark Times (Log10-scale)
+
+Seconds
+
+0.02 0.03 0.11
+
+0.16 3.24 2.33
+
+0.23 4.14 8.11
+
+1.94 10.8 27.4
+
+0.19 4.75 4.01
+
+0.24 10.3 25.5
+
+60. 60. 60.
+
+60. 60. 60.
+
+60. 60. 60.
+
+60. 60. 60.
+
+100.0 0.01 0.04 0.07 0.26 0.09 0.4 0.87 12.2 0.1 1.55 4.89 36.9 1.06 5.31 23.8 24.7 0.12 0.48 1.24 18.5 0.16 0.63 4.28 44.1 20. 60. 60. 60. 60. 60. 60. 60. 2.1 60. 60. 60. 10.8 60. 60. 60.
+
+10.0
+
+1.0
+
+0.1
+
+0.01
+
+0.001
+
+SPRINT RRT-C BiTRRT FMT* BIEST KPIECE RRT
+
+RRT* STOMP CHOMP
+
+b
+2.5 2.0 1.5 1.0 0.5 0.0
+
+SPRINT
+
+RRT-C
+
+BiTRRT
+
+Path Length Multiple
+FMT* BIEST KPIECE RRT
+
+RRT* STOMP CHOMP
+
+c
+1.0 0.8 0.6 0.4 0.2
+0
+
+SPRINT
+
+RRT-C
+
+Sample -Usefulness (higher is better)
+
+BiTRRT
+
+FMT*
+
+BIEST
+
+KPIECE
+
+RRT
+
+RRT*
+
+Fig. 4. Results from Experiments 1 and 2. Bar colors denote different tasks, with ordering from left to right being Single Box (UR5), Table (UR5), Vertical Bars (Sawyer), Narrow Passage Box (Sawyer), Over Boxes (Hubo+), Bookshelf (Hubo+), and Arms around Table (Hubo+). Error bars denote standard error. The values above the log10-scale bars in (a) denote the standard decimal values of the bars (in seconds). A circle with a line through it indicates that no solution was found on the given task in the allotted time.
+
+was designed to test the planners on a wide variety of tasks that range in dimensionality and topological structure. Our benchmark consists of two tasks on a Universal Robots UR5 (6-DOF), two tasks on a Rethink Robotics Sawyer (7-DOF), and three bimanual tasks on the DRC-Hubo+ (15-DOF). Two of these tasks can be seen illustrated in Figure 1(b­c). The UR5 tasks included (1) Single Box, where the robot moves over a large box; and (2) Table, where the robot moves its arm up and around a small table. The Sawyer tasks included (3) Vertical Bars where the robot maneuvers around six vertical bars; and (4) Narrow Passage Box where the robot maneuvers out of a cramped box through a narrow passage. Finally, the Hubo tasks included (5) Over Boxes where the robot moves its arm up and over a set of boxes; (6) Bookshelf where the robot moves an item from the top shelf to the bottom shelf; and (7) Arms around Table where the robot maneuvers both of its arms up and around a table to reach objects on top. Our benchmark consisted of 100 trials through each task. All tasks had a maximum evaluation time of one minute.
+C. Experiment 1: Comparisons with Alternative Planners
+In our first experiment, we compared performance on our benchmark tasks to nine commonly used path planners: RRT [16], RRT-Connect [17], RRT [5], FMT [6], KPIECE [18], BiEST [4], BiTRRT [19], CHOMP [12], and STOMP [13]. All methods were tested using their MoveIt! implementations with default planner options. Also, we implemented RRT, RRTConnect, FMT, and EST within our framework to ensure that the planning primitives in SPRINT, e.g., collision checking or graph operations, were not eliciting unintended performance gains. Our implementations used kd-trees for nearest neighbor checking. We used both our own implementations and MoveIt! in our evaluation and only report the better of the two results for fairness. Across all planners and tasks, the highly optimized implementations in MoveIt! were faster.
+1) Results--Computation Time: Figure 4a provides an overview of the average times needed to complete our bench-
+
+mark tasks. SPRINT computed solution paths for the benchmark problems often one to three orders of magnitude faster than alternative approaches. While many of the planners did well on the somewhat simpler, lower dimensional UR5 problems, SPRINT still out-performed the other methods on these tasks.
+2) Results--Path Length: Figure 4b provides an overview of average path lengths per each planner and task. The paths computed by SPRINT are shorter or at most similar in length compared to other sampling-based planners. Thus, the performance advantages in computation time do not come at the expense of lower quality paths. While optimizing planners, such as RRT and STOMP, did find higher quality paths on the UR5 Single Box task, these results came at a significantly higher computation cost. Further, these planners were not able to find any solutions in the allotted sixty seconds for any of the other benchmark tasks.
+D. Experiment 2: Analysis of Performance Gains
+In our second experiment, our goal was to investigate whether the performance gains exhibited by SPRINT in Experiment 1 could be attributed to enhanced sample efficiency. We assessed the ratio of points from the solution paths from Experiment 1 that were ­Useful for each tested planner, which we defined in §III-C. We defined  to be 2 for this evaluation, where  was the minimum edge length in the tree or graph structure. We only report this -Usefulness metric on the sampling-based planners as it is not applicable to the local-optimization-based planners (STOMP and CHOMP).
+Figure 4c shows the ­Useful metric results. We observe that SPRINT performs much better on this metric across all tasks, indicating that many more of its samples were useful. These results suggest that the performance gains from SPRINT were indeed due to our intended goal of enhancing sampleefficiency.
+
+Seconds
+
+a
+
+Benchmark Times (Log10-scale)
+
+0.02 0.03 0.11
+
+0.03 0.05 0.17
+
+3.36 3.36 5.14
+
+100.0 0.01 0.04 0.07 0.26 0.02 0.06 0.1 0.34 2.14 2.14 7.04 10.
+
+10.0
+
+1.0
+
+0.1
+
+0.01
+
+0.001
+
+SPRINT SPRINT-RP SPRINT Pr1-
+
+2.45 2.45 2.98
+
+60. 60. 60.
+
+1.12 1.12 2.22 4.28 60. 60. 60. 60.
+
+SPRINT Pr2- SPRINT Pr3-
+
+b
+2.0 1.5 1.0 0.5 0.0
+
+SPRINT
+
+Path Length Multiple
+SPRINT-RP SPRINT Pr1- SPRINT Pr2- SPRINT Pr3-
+
+Fig. 5. Results from Experiment 3. Bar colors denote different tasks, with ordering from left to right indicating Single Box (UR5), Table (UR5), Vertical Bars (Sawyer), Narrow Passage Box (Sawyer), Over Boxes (Hubo+), Bookshelf (Hubo+), and Arms around Table (Hubo+). The values above the log10-scale bars in (a) denote the standard decimal values of the bars (in seconds). A circle with a line indicates that no solution was found.
+E. Experiment 3: Analysis of Heuristics and Parameters
+In our final experiment, our goal was to observe how the performance of SPRINT changes if we systematically perturb its parameters or remove its probability heuristics. We assessed four conditions: (1) SPRINT-RP, which randomly offsets all parameters such that each varies by up to 25% above or below its original hand selected value. These random offsets were drawn from a uniform distribution; SPRINT Pr­1, which replaced the Pr1 heuristic with a random global edge selection; (2) SPRINT Pr­2, which replaced the Pr2 heuristic with a random, 50% chance of extending a node; and (4) SPRINT Pr­3, which replaced the Pr3 heuristic with a random extend direction process.
+Figure 5 overviews the results from Experiment 3. First, we found that SPRINT-RP was comparable in terms of computation time and average path length, suggesting that SPRINT is not overly sensitive to parameter tuning. However, we see that performance significantly degrades when even one probability heuristic is removed, suggesting that all of our probability heuristics are integral and work in tandem in order to enhance sample-efficiency and, in turn, boost performance. Probability Heuristic 3 appears to be particularly important, as no solutions were found in the allotted sixty seconds without this heuristic model.
+
+VIII. DISCUSSION
+In this work, we presented a path planning approach that is able to quickly and reliably solve high-dimensional path planning problems. Through the notion of enhanced sample usefulness afforded by a set of probability heuristics, we show that our approach achieves significant performance gains over standard approaches.
+Limitations--We note a number of limitations of our work that suggest future extensions. First, our probability heuristics were constructed by observation and intuition. While our three heuristics serve as proofs of concept for our overall premise, we believe that better models, either hand-engineered or data-driven, could improve results. Our approach also does not guarantee asymptotic optimality. Lastly, our work does not currently accommodate kinodynamic planning, though we believe that extensions to our work could explore kinodynamic steering functions compatible with Probability Heuristic 3.
+
+ACKNOWLEDGMENTS
+The authors thank Lydia Kavraki for valuable discussions
+regarding this work.
+REFERENCES
+[1] K. Hauser, "Lazy collision checking in asymptotically-optimal motion planning," in 2015 IEEE International Conference on Robotics and Automation (ICRA). IEEE, 2015, pp. 2951­2957.
+[2] S. M. LaValle, "Rapidly-exploring random trees: A new tool for path planning," 1998.
+[3] L. E. Kavraki, P. Svestka, J.-C. Latombe, and M. H. Overmars, "Probabilistic roadmaps for path planning in high-dimensional configuration spaces," IEEE Transactions on Robotics and Automation, vol. 12, no. 4, pp. 566­580, 1996.
+[4] D. Hsu, J.-C. Latombe, and R. Motwani, "Path planning in expansive configuration spaces," in Proceedings of International Conference on Robotics and Automation, vol. 3. IEEE, 1997, pp. 2719­2726.
+[5] S. Karaman and E. Frazzoli, "Sampling-based algorithms for optimal motion planning," The International Journal of Robotics Research, vol. 30, no. 7, pp. 846­894, 2011.
+[6] L. Janson, E. Schmerling, A. Clark, and M. Pavone, "Fast marching tree: A fast marching sampling-based method for optimal motion planning in many dimensions," The International Journal of Robotics Research, vol. 34, no. 7, pp. 883­921, 2015.
+[7] B. Burns and O. Brock, "Toward optimal configuration space sampling." in Robotics: Science and Systems. Citeseer, 2005, pp. 105­112.
+[8] R. Alterovitz, S. Patil, and A. Derbakova, "Rapidly-exploring roadmaps: Weighing exploration vs. refinement in optimal motion planning," in 2011 IEEE International Conference on Robotics and Automation. IEEE, 2011, pp. 3706­3712.
+[9] B. Akgun and M. Stilman, "Sampling heuristics for optimal motion planning in high dimensions," in 2011 IEEE/RSJ International Conference on Intelligent Robots and Systems. IEEE, 2011, pp. 2640­2645.
+[10] J. D. Gammell, S. S. Srinivasa, and T. D. Barfoot, "Informed RRT*: Optimal sampling-based path planning focused via direct sampling of an admissible ellipsoidal heuristic," in 2014 IEEE/RSJ International Conference on Intelligent Robots and Systems. IEEE, 2014, pp. 2997­ 3004.
+[11] ----, "Batch informed trees (BIT*): Sampling-based optimal planning via the heuristically guided search of implicit random geometric graphs," in 2015 IEEE International Conference on Robotics and Automation (ICRA). IEEE, 2015, pp. 3067­3074.
+[12] N. Ratliff, M. Zucker, J. A. Bagnell, and S. Srinivasa, "CHOMP: Gradient optimization techniques for efficient motion planning," in 2009 IEEE International Conference on Robotics and Automation. IEEE, 2009, pp. 489­494.
+[13] M. Kalakrishnan, S. Chitta, E. Theodorou, P. Pastor, and S. Schaal, "STOMP: Stochastic trajectory optimization for motion planning," in 2011 IEEE International Conference on Robotics and Automation. IEEE, 2011, pp. 4569­4574.
+[14] S. Aine, S. Swaminathan, V. Narayanan, V. Hwang, and M. Likhachev, "Multi-heuristic A*," The International Journal of Robotics Research, vol. 35, no. 1-3, pp. 224­243, 2016.
+[15] H. M. Choset, S. Hutchinson, K. M. Lynch, G. Kantor, W. Burgard, L. E. Kavraki, and S. Thrun, Principles of robot motion: theory, algorithms, and implementation. MIT press, 2005.
+[16] S. M. LaValle and J. J. Kuffner Jr, "Randomized kinodynamic planning," The International Journal of Robotics Research, vol. 20, no. 5, pp. 378­ 400, 2001.
+[17] J. J. Kuffner Jr and S. M. LaValle, "RRT-connect: An efficient approach to single-query path planning," in ICRA, vol. 2, 2000.
+[18] I. A. S¸ ucan and L. E. Kavraki, "Kinodynamic motion planning by interior-exterior cell exploration," in Algorithmic Foundation of Robotics VIII. Springer, 2009, pp. 449­464.
+[19] L. Jaillet, J. Corte´s, and T. Sime´on, "Sampling-based path planning on configuration-space costmaps," IEEE Transactions on Robotics, vol. 26, no. 4, pp. 635­646, 2010.
+
+

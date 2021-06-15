@@ -1,0 +1,1744 @@
+Federated Estimation of Causal Effects from Observational Data
+
+Thanh Vinh Vo 1 Trong Nghia Hoang 2 Young Lee 3
+
+Tze-Yun Leong 1
+
+1National University of Singapore 2AWS AI Labs 3Harvard University
+
+arXiv:2106.00456v1 [stat.ME] 31 May 2021
+
+Abstract
+Many modern applications collect data that comes in federated spirit, with data kept locally and undisclosed. Till date, most insight into the causal inference requires data to be stored in a central repository. We present a novel framework for causal inference with federated data sources. We assess and integrate local causal effects from different private data sources without centralizing them. Then, the treatment effects on subjects from observational data using a non-parametric reformulation of the classical potential outcomes framework is estimated. We model the potential outcomes as a random function distributed by Gaussian processes, whose defining parameters can be efficiently learned from multiple data sources, respecting privacy constraints. We demonstrate the promise and efficiency of the proposed approach through a set of simulated and real-world benchmark examples.
+1 Introduction
+Estimating the casual effects of an intervention on an outcome is commonly used in many practical areas, e.g., personalized medicine (Powers et al., 2018), digital experiments (Taddy et al., 2016) and political science (Green and Kern, 2012). One example is to estimate the effect of smoking on causing lung cancer. To accurately infer the causal effects, one would need a large number of data observations. However, observational data often exist across different institutions and typically cannot be centralized for processing due to privacy constraints. For example, medical records of patients are kept strictly confidential at local hospitals (Gostin et al., 2009). This real-life scenario would limit access of causal inference algorithms on the training data.
+Existing medical data have not been fully exploited by causal inference primarily because of the aforementioned constraints. Current approaches in causal inference (e.g., Shalit et al., 2017; Yao et al., 2018) require the medical records to be shared and put in one place for processing. This could violate the privacy rights of patients. Some alternative solutions such as establishing data use agreements or creating secure data environments may not be possible and is often not implemented. For example, suppose that some hospitals own the electronic health records (EHRs) of different patient populations and we wish to utilize these EHRs to perform causal inference on whether
+This work has been done when Nghia Hoang was with the MIT-IBM Watson AI Lab.
+1
+
+smoking causes lung cancer in all of these populations. However, these records cannot be shared across the hospitals because they may contain sensitive information of the patients. This problem would lead to a big barrier for developing effective causal effect estimators that are generalizable, which usually need a diverse and big dataset. How to utilize these EHRs to build a global causal effect estimator while preserving the patients' privacy rights is a challenging problem which has not been well explored.
+In practice, it is intractable to verify whether the causal estimands are reliable. Thus, in addition to giving point estimates of causal effects, an estimator which outputs confidence intervals would give helpful insights into the uncertainty of causal estimands. For example, a narrow confidence interval for the individual treatment effect means that patients are at a higher risk of getting lung cancer. Most of the recent causal effect estimators (e.g. Shalit et al., 2017; Louizos et al., 2017; Yao et al., 2018; Madras et al., 2019), however, ignore discussion on the uncertainty of the causal effects. Some existing causal inference packages such as econml (Microsoft Research, 2019) provides frequentist approaches, e.g., Bootstrap (Efron and Tibshirani, 1994), Bootstrap-of-Little-Bags (Kleiner et al., 2014), to find such confidence intervals. These approaches require many rounds of resampling the entire dataset and retraining the models on these resamples. Hence, to use these approaches for the context of muti-source causal inference while preserving privacy, it might require a careful redesigning of the resampling algorithms.
+These challenges motivate us to propose a framework that can learn the causal effects of interest without combining data sources to a central site and, at the same time, learn higher-order statistics of the causal effects, hence capturing their uncertainty. To address such problem, we utilize the Bayesian imputation approach (Imbens and Rubin, 2015) since it can capture uncertainty of the causal estimands. We then generalize this model to a more generic model based on Gaussian processes (GPs). To train the model on multiple sources while preserving data privacy, we further decompose this generic model into multiple components, each of them handling a source in our multi-source data context. This generic approach is called federated learning which was introduced recently in McMahan et al. (2017) and it has not been studied for causal inference. In short, our contributions are as follows:
+· We propose a novel Federated Causal Inference (FedCI) framework that fuses federated learning and causal inference to incorporate multiple data sources while preserving private rights of users.
+· An advantage of the proposed method is that it also gives higher-order statistics of the causal estimands under a Bayesian approach.
+· We propose a variational approximation scheme for the proposed model whose evidence lower bound can be decomposed additively across different data sources. This allows the parameters to be optimized via federated gradient averaging. We then leverage the computed predictive distribution to estimate the desired treatment effect quantities efficiently. We carry out an empirical evaluation of the proposed framework on benchmark datasets, which shows competitive performance compared to the baselines trained on the combined dataset.
+2 Background and related work
+Causal inference. In most causal inference literature, the estimation of causal effects is performed directly on accessible local data sources. Hill (2011); Alaa and van der Schaar (2017, 2018) proposed
+2
+
+a nonparametric approaches to estimate causal effects. A growing literature, including Shalit et al. (2017); Yoon et al. (2018); Yao et al. (2018); Künzel et al. (2019); Nie and Wager (2020), used parametric methods to model the potential outcomes. These methods make a standard ignorability assumption of Rosenbaum and Rubin (1983). Louizos et al. (2017); Madras et al. (2019) followed the structural causal model (SCM) (Pearl, 1995) to estimate causal effects under the existence of latent confounding variables. Bica et al. (2020a,b) formalized potential outcomes for temporal data with observed and unobserved confounding variables to estimate counterfactual outcomes for treatment plans. All these works were not proposed for the context of multi-source data which cannot be shared and combined as a unified dataset due to some privacy constraints. Our model, in contrast, learns individual treatment effect (ITE) and average treatment effect (ATE) while preserving privacy of the observed individuals. It is different from the problem of transportability of causal relations (e.g., Pearl and Bareinboim, 2011; Bareinboim and Pearl, 2013b,a, 2016), where theoretical tools were developed to transport causal effects from a source population to a target population and did not take into account the privacy constraints.
+Federated learning. The concepts of federated learning and causal inference are two well-known areas that have been developed independently. Federated learning aims to train an algorithm across multiple decentralized clients, thus preserving the privacy information of the data (McMahan et al., 2017). Two variations of federated learning include federated stochastic gradient descent (Shokri and Shmatikov, 2015) and federated averaging (McMahan et al., 2017). Recent developments of these two areas, e.g., Álvarez et al. (2019); Zhe et al. (2019); de Wolff et al. (2020); Joukov and Kuli (2020) and Hard et al. (2018); Zhao et al. (2018); Sattler et al. (2019); Mohri et al. (2019) are formalized for a typical classification or regression problem. Federated learning has recently been applied in facilitating multi-institutional collaborations without sharing patient data (Rieke et al., 2020; Sheller et al., 2020) and healthcare informatics (Lee and Shin, 2020; Xu et al., 2021). Several applications of federated learning in medical data include predicting hospitalizations for cardiac events (Brisimi et al., 2018), predicting adverse drug reactions (Choudhury et al., 2019), stroke prevention (Ju et al., 2020), mortality prediction (Vaid et al., 2020), medical imaging (Ng et al., 2021), predicting outcomes in SARS-COV-2 patients (Flores et al., 2020). However, to the best of our knowledge, no work has been done for causal inference.
+Following some recent works in causal inference (e.g., Shalit et al., 2017; Yao et al., 2018; Oprescu et al., 2019; Künzel et al., 2019; Nie and Wager, 2020), we utilize the potential outcomes framework to develop a federated causal inference algorithm. Our approach has connection to the SCM approach with a causal graph that includes three variables: treatment, outcome, and observed confounder (Pearl, 2009, Chapter 7), where the causal effects can be identified using backdoor adjustment formula (Pearl, 2009). We summarize the related models in the subsequent sections.
+2.1 Potential outcomes
+The concept of potential outcomes was proposed in Neyman (1923) for randomized trial experiments. Rubin (1975, 1976, 1977, 1978) re-formalized the framework for observational studies. We consider the causal effects of a binary treatment w, with w = 1 indicating assignment to `treatment' and w = 0 indicating assignment to `control'. Following convention in the literature (e.g., Rubin, 1978), the causal effect for individual i is defined as a comparison of the two potential outcomes, yi(0) and yi(1), where these are the outcomes that would be observed under w = 1 and w = 0, respectively. We can never observe both yi(1) and yi(0) for any individual i, because it is not possible to go back
+3
+
+in time and expose the i­th individual to the other treatment. Therefore, individual causal effects cannot be known and must be inferred.
+
+2.2 Missing outcomes imputation
+In this work, we generalize the Bayesian imputation model of Imbens and Rubin (2015, Chapter 8) since this model can capture uncertainty of the causal estimands in a Bayesian setting. The model is specified as follows:
+
+yi(0) = 0 xi + 0i,
+
+yi(1) = 1 xi + 1i,
+
+(1)
+
+where 0i and 1i are the Gaussian noises. The key to compute treatment effects is yi(0) and yi(1), however we cannot observe both of them. So we need to impute one of the two outcomes. Let yi,obs be the observed outcome and yi,mis be the unobserved outcome. The idea is to find the marginal distribution p(yi,mis|yobs, X, w). Once the missing outcomes are imputed, the treatment effects can be estimated. Note that p(yi,mis|yobs, X, w) = p(yi,mis|yi,obs, xi, wi), i.e., the outcomes of all individual are dependent. To find the above above distribution, Imbens and Rubin (2015) suggested four
+steps based on the following equation p(yi,mis|yobs, X, w) = p(yi,mis|yobs, X, w, )p(|yobs, X, w)d where  is the set of all parameters in the model, i.e.,  = {0, 1}. The aim is to find p(yi,mis|yobs, X, w, ) and p(|yobs, X, w), and then compute the above integration to obtain p(yi,mis|yobs, X, w), which is a non-parametric prediction. In Sections 3.4, 3.5 and 3.6, we generalize this model with Gaussian processes and decompose it into multiple components to perform federated
+inference of the causal effects.
+
+3 Federated causal model
+This section formalizes the problem of estimating causal effects under some privacy constraints. We address this problem by generalizing the Bayesian imputation model presented in Section 2.2 to a more generic model based on Gaussian processes. We decompose the model into multiple components, each associated with a data source. This decomposition results in the proposed Federated Causal Inference (FedCI) method.
+
+3.1 Problem formulation
+
+In the following, we detail our proposed model specification and explicate the link to the causal quantity that we would like to estimate.
+Problem setting & notations. Suppose we have m sources of data, each is denoted by Ds = {(wis, yis,obs, xsi)}ni=s 1, where s = 1, 2, . . . , m, and the quantities wis, yis,obs and xsi are the treatment assignment, observed outcome associated with the treatment, and covariates of individual i in source s, respectively. In this work, we focus on binary treatment wis  {0, 1}, thus yis,obs can be either the potential outcomes yis(0) or yis(1), i.e., for each individual i, we can only observe either yis(0) or yis(1), but not both of them. We further denote the unobserved or missing outcome as yis,mis. These variables are related to each other through the following equations
+
+yis(1) = wisyis,obs + (1 - wis)yis,mis,
+
+yis(0) = (1 - wis)yis,obs + wisyis,mis.
+
+(2)
+
+4
+
+Thus, yis(1) = yis,obs when wis = 1 and yis(1) = yis,mis when wis = 0, and similar for yis(0). For notational convenience, we further denote
+
+ys(0) = [y1s (0),..., yns s (0)] ,
+
+yos bs = [y1s,obs,..., yns s,obs] ,
+
+and similarly for ys(1), yms is, Xs and ws.
+Causal effects of interest. Due to privacy concerns, these data sources Ds are located in different locations. We are interested in estimating individual treatment effect (ITE) and average treatment effect (ATE) which are defined as follows
+
+si := yis(1) - yis(0),
+
+m ns
+
+ :=
+
+si /n,
+
+(3)
+
+s=1 i=1
+
+where n=
+
+m sy=is(11n)s
+
+and yis(0) are realization outcomes of their corresponding random is the total number of samples. Note that the ITE is also known as
+
+variables, and the conditional
+
+average treatment effect (CATE).
+
+3.2 The causal estimands
+
+Inserting Eq. (2) into (3), we obtain the estimate of ITE
+
+E[si] = w~is(yis,obs - E yis,mis yobs, X, w ),
+
+Var[si] = (w~is)2Var yis,mis yobs, X, w , (4)
+
+where w~is := 2wis -1 and yobs, X, w denotes the vectors/matrices of the observed outcomes, covariates and treatments concatenated from all the sources. The estimate of ATE is as follows
+
+E[] = w~ (yobs - E[ymis | yobs, X, w])/n,
+
+Var[] = w~ Cov[ymis | yobs, X, w]w~ /n2, (5)
+
+where w~ := 2w - 1 with 1 is a vector of ones. The above estimates capture the mean and variance of the treatment effects. At present, what remains is to learn the posterior p(ymis yobs, X, w), which is the predictive distribution of ymis given all the covariates, treatments and observed outcomes from all sources. In the next sections, we develop a federated GP-augmented imputation model to approximate this distribution.
+
+3.3 Assumptions
+In the following, we make some assumptions that allow the causal effects to be estimate in a federated setting. The first three assumptions are standard. The fourth assumption is needed to allow us to proceed in the preprocessing step.
+Assumption 1 (Unconfoundedness). yis(1), yis(0)  wis | xsi. (Rosenbaum and Rubin, 1983)
+Assumption 2 (The stable unit treatment value assumption). (i) There are no hidden versions of the treatment and (ii) treatment on one unit does not affect the potential outcomes of another one. (Imbens and Rubin, 2015)
+Assumption 3. The individuals from all sources share the same set of covariates.
+Assumption 4. There exists a set of features such that any individual is uniquely identified across different sources. We refer to this set as `primary key'.
+
+5
+
+Server Collect the hashed sequences
+and search for duplicates:
+
+Source A
+
+Source B
+
+Source C
+
+Figure 1: The secure preprocessing procedure to identify duplicated individuals among multiple sources. PKai (i = 1,..., 5), PKbi (i = 1,..., 7), PKci (i = 1,..., 4) are the primary keys of each individual in each source. ai (i = 1,..., 5), bi (i = 1,..., 7), ci (i = 1,..., 4) are the hashed sequences of these individuals.
+
+A `primary key' in Assumption 4 is not limited to the observed data used for inference as described in Section 3.1, but it can be any features to uniquely identify an individual such as {nationality, national id} of patients. Assumption 4 allows us to proceed with a preprocessing procedure (if necessary) to remove the repeated individuals in different sources while preserving the individuals' privacy. The preprocessing procedure are summarized as follows. Firstly, each source would use a one-way hash function (such as MD4, MD5, SHA or SHA256) to encrypt each individuals' primary key and then send the hashed sequences to a server. By doing this, the individuals' data are secured. Note that the one-way hash function is agreed among the sources so that they would use the same function. Then, the server collects all hashed sequences from all sources and perform a matching algorithm to see if there exists repeated individuals among different sources. For each repeated individual, the server randomly choose to keep it on a small number (predefined) of sources and inform the other sources to exclude this individual from the training process. The whole procedure is to ensure that an individual does not exists in a huge number of sources, thus prevent learning a biased model. The whole procedure is to ensure that an individual does not exists in a huge number of sources, thus prevent learning a biased model. We summarize the procedure in Figure 1.
+Assumption 4 and the preprocessing procedure are required for data that are highly repeated in different sources only. For data that are not likely to have a high number of repetitions such as patients from different hospitals of different countries, the above assumption and the preprocessing procedure are not required. Note that the existing methods also need Assumption 4 since they need to combine data and remove repeated individuals.
+Note that Assumption 1 is not testable since we cannot observe both yis(0) and yis(1), and this is well documented (Imai et al., 2010). However, Assumption 2 is likely to hold in a real-life setting. For example, a patient having an increase of blood pressure due under a medication cannot in any shape or form influence the blood pressure (outcome) of another patient. In addition, most hospitals should
+
+6
+
+collect common covariates of their patients, thus Assumption 3 is also a reasonable assumption. By preceeding discussions, Assumption 4 is a realistic assumption. In the subsequent sections, we assume that all of the assumptions described in this section are satisfied, and the preprocessing procedure was performed if it is necessary.
+
+3.4 GP-based imputation
+
+The model presented in Eq. (1) is a simple Bayesian linear model. In this section, we present a
+more generic nonlinear model under the Bayesian setting. In particular, since 0 and 1 follows
+multivariate normal distributions, the two components 0 xi and 1 xi also follow multivariate normal distributions. The generalisation of these two components are f0(xi) = 0 (xi) and f1(xi) = 1 (xi), where (xi) is a vector of basis functions with input xi. This formulation would lead to the fact that the marginal of f0(x) and f1(x) are Gaussian processes. Thus, we
+propose
+
+yi(0) = f0(xi) + 0i,
+
+yi(1) = f1(xi) + 1i,
+
+(6)
+
+where f0(xi) and f1(xi) are two random functions evaluated at xi, i.e., f0(xi)  GP(µ0(X), K) and f1(xi)  GP(µ1(X), K), where K denotes the covariance matrix computed with a kernel function k(x, x ). Similar to the imputation model of Imbens and Rubin (2015), the model presented here also requires finding the marginal distribution p(yi,mis | yobs, X, w). Although this model is generic, it requires access to all of the observed data to compute K, hence violates privacy rights. In the
+subsequent sections, we propose a federated model that address this problem.
+
+3.5 The proposed model
+Recall that the aim is to find p(ymis | yobs, X, w) so that we may in turn compute Eqs. (4) and (5) to arrive at the quantities of interest. To that end, we propose to model the joint distribution of the potential outcomes as follows
+
+yis(0) yis(1)
+
+=
+
+
+
+1 2
+
+f0s(xi) f1s(xi)
+
++
+
+g0s g1s
+
++
+
+
+
+1 2
+
+si,
+
+(7)
+
+where si  N(0, I2) is to handle the noise of the outcomes. As mentioned earlier in Section 2.2 and 3.4, all the outcomes are dependent in the Bayesian imputation approach. This dependency is handle via fjs(xi) and gjs (j  {0, 1}). We name the dependency handled by fjs(xi) as intra-dependency and the one captured by gjs as inter-dependency.
+Intra-dependency. f0s(xi) and f1s(xi) are GP-distributed functions, which allows us to model each source dataset simultaneously along with their heterogeneous correlation. Specifically, we model f0s(xi)  GP(µ0(Xs), Ks) and f1s(xi)  GP(µ1(Xs), Ks), where Ks is a covariance matrix computed by a kernel function k(xsi, xsj), and µ0(·), µ1(·) are functions modelling the mean of these GPs. Parameters of these functions and hyperparameters in the kernel function are shared across
+multiple sources. The above GPs handle the correlation within one source only.
+
+Inter-dependency. To capture dependency among the sources, we introduce variable g = [g0, g1], where
+
+g0 = [g01,..., g0m]  N(r0, M),
+
+g1 = [g11,..., g1m]  N(r1, M).
+
+7
+
+yms is
+
+ws
+
+Xs
+
+fs
+
+g
+
+
+
+
+
+yos bs
+s = 1,..., m
+
+Figure 2: Graphical model that summarizes the proposed framework with treatment ws, covariate Xs, and the two potential outcomes yms is and yos bs. The quantity f s is idiosyncratic to the sources and g contains shared characteristics across all the sources.  and  are shared parameters. Note that this is not a causal
+graph.
+
+Each g0s and g1s are shared within the source s, and they are correlated across multiple sources s  {1,..., m}. The correlation among the sources is modelled via the covariance matrix M which is
+computed with a kernel function. The inputs to the kernel function are the sufficient statistics (we used mean, variance, skewness, and kurtosis) of each covariate xs within the source s. We denote the first four moments of covariates as x~s  R4dx×1 and the kernel function as (x~s, x~s ), which evaluates
+the correlation of two source s and s . The above formulation implies that g0 and g1 are GPs. Each element of r0 and r1 are computed with the mean functions r0(x~s) and r1(x~s), respectively. In this setting, we only share the sufficient statistics of covariates, but not covariates of a specific individual,
+hence preserving privacy of all individuals.
+
+The two variables  and . These variables are positive semi-definite matrices capturing
+
+the correlation
+
+between
+
+the two
+
+possible outcomes
+
+yis(0)
+
+and
+
+yis(1),
+
+1 2
+
+and
+
+1 2
+
+are
+
+their
+
+Cholesky
+
+decomposition matrices. Note that  and  are also random variables. The reason that we constraint
+
+ and  as positive semi-definite matrices is explained later in Lemma 2. Because of this constraint,
+
+we model their priors using Wishart distribution   Wishart(V0, d0),   Wishart(S0, n0), where V0, S0  R2×2 are predefined positive semi-definite matrices and d0, n0  2 are predefined degrees
+
+of freedom.
+
+The graphical model of our framework. We summarize our framework in Figure 2. The figure shows that g,  and  are shared crosses the sources, thus capturing the correlation among them, and f s is specific for the source s that capture the correlation among individuals within this source. To see how our model handles dependency between the outcomes of two different sources through the latent variable g, we block the paths between two sources s and s through  and  and only keep the path through g. The covariance between the outcomes of s and s is presented in Lemma 1.
+
+Lemma 1.
+
+Let s and s
+
+be
+
+two
+
+different
+
+sources.
+
+Then,
+
+Cov(yis, yjs
+
+|
+
+,
+
+)
+
+=
+
+
+
+1 2
+
+(s,s
+
+)(
+
+1 2
+
+)
+
+, where
+
+(s,s ) = diag([(x~s, x~s ), (x~s, x~s )]), yis = [yis(0), yis(1)] , and yjs = [yjs (0), yjs (1)] .
+
+The
+
+diagonal
+
+of
+
+
+
+1 2
+
+(s,s
+
+)
+
+(
+
+1 2
+
+)
+
+in Lemma 1 is non-zeros, which implies that yis(0) and yjs (0) are
+
+correlated, and so do yis(1) and yjs (1).
+
+8
+
+3.6 The proposed algorithm
+In this section, we present some results on the joint distribution of potential outcomes. Then, we construct an objective function that can be trained in a federated fashion.
+
+3.6.1 The joint distribution of the outcomes
+
+In the following, we derive some results that are helpful in constructing the federated objective function in Section 3.6.2. Due to limited space, we defer the proofs of these results to Appendix. For convenience in presenting the subsequent results, we further denote gs = [g0s , g1s ], where g0s = [g0s ,..., g0s ] and g1s = [g1s ,..., g1s ] .
+Lemma 2. Let , , K, µ0(Xs), µ1(Xs), and gs satisfy the model in Eq. (7). Then,
+
+ys(0) ys(1)
+
+, , Xs, ws, gs  N
+
+1 2
+
+ Ins
+
+µ0(Xs) + g0s µ1(Xs) + g1s
+
+,   Ks
+
++   Ins
+
+,
+
+where  is the Kronecker product.
+
+From Lemma 2, we observe that , Ks, , and Ins are positive semi-definite, thus the covariance matrix   Ks +   Ins is positive semi-definite due to the fundamental property of Kronecker product. This explains the reason we chose  and  to be positive semi-definite in our model;
+otherwise, the covariance matrix is invalid. From Lemma 2, we can obtain the following result in
+Lemma 3.
+
+Lemma 3. Let , , K, µ0(Xs), µ1(Xs), and gs satisfy the model in Eq. (7). Then,
+
+yos bs yms is
+
+, , Xs, ws, gs  N
+
+µobs(Xs) µmis(Xs)
+
+,
+
+Ksobs (Ksom)
+
+Ksom Ksmis
+
+,
+
+The mean functions µobs(Xs) and µmis(Xs) are as follows:
+
+µobs(Xs) = (1 - ws) m0 + ws m1,
+
+µmis(Xs) = ws m0 + (1 - ws) m1,
+
+where m0 = 11(µ0(Xs) + g0s ) and m1 = 21(µ0(Xs) + g0s ) + 22(µ1(Xs) + g1s ) with ab is the (a, b)­th element of Cholesky decomposition matrix of , 1 is a vector ones, and is the element-wise product.
+The covariance matrices Ksobs, Ksmis, and Ksom are computed by kernel functions:
+
+kobs(xi, xj ) = (1 - wi)(1 - wj )11 + wiwj 22 + (1 - wi)wj 12 + wi(1 - wj )21 k(xi, xj ) + (1 - wi)11 + wi22 1i=j ,
+kmis(xi, xj ) = wiwj 11 + (1 - wi)(1 - wj )22 +(1 - wi)wj 21 + wi(1 - wj )12 k(xi, xj ) + wi11 + (1 - wi)22 1i=j ,
+kom(xi, xj ) = (1 - wi)(1 - wj )21 + wiwj 12 + (1 - wi)wj 22 + wi(1 - wj )11 k(xi, xj ) + (1 - wi)21 + wi12 1i=j ,
+
+where ab and ab are the (a, b)­th elements of  and , respectively.
+In the subsequent sections, we use the result in Lemma 3 to obtain the conditional likelihood p(yosbs|Xs, ws, , , gs), which is useful in inferring parameters and hyperparameters of our proposed model. We then also obtain the posterior p(yms is yos bs, Xs, ws, , , g) to estimate ITE and local ATE.
+
+9
+
+3.6.2 The federated objective function
+Since estimating p(yms is yos bs, Xs, ws) exactly is intractable, we sidestep this intractability via a variational approximation (Kingma and Welling, 2013; Blei et al., 2017). To achieve this, we maximize the following evidence lower bound (ELBO) L:
+
+m
+
+log p(yobs | X, w) = log p(yobs, g, ,  | X, w)dgdd  Ls =: L,
+
+(8)
+
+s=1
+
+where
+
+Ls
+
+=
+
+Eq [log
+
+p(yos bs|·)]
+
+-
+
+1 m
+
+z{g,,} DKL(q(z) p(z)). The conditional likelihood p(yos bs|·) is
+
+obtained from Lemma 3 by marginalizing out yms is, i.e.,
+
+p(yos bs|Xs, ws, , , gs) = N(yos bs; µobs(Xs), Kobs).
+
+(9)
+
+We observe that the above conditional likelihood is free of 21 and 12, which captures the correlation of two potential outcomes. Thus the posterior of these variables would coincide with their priors,
+i.e., the correlation cannot be learned but set as a prior. This is well-known as one of the potential
+outcome cannot be observed (Imbens and Rubin, 2015). In Eq. (8), the ELBO L is derived from the of joint marginal likelihood of all m sources, and it is factorized into m components Ls, each component corresponds to a source. This enables federated optimization of L. The first term of Ls
+is expectation of the conditional likelihood with respect to the variational posterior q(g, , ), thus
+this distribution is learned from data of all the sources. In the following, we present the factorization
+of this distribution.
+
+Variational posterior distributions. We apply the typical mean-field approximation to factorize among the variational posteriors q(, , g) = q() q() q(g), where
+
+q(g) =
+
+N(gj; hj(y~obs(0), y~obs(1), X~ , w~ ), U),
+
+j{0,1}
+
+where we denote y~os bs(0), y~os bs(1), and w~s as the first four moments of the observed outcomes and treatment of the s­th source, and X~ = [x~1,..., x~m] , y~(0) = [y~o1bs(0),..., y~ombs(0)] , y~(1) = [y~o1bs(1),..., y~ombs(1)] , and w~ = [w~1,..., w~m] , h0(·) and h1(·) are the mean functions, U is the covariance matrix computed with a kernel function (us, us ), where us := [y~osbs(0), y~osbs(1), x~s, w~s]. Since  and  are positive semi-definite matrices, we model their variational posterior as Wishart distribution: q() = Wishart(; Vq, dq) and q() = Wishart(; Sq, nq), where dq, nq are degrees of freedom and Vq, Sq are the positive semi-definite scale matrices. We set the form of these scale matrices as follows
+
+Vq =
+
+12 12
+
+12 22
+
+,
+
+Sq =
+
+12 12
+
+12 22
+
+.
+
+where i, , i,  are parameters to be learned and ,   [0, 1].
+Reparameterization. To maximize the ELBO, we approximate the expectation in Ls with Monte Carlo integration, which require drawing samples of g,  and  from their variabional distributions. This requires a reparameterization to allow the gradients to pass through the random variables g,  and . Since we model the correlation among each individual and the correlation between the two possible outcomes, the typical reparameterization of Kingma and Welling (2013) cannot be applied
+
+10
+
+as this method only holds true with diagonal covariance matrix. The reparameterization trick we applied is more general
+
+gj
+
+=
+
+hj(y~obs(0), y~obs(1), X~ , w~ )
+
++
+
+U
+
+1 2
+
+j
+
+,
+
+j  {0, 1},
+
+where
+
+j
+
+ N(0, Im)
+
+and
+
+U1 2
+
+is
+
+the
+
+Cholesky
+
+decomposition
+
+matrix
+
+of
+
+U.
+
+Since
+
+q()
+
+is
+
+modeled
+
+as
+
+Wishart distribution, we introduce the following procedure to draw :
+
+1
+
+1
+
+ = Vq2 (Vq2 ) ,   Wishart(I2, dq),
+
+1
+where Vq2 is the Choleskey decomposition matrix of Vq. Likewise, we also apply this procedure to
+draw .
+
+The Federated optimization algorithm. With the above designed model and its objective function, we can compute gradients of the learnable parameters separately in each source without sharing data to a central server. Thus, it satisfies the privacy constraints. We summarize our inference procedure in Algorithm 1.
+
+Algorithm 1: FedCI: Federated causal inference
+
+Parameters : Let  be set of parameters
+
+1 begin
+
+2 Initialize  and send to all source machines;
+
+3 repeat
+
+4
+
+for each source machine s  {1, 2, . . . , m} do
+
+5
+
+Compute Ls and send to server;
+
+6
+
+In the central server, do the following steps:
+
+7
+
+begin
+
+8
+
+Collect gradients from all sources and compute L =
+
+9
+
+Update    + learning_rate × L;
+
+10
+
+Broadcast the new  to all sources;
+
+11 until stopping condition;
+
+m s=1
+
+Ls;
+
+3.6.3 How data from all sources help prediction of causal effects in a specific source?
+
+Remember that the key to estimate ITE and ATE is to find the predictive distribution p(ymis yobs, X, w). This distribution can be estimated by the following relation:
+
+p(ymis yobs, X, w)
+
+m
+
+Eq
+
+p(yms is yos bs, Xs, ws, , , g) ,
+
+s=1
+
+where the expectation is with respect to the variational distribution q(, , g), and
+
+p(yms is yos bs, Xs, ws, , , g) = N (yms is; msmo, Ssmo) , msmo = µmis(Xs) + (Ksom) (Ksobs)-1(yos bs - µobs(Xs)), Ssmo = Ksmis - (Ksom) (Ksobs)-1Ksom.
+To understand why data from all the sources can help predict causal effects in a source s, we observe that
+
+p(yms is yobs, X, w) Eq p(yms is yos bs, Xs, ws, , , g)
+
+11
+
+= p(yms is yos bs, Xs, ws,  , y~obs(0), y~obs(1), X~ , w~ ),
+
+(i)
+
+(ii)
+
+(iii)
+
+(10)
+
+Eq. (10) is an approximation of the predictive distribution of the missing outcomes yms is and it depends on the following three components:
+
+(i). The observed outcomes, covariates and treatment assignments from the same source s, and (ii). The shared parameters  learned from data of all the sources, and (iii). Sufficient statistics of the observed data from all the sources.
+
+The two last components (ii) and (iii) indicate that the predictive distribution in source s utilized knowledge from all the sources through  and the sufficient statistics [y~obs(0), y~obs(1), X~ , w~ ]. This explain why data from all the sources help predict missing outcomes in source s.
+
+4 Experiments
+
+Baselines and the aims of our experiments. In this section, we first perform experiments to examine the performance of FedCI. We then compare the performance of FedCI against recent findings, such as BART (Hill, 2011), CEVAE (Louizos et al., 2017), OrthoRF (Oprescu et al., 2019), X-learner (Künzel et al., 2019), and R-learner (Nie and Wager, 2020). Note that all these work do not consider causal effects in a federated setting. The aim of this analysis is to show the efficacy of our method compared to the baselines trained in three different cases: (1) training a local model on each source data, (2) training a global model with the combined data of all sources, (3) using bootstrap aggregating (also known as bagging; is an ensemble learning method) of Breiman (1996) where m models are trained separately on each source data and then averaging the predicted treatment effects of each model. Note that case (2) violates individuals' privacy rights and is only used for comparison purposes. In general, we expect that the performance of FedCI is close to that of the performance of the baselines in case (2). Implementation of CEVAE is readily available (Louizos et al., 2017). For the implementation of BART (Hill, 2011), we use the package BartPy, which is also available online. For X-learner (Künzel et al., 2019) and R-learner (Nie and Wager, 2020), we use the package causalml (Chen et al., 2020). In both methods, we use xgboost.XGBRegressor as learners for the outcomes. For OrthoRF (Oprescu et al., 2019), we use the package econml (Microsoft Research, 2019). For all the methods, we fine-tune the learning rate in {10-1, 10-2, 10-3, 10-4} and regularizers in {101, 100, 10-1, 10-2, 10-3}.
+
+Evaluation metrics. We report two evaluation metrics: (i) precision in estimation of heterogeneous
+
+effects (PEHE) (Hill, 2011): PEHE :=
+
+m s=1
+
+ns i=1
+
+(is
+
+-
+
+^is)2/(mns)
+
+for
+
+evaluating
+
+ITE,
+
+and
+
+(ii)
+
+absolute error: ATE := | - ^| for evaluating ATE, where is and  are the true ITE and true ATE,
+
+respectively, and ^is, ^ are their estimates. Note that these evaluation metrics are for point estimates
+
+of the treatment effects. In our case, the point estimates are the mean of ITE and ATE in their
+
+predictive distributions.
+
+4.1 Synthetic data
+Data description. Obtaining ground truth for evaluating causal inference algorithm is a challenging task. Thus, most of the state-of-the-art methods are evaluated using synthetic or semi-synthetic
+
+12
+
+ PEHE ATE
+
+4.5 The error of ITE,  PEHE
+
+1.2 The error of ATE, ATE
+
+4.0
+
+1.0
+
+3.5
+
+0.8
+
+3.0
+
+0.6
+
+2.5
+
+0.4
+
+2.0
+
+0.2
+
+1.5
+
+1
+
+2
+
+3
+
+4
+
+5
+
+Number of sources, m
+
+0.0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+Number of sources, m
+
+FedCI
+
+Train with combined data
+
+Train locally
+
+Figure 3: Analysis on DATA-1.
+
+datasets. In this experiment, the synthetic data is simulated with the following distributions:
+
+xij  U[-1, 1], wi  Bern((a0 + xi a1)),
+
+yi(0)  N((b0 + xi b1), 02), yi(1)  N((c0 + xi c1), 12),
+
+where (·) denotes the sigmoid function, (·) denotes the softplus function, and xi = [xi1,..., xidx ]  Rdx with dx = 20. We simulate two synthetic datasets: DATA-1 and DATA-2. For DATA-1, the
+ground truth parameters are randomly set as follows: 0 = 1 = 1, (a0, b0, c0) = (0.6, 0.9, 2.0), a1  N(0, 2 · Idx ), b1  N(0, 2 · Idx ), c1  N(1, 2 · Idx ), where 1 is a vector of ones and Idx is an identity matrix. For DATA-2, we set (b0, c0) = (6, 30), b1  N(10 · 1, 2 · Idx ), c1  N(15 · 1, 2 · Idx ), and the other parameters are set similar to that of DATA-1. The purpose is to make two different
+scales of the outcomes for the two datasets. For each dataset, we simulate 10 replications with n = 5000 records. We only keep {(yi, wi, xi)}ni=1 as the observed data, where yi = yi(0) if wi = 0 and yi = yi(1) if wi = 1. We divide the data into five sources, each consists of ns = 1000 records. In each source, we use 50 records for training, 450 for testing and 400 for validation. In the following,
+we report the evaluation metrics and their standard errors over the 10 replications.
+
+The above parameters chosen for this simulation study satisfy Assumption 1 since yi(0) and yi(1) are independent with wi given xi. Assumption 2 is respected as the treatment treatment on an individual i does not effect the outcome of another individual j (i = j). Since we fixed the dimension of xi and draw it from the same distribution, Assumption 3 is implicitly satisfied. It is important to note that Assumption 4 and the preprocessing procedure are not necessary since each record that is drawn from the above distributions is attributed to one individual. This necessarily means that there are no duplicates of individuals in more than one source. In a real life setting, in the case when there are individuals appearing in multiple sources, Assumption 4 needs to hold, and the preprocessing procedure described in Section 3.3 has to be performed to exclude those repeated individuals from the training process.
+
+FedCI is as good as training on combined data. Figure 3 reports the three evaluation metrics of FedCI compared with two baselines: training on combined data and training locally on each data source. As expected, the figures show that the errors of FedCI are as low as that of training on the combined data. This result verifies the efficacy of the proposed federated algorithm.
+
+13
+
+ PEHE ATE
+
+3.9 The error of ITE,  PEHE
+
+3.7
+
+3.5
+
+3.3
+
+3.1
+
+2.9
+
+2.7
+
+2.5
+
+2.3
+
+2.1
+
+1.9
+
+1
+
+2
+
+3
+
+4
+
+5
+
+Number of sources, m
+
+FedCI
+
+0.9 The error of ATE, ATE
+
+0.8
+
+0.7
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+1
+
+2
+
+3
+
+4
+
+5
+
+Number of sources, m
+
+No inter-dependency
+
+Figure 4: The impact of inter-dependency on DATA-1.
+
+Inter-dependency component analysis. We study the impact of the inter-dependency component (see Section 3.5) by removing it from the model. Figure 4 presents the errors of FedCI compared with `no inter-dependency' (FedCI without inter-dependency). The figures show that the errors in predicting ITE and ATE of `no inter-dependency' seems to be higher than those of FedCI. This result showcases the importance of our proposed inter-dependency component.
+Contrasting with existing baselines. In this experiment, we compare FedCI with the existing baselines. Note that all the baselines do not consider estimating causal effects on multiple sources with privacy constraints. Thus, we train them in three cases as explained earlier: (1) train locally (loc), (2) train with combined data (com), and (3) train with bootstrap aggregating (agg). Note that case (2) violates privacy constraints. In general, we expect that the error of FedCI to be close to case (2) of the baselines. Table 1 and 2 reports the performance of each method in estimating ATE and ITE. Regardless of different scales on the two synthetic dataset, the figure shows that FedCI achieves competitive results compared to all the baselines. In particular, FedCI is among the top-3 performances among all the methods. Importantly, FedCI obtains lower errors than those of BARTcom, X-Learnercom, R-Learnercom, and OthoRFcom, which were trained on combined data and thus violate privacy constraints. Compare with CEVAEcom, FedCI is better than this method in predicting ITE and comparable with this method in predicting ATE (slightly higher errors). However, we emphasize again that this result is expected since we proposed a federated learning algorithm while CEVAEcom is not a federated one.
+The estimated distribution of ATE. To analyse uncertainty, we present in Figure 5 the estimated distribution of ATE in the first source (s = 1). The figures show that the true ATE is covered by the estimated interval and the estimated mean ATE shifts towards its true value (dotted lines) when more data sources are used. This result might give helpful information for user.
+4.2 IHDP data
+Data description. The Infant Health and Development Program (IHDP) (Hill, 2011) is a randomized study on the impact of specialist visits (the treatment) on the cognitive development of children (the outcome). The dataset consists of 747 records with 25 covariates describing properties of the children and their mothers. The treatment group includes children who received specialist
+14
+
+Table 1: Out-of-sample errors on DATA-1 where top-3 performances are highlighted in bold (lower is better). The dashes (--) in `loc' and `agg' indicate that the numbers are the same as those of `com'.
+
+Method
+
+ The error of ITE ( PEHE)
+
+The error of ATE ( ATE)
+
+1 source 3 sources 5 sources 1 source 3 sources 5 sources
+
+BARTloc X-Learnerloc R-Learnerloc OthoRFloc CEVAEloc
+
+--
+
+6.04±.05 6.02±.04
+
+--
+
+0.59±.14 0.53±.10
+
+--
+
+5.81±.13 5.77±.09
+
+--
+
+0.44±.24 0.51±.13
+
+--
+
+5.94±.05 5.94±.03
+
+--
+
+0.65±.05 0.66±.02
+
+--
+
+5.83±.12 6.23±.13
+
+-- 0.31±.08 0.52±.10
+
+--
+
+3.82±.09 3.50±.06
+
+--
+
+0.63±.11 0.52±.03
+
+BARTagg
+
+--
+
+5.97±.05 5.94±.03
+
+--
+
+0.64±.14 0.47±.11
+
+X-Learneragg
+
+--
+
+5.18±.09 5.09±.05
+
+--
+
+0.46±.24 0.52±.13
+
+R-Learneragg
+
+--
+
+5.94±.05 5.93±.03
+
+--
+
+0.65±.05 0.66±.03
+
+OthoRFagg
+
+--
+
+4.19±.13 3.66±.08
+
+--
+
+0.36±.13 0.48±.12
+
+CEVAEagg
+
+--
+
+3.65±.10 2.99±.06
+
+--
+
+0.41±.05 0.37±.04
+
+BARTcom
+
+5.98±.06 5.97±.06 5.93±.03 0.83±.11 0.56±.16 0.38±.09
+
+X-Learnercom 5.48±.15 4.60±.09 4.15±.04 0.93±.22 0.60±.11 0.30±.07
+
+R-Learnercom 5.93±.06 5.73±.08 5.54±.06 0.78±.10 0.47±.09 0.30±.07
+
+OthoRFcom 5.86±.40 3.60±.12 2.94±.05 0.55±.14 0.45±.14 0.34±.09
+
+CEVAEcom 3.79±.07 2.85±.06 2.72±.04 0.51±.13 0.23±.07 0.20±.06
+
+FedCI
+
+3.71±.10 2.35±.09 1.99±.05 0.69±.12 0.31±.12 0.29±.06
+
+Table 2: Out-of-sample errors on DATA-2 where top-3 performances are highlighted in bold (lower is better). Please see the full table in Appendix, which includes `loc' & `agg'.
+
+Method
+
+ The error of ITE ( PEHE)
+
+The error of ATE ( ATE)
+
+1 source 3 sources 5 sources 1 source 3 sources 5 sources
+
+BARTcom 18.0±0.4 17.7±0.2 17.4±0.1 3.54±1.3 2.94±0.8 1.84±0.5 X-Learnercom 21.1±0.9 17.9±0.4 16.2±0.2 4.55±1.4 3.29±1.0 2.37±0.8 R-Learnercom 25.9±0.6 23.5±0.5 21.3±0.4 19.0±0.8 15.6±0.7 12.3±0.6 OthoRFcom 37.8±2.7 10.7±0.5 9.83±0.5 7.88±2.2 1.99±0.4 2.36±0.6 CEVAEcom 20.1±0.5 18.4±0.6 16.6±0.6 1.50±0.3 1.38±0.4 1.89±0.2
+
+FedCI
+
+9.28±0.4 6.34±0.2 5.53±0.1 2.37±0.5 1.47±0.4 0.74±0.2
+
+15
+
+40
+
+40
+
+E[ ]
+
+True ATE
+
+30
+
+30
+
+ATE
+
+ATE
+
+20
+
+20
+
+10
+
+10
+
+0 1 source
+
+2 sources
+
+3 sources
+
+0.08
+
+0.06
+
+1 source 3 sources
+
+True ATE
+0.04
+
+E[ ], 1 source E[ ], 3 sources
+
+0 1 source
+
+2 sources 3 sources
+
+Density
+
+0.02
+
+0.00 5
+
+10
+
+15
+
+20
+
+25
+
+30
+
+35
+
+ATE
+
+Figure 5: The estimated distribution of ATE on source #1 of DATA-2. The dotted black lines represent the true ATE.
+
+Table 3: Out-of-sample errors on IHDP dataset where top-3 performances are highlighted in bold (lower is better). The dashes (--) in `agg' indicate that the numbers are the same as those of `com'. Please see the full table in Appendix.
+
+Method
+
+ The error of ITE ( PEHE)
+
+The error of ATE ( ATE)
+
+1 source 2 sources 3 sources 1 source 2 sources 3 sources
+
+BARTagg X-Learneragg R-Learneragg OthoRFagg CEVAEagg
+
+--
+
+4.05±1.9 3.69±1.8 --
+
+2.09±1.0 1.30±0.5
+
+--
+
+3.98±1.5 4.28±1.9
+
+--
+
+1.51±0.7 0.83±0.5
+
+--
+
+4.76±1.3 4.46±1.6
+
+--
+
+1.92±0.5 1.41±0.2
+
+-- 3.40±1.1 4.26±1.9
+
+-- 0.87±0.3 1.20±0.6
+
+--
+
+3.63±0.7 3.73±0.5
+
+-- 0.92±0.2 0.84±0.5
+
+BARTcom
+
+5.98±2.7 4.32±2.1 4.04±2.0 1.80±1.1 2.09±1.1 1.21±0.6
+
+X-Learnercom 4.22±1.6 4.15±1.5 4.06±1.8 1.64±0.7 1.93±0.8 0.84±0.4
+
+R-Learnercom 6.97±2.1 4.43±1.4 4.47±1.7 3.15±0.5 1.34±0.5 1.10±0.3
+
+OthoRFcom 4.49±1.9 3.81±1.3 3.75±1.5 1.86±0.8 1.61±0.6 1.56±0.8
+
+CEVAEcom 3.16±0.6 2.34±0.6 2.31±0.7 2.02±0.4 0.53±0.1 0.48±0.2
+
+FedCI
+
+2.88±0.8 2.36±0.5 2.35±0.6 1.43±0.7 1.03±0.4 0.51±0.2
+
+16
+
+visits and control group includes children who did not receive. For each unit, a treated and a control outcome are simulated using the numerical schemes provided in the NPCI package (Dorie, 2016), thus allowing us to know the true individual treatment effect. We use 10 replicates of the dataset in this experiment. For each replicate, we divide into three sources, each consists of 249 records. For each source, we then split it into three equal sets for the purpose of training, testing, and validating the models. We report the mean and standard error of the evaluation metrics over 10 replicates of the data. This dataset satisfies the Assumptions 1, 2, 3. Assumption 4 is redundant since there is are no repetitions of individuals in this dataset.
+Results and discussion. Similar to the experiment for synthetic dataset, here we also train the baselines in three cases as explained earlier. We also expect that the errors of FedCI to be close to the baseline trained with combined data (com). The result reported in Table 3 shows that the FedCI achieves a competitive results compared to the baselines (we skipped the first case (loc), please see Appendix for the full table). Indeed, FedCI is in the top-3 performances among all the methods. This result again verifies that FedCI can be used to estimate causal effects effectively under some privacy constraints of the data sources. The estimated distribution of ATE is presented in Appendix due to limited space.
+5 Conclusion
+We introduced a causal inference paradigm via a reformulation of multi-output GPs to learn causal effects, while keeping private data at their local sites. A modular inference method whose ELBO can be decomposed additively across data sources is presented. We posit that our formulation would prove useful in a diverse range of use cases within a causal inference setting on different range of applications.
+We note that the inherently use of GP in our approach would in fact incur the computational time of inverse covariance matrix in each source of cubic time complexity. A possible future work direction is to reformulate this in terms of the recent sparse Gaussian Process models.
+References
+Alaa, A. and van der Schaar, M. (2018). Limits of estimating heterogeneous treatment effects: Guidelines for practical algorithm design. In ICML, volume 80, pages 129­138.
+Alaa, A. M. and van der Schaar, M. (2017). Bayesian inference of individualized treatment effects using multi-task gaussian processes. In NeurIPS, pages 3424­3432.
+Álvarez, M. A., Ward, W., and Guarnizo, C. (2019). Non-linear process convolutions for multi-output gaussian processes. In AISTATS, pages 1969­1977.
+Bareinboim, E. and Pearl, J. (2013a). Causal transportability with limited experiments. In AAAI, pages 95­101.
+Bareinboim, E. and Pearl, J. (2013b). Meta-transportability of causal effects: A formal approach. In AISTATS, pages 135­143.
+Bareinboim, E. and Pearl, J. (2016). Causal inference and the data-fusion problem. PNAS, 113(27):7345­7352.
+17
+
+Bica, I., Alaa, A. M., Jordon, J., and van der Schaar, M. (2020a). Estimating counterfactual treatment outcomes over time through adversarially balanced representations. In ICLR.
+Bica, I., Alaa, A. M., and van der Schaar, M. (2020b). Time series deconfounder: Estimating treatment effects over time in the presence of hidden confounders. In ICML.
+Blei, D. M., Kucukelbir, A., and McAuliffe, J. D. (2017). Variational inference: A review for statisticians. Journal of the American statistical Association, 112(518):859­877.
+Breiman, L. (1996). Bagging predictors. Machine learning, 24(2):123­140.
+Brisimi, T. S., Chen, R., Mela, T., Olshevsky, A., Paschalidis, I. C., and Shi, W. (2018). Federated learning of predictive models from federated electronic health records. International journal of medical informatics, 112:59­67.
+Chen, H., Harinen, T., Lee, J.-Y., Yung, M., and Zhao, Z. (2020). Causalml: Python package for causal machine learning.
+Choudhury, O., Park, Y., Salonidis, T., Gkoulalas-Divanis, A., Sylla, I., et al. (2019). Predicting adverse drug reactions on distributed health data using federated learning. In AMIA Annual symposium proceedings, volume 2019, page 313. American Medical Informatics Association.
+de Wolff, T., Cuevas, A., and Tobar, F. (2020). Mogptk: The multi-output gaussian process toolkit. arXiv preprint arXiv:2002.03471.
+Dorie, V. (2016). Npci: Non-parametrics for causal inference. URL: https://github. com/vdorie/npci.
+Efron, B. and Tibshirani, R. J. (1994). An introduction to the bootstrap. CRC press.
+Flores, M., Dayan, I., Roth, H., Zhong, A., Harouni, A., Gentili, A., Abidin, A., Liu, A., Costa, A., Wood, B., et al. (2020). Federated learning used for predicting outcomes in sars-cov-2 patients. Preprint. medRxiv. 2020;2020.08.11.20172809.
+Gostin, L. O., Levit, L. A., Nass, S. J., et al. (2009). Beyond the HIPAA privacy rule: enhancing privacy, improving health through research. National Academies Press.
+Green, D. P. and Kern, H. L. (2012). Modeling heterogeneous treatment effects in survey experiments with bayesian additive regression trees. Public opinion quarterly, 76(3):491­511.
+Hard, A., Rao, K., Mathews, R., Ramaswamy, S., Beaufays, F., Augenstein, S., Eichner, H., Kiddon, C., and Ramage, D. (2018). Federated learning for mobile keyboard prediction. arXiv preprint arXiv:1811.03604.
+Hill, J. L. (2011). Bayesian nonparametric modeling for causal inference. Journal of Computational and Graphical Statistics, 20(1):217­240.
+Imai, K., Keele, L., and Tingley, D. (2010). A general approach to causal mediation analysis. Psychological methods, 15(4):309.
+Imbens, G. W. and Rubin, D. B. (2015). Causal inference in statistics, social, and biomedical sciences. Cambridge University Press.
+18
+
+Joukov, V. and Kuli, D. (2020). Fast approximate multi-output gaussian processes. arXiv preprint arXiv:2008.09848.
+Ju, C., Zhao, R., Sun, J., Wei, X., Zhao, B., Liu, Y., Li, H., Chen, T., Zhang, X., Gao, D., et al. (2020). Privacy-preserving technology to help millions of people: Federated prediction model for stroke prevention. arXiv preprint arXiv:2006.10517.
+Kingma, D. P. and Welling, M. (2013). Auto-encoding variational bayes. In ICLR.
+Kleiner, A., Talwalkar, A., Sarkar, P., and Jordan, M. I. (2014). A scalable bootstrap for massive data. Journal of the Royal Statistical Society: Series B: Statistical Methodology, pages 795­816.
+Künzel, S. R., Sekhon, J. S., Bickel, P. J., and Yu, B. (2019). Metalearners for estimating heterogeneous treatment effects using machine learning. PNAS, 116(10):4156­4165.
+Lee, G. H. and Shin, S.-Y. (2020). Federated learning on clinical benchmark data: Performance assessment. Journal of medical Internet research, 22(10):e20891.
+Louizos, C., Shalit, U., Mooij, J. M., Sontag, D., Zemel, R., and Welling, M. (2017). Causal effect inference with deep latent-variable models. In NeurIPS, pages 6446­6456.
+Madras, D., Creager, E., Pitassi, T., and Zemel, R. (2019). Fairness through causal awareness: Learning causal latent-variable models for biased data. In Proceedings of the conference on fairness, accountability, and transparency, pages 349­358.
+McMahan, B., Moore, E., Ramage, D., Hampson, S., and y Arcas, B. A. (2017). Communicationefficient learning of deep networks from decentralized data. In AISTATS, pages 1273­1282. PMLR.
+Microsoft Research (2019). EconML: A Python Package for ML-Based Heterogeneous Treatment Effects Estimation. https://github.com/microsoft/EconML. Version 0.x.
+Mohri, M., Sivek, G., and Suresh, A. T. (2019). Agnostic federated learning. In ICML, pages 4615­4625. PMLR.
+Neyman, J. S. (1923). On the application of probability theory to agricultural experiments. essay on principles. section 9. (translated and edited by dm dabrowska and tp speed, statistical science (1990), 5, 465-480). Annals of Agricultural Sciences, 10:1­51.
+Ng, D., Lan, X., Yao, M. M.-S., Chan, W. P., and Feng, M. (2021). Federated learning: a collaborative effort to achieve better medical imaging models for individual sites that have small labelled datasets. Quantitative Imaging in Medicine and Surgery, 11(2):852.
+Nie, X. and Wager, S. (2020). Quasi-oracle estimation of heterogeneous treatment effects. Biometrika.
+Oprescu, M., Syrgkanis, V., and Wu, Z. S. (2019). Orthogonal random forest for causal inference. In ICML. PMLR.
+Pearl, J. (1995). Causal diagrams for empirical research. Biometrika, 82(4):669­688.
+Pearl, J. (2009). Causality. Cambridge university press.
+19
+
+Pearl, J. and Bareinboim, E. (2011). Transportability of causal and statistical relations: A formal approach. In AAAI.
+Powers, S., Qian, J., Jung, K., Schuler, A., Shah, N. H., Hastie, T., and Tibshirani, R. (2018). Some methods for heterogeneous treatment effect estimation in high dimensions. Statistics in medicine, 37(11):1767­1787.
+Rieke, N., Hancox, J., Li, W., Milletari, F., Roth, H. R., Albarqouni, S., Bakas, S., Galtier, M. N., Landman, B. A., Maier-Hein, K., et al. (2020). The future of digital health with federated learning. NPJ digital medicine, 3(1):1­7.
+Rosenbaum, P. R. and Rubin, D. B. (1983). The central role of the propensity score in observational studies for causal effects. Biometrika, 70(1):41­55.
+Rubin, D. B. (1975). Bayesian inference for causality: The importance of randomization. In ASA Proceedings of the Social Statistics Section, pages 233­239. American Statistical Association.
+Rubin, D. B. (1976). Inference and missing data. Biometrika, 63:581­590.
+Rubin, D. B. (1977). Assignment to treatment group on the basis of a covariate. Journal of educational Statistics, 2(1):1­26.
+Rubin, D. B. (1978). Bayesian Inference for Causal Effects: The Role of Randomization. Annals of Statistics, 6:34­58.
+Sattler, F., Wiedemann, S., Müller, K.-R., and Samek, W. (2019). Robust and communicationefficient federated learning from non-iid data. IEEE TNNLS.
+Shalit, U., Johansson, F. D., and Sontag, D. (2017). Estimating individual treatment effect: generalization bounds and algorithms. In ICML, pages 3076­3085. JMLR.org.
+Sheller, M. J., Edwards, B., Reina, G. A., Martin, J., Pati, S., Kotrotsou, A., Milchenko, M., Xu, W., Marcus, D., Colen, R. R., et al. (2020). Federated learning in medicine: facilitating multi-institutional collaborations without sharing patient data. Scientific reports, 10(1):1­12.
+Shokri, R. and Shmatikov, V. (2015). Privacy-preserving deep learning. In ACM SIGSAC conference on computer and communications security, pages 1310­1321.
+Taddy, M., Gardner, M., Chen, L., and Draper, D. (2016). A nonparametric bayesian analysis of heterogenous treatment effects in digital experimentation. Journal of Business & Economic Statistics, 34(4):661­672.
+Vaid, A., Jaladanki, S. K., Xu, J., Teng, S., Kumar, A., and Lee, S. (2020). Federated learning of electronic health records improves mortality prediction in patients. Ethnicity, 52(77.6):0­001.
+Xu, J., Glicksberg, B. S., Su, C., Walker, P., Bian, J., and Wang, F. (2021). Federated learning for healthcare informatics. Journal of Healthcare Informatics Research, 5(1):1­19.
+Yao, L., Li, S., Li, Y., Huai, M., Gao, J., and Zhang, A. (2018). Representation learning for treatment effect estimation from observational data. In NeurIPS.
+20
+
+Yoon, J., Jordon, J., and van der Schaar, M. (2018). GANITE: Estimation of individualized treatment effects using generative adversarial nets. In ICLR.
+Zhao, Y., Li, M., Lai, L., Suda, N., Civin, D., and Chandra, V. (2018). Federated learning with non-iid data. arXiv preprint arXiv:1806.00582.
+Zhe, S., Xing, W., and Kirby, R. M. (2019). Scalable high-order gaussian process regression. In AISTATS, pages 2611­2620.
+Appendix: Federated Estimation of Causal Effects
+from Observational Data
+A Additional experimental results
+A.1 IHDP dataset
+In this section, we present additional experimental results on the IHDP dataset. The results here were not presented in the main text due to limited space. In Table 4 (five first rows), we present additional results of the baselines trained locally (loc). Similar to the experiments on synthetic data, the results here show that FedCI achieves much smaller errors. The reason is because FedCI accesses to all the data sources in a federated fashion while the `baselines trained locally' (loc) only have access to a local data source. Similar to the experiment on synthetic data, the estimated distribution of ATE in the first source (s = 1) is presented in Figure 6. Again, the figures show that the true ATE is inside the estimated interval and the estimated mean ATE shifts towards its true value (dotted lines) when more data sources are used.
+A.2 Synthetic data: DATA-2
+In this section, we present additional experimental results on DATA-2. Those results were skipped in the main text due to limited space. In Table 5 (five first rows), we present additional results of the baselines trained locally (loc) and the baselines trained with bootstrap aggregating (agg). Similar to the experiments on DATA-1 presented in the main text, the results on DATA-2 also show that FedCI achieves much lower errors, especially the error in predicting ITE.
+21
+
+Table 4: Out-of-sample errors on IHDP dataset where top-3 performances are highlighted in bold (lower is better). The dashes (--) in `loc' and `agg' indicate that the numbers are the same as those of `com'.
+
+Method
+
+ The error of ITE ( PEHE)
+
+The error of ATE ( ATE)
+
+1 source 2 sources 3 sources 1 source 2 sources 3 sources
+
+BARTloc X-Learnerloc R-Learnerloc OthoRFloc CEVAEloc
+
+-- 5.83±2.6 6.56±3.3 -- 2.09±0.9 1.38±0.5 -- 4.14±1.5 4.54±1.9 -- 1.51±0.7 0.77±0.5 -- 6.35±1.9 6.16±2.0 -- 2.13±0.7 1.44±0.3 -- 4.33±1.6 4.59±1.9 -- 1.10±0.6 0.75±0.3 -- 3.78±0.7 3.93±0.8 -- 1.91±0.3 2.37±0.2
+
+BARTagg X-Learneragg R-Learneragg OthoRFagg CEVAEagg
+
+-- 4.05±1.9 3.69±1.8 -- 2.09±1.0 1.30±0.5 -- 3.98±1.5 4.28±1.9 -- 1.51±0.7 0.83±0.5 -- 4.76±1.3 4.46±1.6 -- 1.92±0.5 1.41±0.2 -- 3.40±1.1 4.26±1.9 -- 0.87±0.3 1.20±0.6 -- 3.63±0.7 3.73±0.5 -- 0.92±0.2 0.84±0.5
+
+BARTcom
+
+5.98±2.7 4.32±2.1 4.04±2.0 1.80±1.1 2.09±1.1 1.21±0.6
+
+X-Learnercom 4.22±1.6 4.15±1.5 4.06±1.8 1.64±0.7 1.93±0.8 0.84±0.4
+
+R-Learnercom 6.97±2.1 4.43±1.4 4.47±1.7 3.15±0.5 1.34±0.5 1.10±0.3
+
+OthoRFcom 4.49±1.9 3.81±1.3 3.75±1.5 1.86±0.8 1.61±0.6 1.56±0.8
+
+CEVAEcom 3.16±0.6 2.34±0.6 2.31±0.7 2.02±0.4 0.53±0.1 0.48±0.2
+
+FedCI
+
+2.88±0.8 2.36±0.5 2.35±0.6 1.43±0.7 1.03±0.4 0.51±0.2
+
+ATE
+
+8
+
+8
+
+E[ ]
+
+True ATE
+
+6
+
+6
+
+ATE
+
+4
+
+4
+
+2
+
+2
+
+0 1 source
+
+2 sources
+
+0.3
+1 source
+
+0.2
+
+3 sources E[ ], 1 source
+
+E[ ], 3 sources
+
+0.1
+
+True ATE
+
+0
+
+3 sources
+
+1 source 2 sources 3 sources
+
+Density
+
+0.0
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+ATE
+
+Figure 6: The estimated ATE distribution on source #1 of IHDP dataset. The dotted black lines represent the true ATE.
+
+22
+
+Table 5: Out-of-sample errors on synthetic dataset where top-3 performances are highlighted in bold (lower is better). The dashes (--) in `loc' and `agg' indicate that the numbers are the same as those of `com'.
+
+Method
+
+ The error of ITE ( PEHE)
+
+The error of ATE ( ATE)
+
+1 source 3 sources 5 sources 1 source 3 sources 5 sources
+
+BARTloc X-Learnerloc R-Learnerloc OthoRFloc CEVAEloc
+
+-- 18.4±0.3 18.3±0.2 -- 3.37±0.7 2.90±0.6 -- 22.7±0.5 22.8±0.5 -- 3.55±1.3 3.09±0.8 -- 26.3±0.2 26.1±0.2 -- 19.7±0.3 19.5±0.3 -- 38.3±1.4 40.0±0.9 -- 4.09±0.9 4.40±1.2 -- 21.4±0.7 19.8±0.6 -- 2.11±0.4 1.97±0.2
+
+BARTagg
+
+-- 17.9±0.2 17.7±0.2 -- 3.91±0.8 3.15±0.7
+
+X-Learneragg
+
+--
+
+18.2±0.4 17.1±0.2
+
+--
+
+3.43±1.3 3.07±0.8
+
+R-Learneragg
+
+--
+
+26.2±0.3 26.1±0.2
+
+--
+
+19.7±0.4 19.6±0.3
+
+OthoRFagg
+
+-- 25.0±1.3 17.3±0.6 -- 4.56±1.1 1.30±0.4
+
+CEVAEagg
+
+-- 19.2±0.8 18.3±0.7 -- 2.02±0.3 1.91±0.4
+
+BARTcom 18.0±0.4 17.7±0.2 17.4±0.1 3.54±1.3 2.94±0.8 1.84±0.5 X-Learnercom 21.1±0.9 17.9±0.4 16.2±0.2 4.55±1.4 3.29±1.0 2.37±0.8 R-Learnercom 25.9±0.6 23.5±0.5 21.3±0.4 19.0±0.8 15.6±0.7 12.3±0.6 OthoRFcom 37.8±2.7 10.7±0.5 9.83±0.5 7.88±2.2 1.99±0.4 2.36±0.6 CEVAEcom 20.1±0.5 18.4±0.6 16.6±0.6 1.50±0.3 1.38±0.4 1.89±0.2
+
+FedCI
+
+9.28±0.4 6.34±0.2 5.53±0.1 2.37±0.5 1.47±0.4 0.74±.2
+
+B Proof of Lemma 1
+
+Proof.
+
+Cov(yis, yjs
+
+| , ) = Cov
+
+
+
+1 2
+
+(fis
+
++
+
+gs)
+
++
+
+
+
+1 2
+
+si,
+
+
+
+1 2
+
+(fjs
+
++
+
+gs
+
+)
+
++
+
+1 2
+
+sj
+
+| , 
+
+=E
+
+
+
+1 2
+
+gs
+
+(gs
+
+)
+
+(
+
+1 2
+
+)
+
+=
+
+
+
+1 2
+
+(s,s
+
+)(
+
+1 2
+
+)
+
+-
+
+
+
+1 2
+
+E
+
+gs
+
+E
+
+gs
+
+
+
+1 2
+
+)
+
+This completes the proof.
+
+C Proof of Lemma 2
+
+Proof. We denote 0s  N(0, Ins ) and 1s  N(0, Ins ). Then, from the model definition (Eq. (5) in the main text), we have
+
+y1s y1s
+
+(0) (1)
+
+. .
+
+. .
+
+. .
+
+yynnss ss
+
+(0) (1)
+
+=
+
+
+
+1 2
+
+f1s f1s
+
+(0) (1)
+
++ +
+
+g g
+
+s s
+
+(0) (1)
+
+. .
+
+. .
+
+. .
+
+ffnnss ss
+
+(0) (1)
+
++ +
+
+gs gs
+
+(0) (1)
+
++
+
+
+
+1 2
+
+s1 s1
+
+(0) (1)
+
+. .
+
+. .
+
+. .
+
+snsnss
+
+(0) (1)
+
+,
+
+which is equivalent to the following
+
+Ys =
+
+µ0
+
+(Xs
+
+)
+
++
+
+g0s
+
++
+
+(Ks
+
+)
+
+1 2
+
+0s
+
+µ1
+
+(Xs
+
+)
+
++
+
+g1s
+
++
+
+(Ks
+
+)
+
+1 2
+
+1s
+
+(
+
+1 2
+
+)
+
++ s0 s1
+
+(
+
+1 2
+
+)
+
+23
+
+Ys = µ0(Xs)+g0s µ1(Xs) + g1s
+
+(
+
+1 2
+
+)
+
++
+
+(Ks
+
+)
+
+1 2
+
+0s
+
+1s
+
+(
+
+1 2
+
+)
+
++ s0 s1
+
+(
+
+1 2
+
+)
+
+vec(Ys) =
+
+1 2
+
+ Ins
+
+µ0(Xs) + g0s µ1(Xs) + g1s
+
++
+
+1 2
+
+
+
+(Ks)
+
+1 2
+
+0s 1s
+
++
+
+(
+
+1 2
+
+
+
+Ins )
+
+s0 s1
+
+,
+
+where vec(·) denotes the vectorization of a matrix, which converts a matrix into a column vector.
+
+For the second term on the right hand side of the above equation, note that 0s  N(0, Ins ) and 1s  N(0, Ins ), so we have the following
+
+0s 1s
+
+ N(0, I2ns )
+
+1 2
+
+
+
+(Ks
+
+)
+
+1 2
+
+0s 1s
+
+N
+
+0,
+
+1 2
+
+
+
+(Ks)
+
+1 2
+
+I2N
+
+1 2
+
+
+
+(Ks
+
+)
+
+1 2
+
+1 2
+
+
+
+(Ks
+
+)
+
+1 2
+
+0s 1s
+
+ N (0,   Ks) .
+
+For the last term, note that s0  N(0, Ins ), s1  N(0, Ins ), thus
+
+s0 s1
+
+ N(0, I2ns )
+
+1 2
+
+ Ins
+
+s0 s1
+
+N
+
+0,
+
+1 2
+
+ Ins
+
+I2n
+
+1 2
+
+ Ins
+
+1 2
+
+ Ins
+
+s0 s1
+
+ N (0,   Ins ) .
+
+Consequently, vec(Ys) , , Xs, ws, gs  N
+
+1 2
+
+ Ins
+
+µ0(Xs)+g0s µ1(Xs)+g1s
+
+,   Ks +  Ins
+
+,
+
+which implies that
+
+ys(0) ys(1)
+
+, , Xs, ws, gs  N
+
+1 2
+
+ Ins
+
+µ0(Xs)+g0s µ1(Xs)+g1s
+
+,   Ks +  Ins
+
+.
+
+This completes the proof.
+
+D Proof of Lemma 3
+Proof. Following the proof of Lemma 2, we note that if the observed treatment wis = 0, then the mean of p(yis,obs|Xs, ws, , , gs) equals to the mean of p(yis(0)|, , Xs, ws, gs) and the mean of p(yis,mis|Xs, ws, , , gs) equals to the mean of p(yis(1)|, , Xs, ws, gs). If the observed treatment wis = 1, then the mean of p(yis,obs|Xs, ws, , , gs) equals to the mean of p(yis(1)|, , Xs, ws, gs) and the mean of p(yis,mis|Xs, ws, , , gs) equals to the mean of p(yis(0)|, , Xs, ws, gs). Similarly, each element in Kobs and Kmis also depends on whether wis = 0 or wis = 1.
+
+24
+
+

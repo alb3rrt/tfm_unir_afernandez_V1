@@ -1,0 +1,742 @@
+Rethinking Re-Sampling in Imbalanced Semi-Supervised Learning
+
+arXiv:2106.00209v1 [cs.CV] 1 Jun 2021
+
+Ju He
+
+Adam Kortylewski
+
+Shaokang Yang
+
+Shuai Liu
+
+Johns Hopkins University Johns Hopkins University ByteDance Inc. ByteDance Inc.
+
+Cheng Yang ByteDance Inc.
+
+Changhu Wang ByteDance Inc.
+
+Alan Yuille Johns Hopkins University
+
+Abstract
+Semi-Supervised Learning (SSL) has shown its strong ability in utilizing unlabeled data when labeled data is scarce. However, most SSL algorithms work under the assumption that the class distributions are balanced in both training and test sets. In this work, we consider the problem of SSL on class-imbalanced data, which better reflects real-world situations but has only received limited attention so far. In particular, we decouple the training of the representation and the classifier, and systematically investigate the effects of different data re-sampling techniques when training the whole network including a classifier as well as fine-tuning the feature extractor only. We find that data re-sampling is of critical importance to learn a good classifier as it increases the accuracy of the pseudo-labels, in particular for the minority classes in the unlabeled data. Interestingly, we find that accurate pseudo-labels do not help when training the feature extractor, rather contrariwise, data re-sampling harms the training of the feature extractor. This finding is against the general intuition that wrong pseudo-labels always harm the model performance in SSL. Based on these findings, we suggest to re-think the current paradigm of having a single data re-sampling strategy and develop a simple yet highly effective Bi-Sampling (BiS) strategy for SSL on class-imbalanced data. BiS implements two different re-sampling strategies for training the feature extractor and the classifier and integrates this decoupled training into an end-to-end framework. In particular, BiS progressively changes the data distribution during training such that in the beginning the feature extractor is trained effectively, while towards the end of the training the data is re-balanced such that the classifier is trained reliably. We benchmark our proposed bi-sampling strategy extensively on popular datasets and achieve state-of-the-art performances on all of them. Code will be released at https://github.com/TACJu/Bi-Sampling.
+1 Introduction
+Deep neural networks [10, 24, 21] have revolutionised numerous fields in recent years and achieved huge success due to the existence of many high-quality, large-scale labeled datasets [25, 19]. Yet, collecting large amounts of labeled data is expensive and sometimes even impossible in some scenarios due to the labor-intensive annotation along with experts knowledge requirement. For example, labeling large-scale, long-range video sequential [1] for video classification task and medical datasets [12, 34] which requires experts involved to develop algorithms for detecting tumors might be two examples to well illustrate the high cost needed for annotating these datasets. In contrast, unlabeled data are usually much easier to acquire and can also be exploited to improve model performance.
+Preprint. Under review.
+
+Figure 1: Left: Data distribution of general semi-supervised learning. Middle: Data distribution of imbalanced classification. Right: Data distribution of imbalanced semi-supervised learning where both labeled and unlabeled sets are class-imbalanced but test sets are balanced.
+A powerful approach for training models on large amounts of data with only part of it being labeled is semi-supervised learning (SSL). However, most existing works in SSL [4, 3, 29] work under the assumption that both labeled and unlabeled data have a balanced class distribution, i.e., each class has roughly the same number of samples (Figure 1 Left). SSL methods are effective under this assumption but have not been thoroughly evaluated when this assumption does not hold.
+In contrast, compared to well-curated vision datasets which exhibit uniform distributions of class labels, real-world data usually has skewed distributions with a long tail, where a few classes (a.k.a. head classes) have most of the data points, while many classes (a.k.a. tail classes) only have rarely few samples (Figure 1 Middle). It has been widely observed [30, 35] that models directly trained on such long-tailed distributions are biased towards head classes and away from tail classes thus we need to balance the bias. A simple yet efficient idea for tackling long-tailed distributions is re-sampling, i.e. sampling more data from the tailed classes to account for their scarcity. Effects of different degrees of re-sampling strength have been studied in previous works [22, 28] and thus result in different re-sampling strategies. Recent works [13, 36] point out that in the supervised setting, it is better to first train the feature extractor and classifier jointly without any re-sampling strategy followed by only fine-tuning the classifier with re-sampling strategies. This process is called decoupling since it suggests that learning representation and classifier requires different balancing strategies.
+While the aforementioned methods have greatly improved the model performance when facing imbalanced data in a fully supervised setting, semi-supervised learning on imbalanced data has not been a lot of attention yet. In fact, in a semi-supervised learning setting, balancing the skewed data distribution becomes even more challenging because most of the data is not labelled and the pseudo labels generated by SSL algorithms are unreliable. A few recent works [11, 14, 31] tackle this problem in a joint learning manner and find out that these pseudo labels are biased towards head classes and subsequent training with such problematic pseudo labels may even intensify the bias which further degrades the model performance. However, they do not decouple the learning process and thus fail to analyze the effect of balancing strategies for the classifier and the feature extractor individually. As a result, all prior works only use a single fixed balancing strategy during the whole training process which is shown to be sub-optimal in our experiments.
+In this paper, we investigate SSL in the context of long-tailed data distribution where both labeled and unlabeled data have the same imbalanced class ratio (Figure 1 Right). We conduct the first systematic study of different re-sampling strategies for SSL when training feature extractor and classifier jointly, as well as in a decoupled learning scheme, where we fine-tune the classifier of jointly trained models with a different re-sampling strategy. Interestingly, we find out that though producing much more biased pseudo labels for unlabeled data, models trained without re-sampling learn the best feature representation and get top performance after fine-tuning a class-balanced classifier.
+This phenomenon indicates that re-sampling actually harms the learning of representations thus suggesting that different sampling strategies are required for training the representation and classifier. Based on that finding, we develop a novel yet simple two-sampler method named BiS which helps the model to first learn a good representation and then gradually transfer its focus to obtain a more balanced classifier that can be trained in an end-to-end manner. To be specific, two data samplers with different re-sampling strategies construct the training batches of the model together where the sample ratio of the two data samplers progressively changes during the training process. Extensive experiments on CIFAR-10 and CIFAR-100 datasets are conducted to evaluate our method under
+2
+
+different experimental settings (e.g. various unlabeled data ratio and imbalanced data ratio) where our method shows consistent improvements compared to previous state-of-the-art methods.
+In summary, we make following contributions in this paper:
+1. We systematically analyze the effect of different re-sampling strategies for SSL on classimbalanced data in a joint and a decoupled network training scenarios.
+2. We find that the biased pseudo labels produced by SSL algorithms do harm the classifier, but do not harm the capabilities of the feature extractor, on the contrary, re-sampling reduces the quality of the feature representations.
+3. Our experimental findings enable us to develop a novel training strategy called Bi-Sampling (BiS), which integrates two different re-sampling strategies for training the feature extractor and the classifier into a uniform end-to-end framework. Models trained with BiS achieve state-of-the-art performances on all imbalanced semi-supervised benchmarks.
+2 Related Works
+2.1 Semi-supervised learning
+Semi-supervised learning aims at learning from both labeled data and unlabeled data. Many of existing methods [4, 3, 29] use pseudo labeling and consistency regularization. In particular, pseudo labeling [23, 18] leverages the idea of using the model itself to produce 'hard' artificial labels for unlabeled data. A manual threshold is adopted to decide whether to retain the artificial labels or not. This idea is closely related to entropy minimization [9, 26] which encourages the model predictions to be low-entropy (i.e. high confidence) on unlabeled data. Consistency regularization [2, 27] relies on the assumption that the model should output similar predictions when fed perturbed versions of the same image. The state-of-the-art SSL algorithm FixMatch [29] integrates these basic techniques all and achieves excellent results. However, all of the aforementioned works assume that the labeled data and unlabeled data share the same uniform distribution. In a class-imbalanced setting [14, 31] the pseudo labels are significantly biased and therefore in this work we analyze the effect of this phenomenon.
+2.2 Class-imbalanced supervised learning
+Class-imbalanced supervised learning has drawn increasing attention due to its relevance in real-world applications. Recent studies have mainly pursued three directions: re-sampling [36, 13], re-weighting [8, 5] and transfer learning [15, 20]. Re-sampling methods manually sample the data according to a pre-defined distribution to get a more balanced training set and re-weighting methods assign higher weights to tail classes instances to balance the overall contribution while transfer learning aims at transferring knowledge from head classes to tail classes. Recent work [13] shows that in a decoupled learning scenario, a simple re-sampling strategy can achieve state-of-the-art performance compared to more complicated counterparts. However, these methods highly rely on the labels of the data and their performance have not been tested under SSL scenarios extensively yet.
+2.3 Class-imbalanced semi-supervised learning
+Some very recent works started focusing on class-imbalanced semi-supervised learning setting, as it more accurately describes the real-world data distribution. Yang and Xu [32] claimed that leveraging unlabeled data either by semi-supervised learning or self-supervised learning can both help to alleviate the bias problem in class-imbalanced learning. Hyun et al. [11] proposed a suppressed consistency loss on minority classes to boost the performance. Kim et al. [14] proposed Distribution Aligning Refinery (DARP) to conduct a quick alignment between the predictions and desired distribution through solving convex optimization. Wei et al. [31] found that the raw SSL methods usually have high recall and low precision for head classes while the reverse is true for the tail classes and further proposed a reverse sampling method for unlabeled data based on that. In this work, we further analyze this interesting phenomenon and propose a simple yet effective Bi-Sampling strategy to boost the performance based on that.
+3
+
+3 An Empirical Study of Re-Sampling and Decoupling in Imbalanced SSL
+
+In this section, we first define the problem setup of class-imbalanced semi-supervised learning and introduce different data sampling strategies (Section 3.1). We present a detailed analysis on different strategies of sampling data when training the models in a joint manner in Section 3.2 followed by a discussion on the effects of re-sampling at learning representations in Section 3.3.
+
+3.1 Preliminaries
+
+Problem setup. For a K-class classification problem, there is a labeled training set X =
+
+{(xn, yn) : n  (1, ..., N )} and a unlabeled training set U = {(um) : m  (1, ..., M )}, where
+
+xn, um  Rd are training examples and yn  {1, ..., K} are corresponding class labels. The number
+
+of training samples in X of class k is denoted as Nk, i.e.,
+
+K k=1
+
+Nk
+
+=
+
+N.
+
+We
+
+assume
+
+that
+
+X
+
+and
+
+U
+
+share the same skewed distribution which is the most common situation in the real world. Without
+
+loss of generality, the classes are sorted by Nk in a descending order (N1  N2  ...  NK ) and
+
+thereby we can represent the imbalanced ratio 
+
+=
+
+N1 NK
+
+.
+
+We denote the ratio of unlabeled data
+
+to
+
+labeled
+
+data
+
+as
+
+
+
+=
+
+M N
+
+.
+
+Our
+
+model
+
+can
+
+be
+
+represented
+
+as
+
+a
+
+combination
+
+of
+
+a
+
+feature
+
+extractor
+
+(f (x; )) with parameter  and a classifier g. Given the class-imbalanced datasets X and U, we aim
+
+at training our model g(f (x; ))  {1, ..., K} in a semi-supervised manner to generalize well on a
+
+class-balanced test set.
+
+Sampling Strategies. We focus on different sampling strategies to re-balance the data distribution for the learning process of our model. We will not only change the sampling strategy for labeled dataset X but also for the unlabeled dataset U and the following three sampling strategies are introduced.
+
+Random Sampling. The most common way and also the standard way of sampling data is to
+
+completely sample data points from the dataset randomly which we name random sampling here.
+
+Formally, under our setting, the probability that a sample from class j is chosen from the dataset is
+
+µj =
+
+Nj
+K i=1
+
+Ni
+
+.
+
+The
+
+long-tailed
+
+distribution
+
+of
+
+the
+
+dataset
+
+is
+
+unchanged
+
+in
+
+this
+
+situation.
+
+Mean Sampling. Mean sampling that assigns an equal probability for each class to be chosen has
+
+been shown to be better than random sampling when facing skewed data distribution [28, 22]. This is because in such situations, especially when the imbalanced ratio  is extremely large, random
+
+sampling will cause the tail classes to be sampled too few thus the model underfits on them. Instead,
+
+mean sampling which gives the same probability µj
+
+=
+
+1 K
+
+for all classes apparently has a better
+
+performance on a balanced test set.
+
+Reverse Sampling. To face the challenges that sometimes mean sampling is not enough to solve the
+
+bias introduced with the skewed distribution. We further propose a more aggressive sampling strategy
+
+named reverse sampling that gives a higher chance for tail classes to be chosen. The probability
+
+1
+
+of sampling a data point of class j is given by µj =
+
+Nj K
+
+1
+
+.
+
+In this way, the data distribution is
+
+i=1 Ni
+
+reversed, i.e. the origin head classes now become tail classes and the tail classes become the head.
+
+Utilizing Unlabeled Data. Instead of utilizing all the samples in the unlabeled dataset U, we propose to only use a subset S of U to expand labeled dataset X. In details, the choice of subset S contains two steps. First we rule out all the data that does not meet the quality threshold of SSL algorithms. Then with the chosen re-sampling strategy, we can calculate the probability µj for an unlabeled data sample of pseudo label j with the formula above. We further add a hyper-parameter q (q  0) to
+control the strength of re-sampling thus the final keep probability adding the sample to S can be expressed as µjq where q can effectively tune the keep probability of each class. For example, when q = 0, then the probability for all classes becomes 1 thus the quality threshold becomes the only factor deciding S. While when q = 1, the keep probability is just the same as that for labeled data. Unlike [31], we do not manually select the most confident pseudo-labeled samples of each class
+because the biased pseudo label confidence is usually unreliable and the manual selection will require
+an offline process which complicates the whole pipeline.
+
+Joint and Decoupled Training Schemes. Assume that our model is constructed with a feature extractor f along with a classifier g. Joint training means that we use a standard cross-entropy loss to update f and g together. While following [13], decoupled training refers to the procedure that after obtaining a jointly trained model, we freeze the parameters of f and only fine-tune the classifier g.
+
+4
+
+3.2 Effect of data re-sampling in a joint learning process
+
+Experimental Setup. We conduct thorough experiments on semi-supervised long-tailed datasets with different imbalanced ratio  and unlabeled ratio . To be specific, we follow the procedure of DARP [14] to build the desired version of CIFAR-10 [17] for a fair comparison with prior works and further extend it to CIFAR-100. We present results on CIFAR-10 in the main body while leaving the part of CIFAR-100 and the details of constructing such datasets in the Appendix. In all experiments, we use FixMatch [29] as our baseline model, which is the state-of-the-art method in SSL. Following [14, 31], we choose WRN-28 [33] as our backbone.
+Main Results. Table 1 summarizes the results on CIFAR-10 dataset with  = 50, 100, 150 and  = 1, 2 with a joint training scheme. FixMatch with random sampling performs reasonably well on the imbalanced ratio  = 50, but the accuracy decreases significantly with increasing . In contrast, proper balancing strategies can strongly boost the overall performance compared to random sampling. On average with changing re-sampling strategies FixMatch can obtain 4% improvement. The absolute accuracy gain is as much as 6.5% when  = 150 and  = 1 with the reverse sampler for both labeled data and unlabeled data.
+
+Table 1: Empirical study of different sampling strategies for the labeled and unlabeled data in class-imbalanced SSL using a joint learning scheme. We report the classification accuracy (%) on CIFAR-10 with varying class-imbalance ratio  and varying ratio of unlabeled data . The best results are marked in bold.
+
+Labeled Data Sampling Random Random Random Mean Mean Mean Reverse Reverse Reverse
+
+Unlabeled Data Sampling Random Mean Reverse Random Mean Reverse Random Mean Reverse
+
+Imbalanced Ratio  / Unlabeled Ratio  50/1 100/1 150/1 50/2 100/2 150/2
+75.8 67.3 62.4 80.8 73.9 68.3 78.4 71.7 66.2 81.3 74.9 70.7 78.6 70.5 64.6 78.5 71.6 67.0 77.8 70.0 65.5 83.1 76.2 71.4 79.5 71.8 68.3 82.5 76.8 71.5 79.0 72.3 68.8 79.8 73.5 69.4 76.5 70.5 61.3 82.9 76.4 71.0 78.3 70.3 66.5 81.5 75.8 72.1 78.0 72.0 68.9 79.9 73.3 70.3
+
+Per-class Precision & Recall Analysis. We analyze the per-class precision and recall in Figure 2 to better understand the observed performances in Table 1. We observe that our baseline FixMatch without re-sampling achieves high recall on head classes but very low recall on tail classes. For example, the recall on the most majority class of CIFAR-10 is 97.3%. On the contrary, that of the most minority class is only 15.7%. Meanwhile, the precision of head classes and tail classes follows exactly the opposite pattern. To be specific, the precision of the minority class of CIFAR-10 is 95.2%, while that of the most majority class is only 51.9%. These two trends clearly show that the model without re-sampling will wrongly classify most of the tail class samples into head classes with low confidence but have high confidence on the correctly classified tail classes samples. This provides us with empirical evidence that supports the manual re-sampling to increase the frequency of tail class data during training. As a comparison, FixMatch with a mean sampler for both labeled data and unlabeled data, though still subject to these general trends, greatly alleviates the biases (e.g. the most minority recall: 15.7% -> 52.8%, the most majority precision: 51.9% -> 61.8%). This explains the overall accuracy gain on the class-balanced test sets (i.e. 67.3% -> 72.3%).
+Summary. From our study of different re-sampling strategies in a joint learning scheme, we observe that re-sampling helps to alleviate the model bias towards head classes and greatly improves the performance on tail classes. While this finding aligns with the conclusion in the supervised setting, we confirm its correctness in imbalanced SSL and further analyze the potential reason.
+3.3 Effect of data re-sampling in a decoupled learning process
+In this section, we study the decoupled learning of the representation and the classifier in the context of class-imbalanced SSL. Though decoupling is shown to be effective in the supervised setting, we wonder whether it is still true when unlabeled data is involved.
+
+5
+
+Figure 2: Bias comparison between FixMatch models w & w/o re-sampling on CIFAR-10. Left: Per-class recall comparison. Right: Per-class precision comparison. The class index is sorted by the number of examples in descending order. The models show a descending trend in recall while an ascending trend in precision.
+The dilemma with unlabeled data in class-imbalanced SSL with decoupled training. Previous works [13, 36] suggested that it is better not to apply data re-sampling when learning the representation in a fully supervised learning setup. However, in the class-imbalanced semi-supervised learning setting it remains controversial as the role of the unlabeled data needs to be considered. On the one hand, plenty of works [29, 6, 7] have shown that large amounts of unlabeled data can effectively help the model to learn better models when there is only limited labeled data or even when there is no labeled data available. This demonstrates the positive value of the unlabeled data. On the other hand, as shown in Section 3.2, our experiments show that if we adopt a random sampling strategy for the labeled data, it will inevitably lead to biased pseudo labels and harm the quality of the unlabeled data. This will harm the performance of the model. The dilemma of unlabeled data can thus be summarised as existing experiences from supervised setting suggest that re-sampling is harmful at the representation learning stage but without re-sampling, the pseudo labels are biased and will further harm the model performance. Motivated by the intuition that random sampling at the representation learning stage might be sub-optimal, we conduct systematical experiments to analyze the effect of re-sampling at the representation learning stage.
+Experimental Setup. We follow the setup in Section 3.2. Our experiments build on the jointly trained models with different re-sampling strategies from Table 1. We follow the idea of decoupling the representation and classifier by freezing the feature extractor and fine-tuning the classifier with a different data re-sampling strategy. Here we use a mean sampler for both labeled data and unlabeled data in the fine-tuning stage to obtain a class-balanced classifier as models fine-tuned with other re-sampling strategies produce similar performance trends and do not violate our conclusion.
+Main Results. Table 2 summarizes the results on CIFAR-10. We observe that the fine-tuned FixMatch achieves a consistent improvement compared to the jointly trained counterparts in most scenarios. Recall that the performance of models without re-sampling (Random/Random) is much lower compared to those with re-sampling in Table 1, and the produced pseudo labels are biased and hence of low quality. However, after fine-tuning the classifier, these models achieve the most significant performance improvements (see Table 2 underlined numbers) and obtain the best performance in almost all settings. This phenomenon clearly highlights that the biased pseudo labels in the unlabeled data do no harm to the learning of representation. Even more, they improve the quality of the feature extractor, which can be revealed by fine-tuning the classifier with a proper data re-sampling strategy.
+Summary. When comparing the results of jointly and decoupled trained models (Tables 1 & 2), we observe that re-sampling only helps to learn the classifier but harms the representation. Therefore, different data sampling strategies are required in those two learning stages.
+4 Bi-Sampling
+Based on our findings in Section 3, we suggest to re-think the current paradigm of having a single data sampling strategy when training models for class-imbalanced semi-supervised learning. To exploit this finding, we propose a simple yet highly effective Bi-Sampling (BiS) method which adopts two
+6
+
+Table 2: Classification accuracy (%) after fine-tuning the models from Table 1. We freeze the feature extractor and train the classifier with a mean sampling strategy on CIFAR-10. Performance variation is shown in brackets. Best results are bolded. Results with the greatest improvement are underlined.
+
+Sampling Strategy for labeled / unlabeled data
+Random / Random Random / Mean Random / Reverse Mean / Random Mean / Mean Mean / Reverse Reverse / Random Reverse / Mean Reverse / Reverse
+
+50/1 80.3(+4.5) 80.2(+1.8) 79.3(+0.7) 78.9(+1.1) 79.1(-0.4) 79.1(+0.1) 76.0(-0.5) 77.3(-0.7) 77.6(-0.4)
+
+Imbalanced Ratio  / Unlabeled Ratio 
+
+100/1
+
+150/1
+
+50/2
+
+100/2
+
+74.6(+7.3) 69.0(+6.6) 84.6(+3.8) 78.5(+4.6)
+
+74.1(+2.4) 69.5(+3.3) 83.2(+1.9) 77.9(+3.0)
+
+72.7(+2.2) 67.1(+2.5) 80.5(+2.0) 75.5(+3.9)
+
+73.0(+3.0) 66.6(+1.1) 84.1(+1.0) 77.4(+1.2)
+
+73.6(+1.8) 68.9(+0.6) 82.8(+0.3) 77.0(+0.2)
+
+73.5(+1.2) 69.0(+0.2) 79.7(-0.1) 73.6(+0.1)
+
+71.5(+1.0) 61.6(+0.3) 82.7(-0.2) 76.4(+0.0)
+
+68.9(-1.4) 64.9(-1.6) 80.5(-1.0) 72.6(-3.2)
+
+70.5(-1.5) 65.3(-3.6) 78.3(-1.6) 70.8(-2.5)
+
+150/2 74.9(+6.6) 75.2(+4.5) 73.4(+6.4) 72.4(+1.0) 72.7(+1.2) 69.7(+0.3) 70.7(-0.3) 70.2(-1.9) 66.3(-4.0)
+
+data samplers with different sampling strategies to train a good feature extractor and classifier. BiS builds on the advantages of decoupled training and takes a step further to integrate this decoupling process into an end-to-end framework.
+Formally, at each training step, we use two samplers A, B, which will give a different probability µAj, µBj for sampling a data point with label j as indicated in Section 3.1. To combine the result of the two samplers, we introduce a ratio parameter   [0, 1] that controls the weights of two samplers. Thus the probability of sampling a data point with label j to the current training batch is then:
+µj =   µAj + (1 - )  µBj.
+And that of adding an unlabeled sample with pseudo label j becomes µjq. The ratio  progressively changes during the training process from 1 to 0. Concretely, when denoting the total training epochs as Tmax and the current training epoch as T ,  is calculated by:
+ = 1 - ( T )2. Tmax
+Intuitively, with gradually decreasing , the focus of the network gradually changes from sampling data that benefits learning a discriminative feature representation into sampling data that helps to learn a well-balanced classifier to improve performance on long-tailed recognition. And since only at the last part of the training process the model tends to rely heavily on the re-sampling sampler, it has a very limited bad effect on the feature extractor thus achieves state-of-the-art performances. Different from decoupled fine-tuning strategies [13], the usage of  ensures the representation and classifier can be updated consistently instead of ignoring the other while training for one goal. Besides, unlike two-branch network design strategies [36], our BiS avoids introducing any additional network parameters and requires no further complicated mixup training strategy.
+4.1 Experiments: Class-imbalanced Semi-Supervised Learning with Bi-Sampling
+Experimental Setup. We compare our BiS with the most recent state-of-the-art methods CReST+ [31] and DARP [14] using the same experimental setting. Both MixMatch [4] and FixMatch [29] are chosen as baseline algorithms and trained with the proposed Bi-Sampling strategy. More training details are given in the Appendix.
+CIFAR-10. We report the performance of different methods on CIFAR-10 in Table 3. Our BiS achieves state-of-the-art performance in all settings. In particular, for MixMatch our BiS sampling strategy achieves roughly 6% improvement compared to the baseline and 1% improvement compared to CReST+. For FixMatch, the absolute performance gain compared to the baseline and CReST+ is further increased to 7.5% and 2% respectively.
+CIFAR-100. Table 4 summarizes the performance on class-imbalanced semi-supervised CIFAR-100. Again, our proposed BiS strategy achieves top performance under various settings, providing around 4% and 1% absolute gain compared to the baseline SSL algorithms and CReST+ respectively.
+Per-class recall. Table 5 summarizes the per-class recall on CIFAR-10 of FixMatch w/ & w/o BiS when the imbalanced ratio is  = 2 and the unlabeled ratio is  = 100. Our Bi-Sampling strategy
+7
+
+achieves significant gains on the two most minority classes (31.4% and 23.1%) while having only little loss the most majority classes, which causes the overall performance improvement of 7.1%.
+
+Table 3: Comparison of classification accuracy (%) with previous state-of-the-art methods on classimbalanced semi-supervised CIFAR-10 based on different SSL algorithms. Best results are bolded.
+
+SSL Algorithm
+MixMatch MixMatch +DARP MixMatch + CReST+ MixMatch + BiS
+FixMatch FixMatch + DARP FixMatch + CReST+
+FixMatch + BiS
+
+Imbalanced Ratio  / Unlabeled Ratio  50/1 100/1 150/1 50/2 100/2 150/2 71.1 63.6 58.5 73.2 64.8 62.5 71.6 64.9 60.8 75.2 67.9 65.8 76.3 66.2 62.9 79.0 71.9 68.3 77.0 67.8 63.4 80.2 72.5 68.8 75.8 67.3 62.4 80.8 73.9 68.3 77.1 68.3 64.0 81.8 75.5 70.4 79.9 74.4 69.8 83.9 77.4 72.8 80.9 75.3 71.1 85.4 81.0 76.9
+
+Table 4: Comparison of classification accuracy (%) with previous state-of-the-art methods on classimbalanced semi-supervised CIFAR-100 based on different SSL algorithms. Best results are bolded.
+
+SSL Algorithm
+MixMatch MixMatch +DARP MixMatch + CReST+ MixMatch + BiS
+FixMatch FixMatch + DARP FixMatch + CReST+
+FixMatch + BiS
+
+Imbalanced Ratio  / Unlabeled Ratio  10/1 20/1 50/1 10/2 20/2 50/2 51.6 45.6 37.2 52.8 45.8 37.6 52.7 47.2 40.1 55.3 50.8 43.4 54.0 48.7 40.6 55.9 51.3 44.7 55.1 49.2 41.5 56.6 51.9 45.5 50.2 44.1 35.6 54.9 48.0 40.5 50.9 44.8 36.1 55.5 48.5 41.1 52.5 46.6 39.5 56.1 49.5 43.2 53.2 47.1 40.7 56.7 50.6 43.9
+
+Table 5: Per-class classification recall (%) on CIFAR-10 with imbalanced ratio  = 2 and unlabeled ratio  = 100. Relative performance comparison is shown in gray.
+
+SSL Algorithm 1
+
+2
+
+3
+
+4
+
+Class Index
+
+5
+
+6
+
+7
+
+8
+
+9
+
+10 Avg
+
+FixMatch
+
+98.3 99.3 87.8 80.4 88.5 65.7 75.9 58.9 46.8 37.2 73.9
+
+FixMatch + BiS 94.4 98.0 86.1 78.7 89.4 74.2 81.3 69.4 69.9 68.6 81.0
+
+-3.9 -1.3 -1.7 -1.7 +0.9 +8.5 +5.4 +10.5 +23.1 +31.4 +7.1
+
+Ablation Study on Decay Strategies. To better understand the effect of our progressive change
+
+between two data samplers with different re-sampling strategies, we conduct an ablation study on
+
+the potential decay strategies using the class-imbalanced semi-supervised CIFAR-10 dataset. We
+
+use the setting of unlabeled ratio  = 2 with varying imbalanced ratio . We adopt four methods
+
+to
+
+calculate
+
+
+
+as
+
+follows:
+
+Equal
+
+(
+
+=
+
+0.5),
+
+Linear
+
+(
+
+=
+
+1
+
+-
+
+T Tmax
+
+),
+
+Cosine
+
+(
+
+=
+
+cos
+
+(
+
+T Tmax
+
+·
+
+ 2
+
+)),
+
+Parabolic
+
+(
+
+=
+
+1
+
+-
+
+(
+
+T Tmax
+
+)2
+
+).
+
+The
+
+shape
+
+of
+
+each
+
+function
+
+performance
+
+comparisons
+
+is
+
+shown
+
+in
+
+Figure 3. We observe that the slower the function decays to 0, the better the performance is. An
+
+equal sampling gives the worst performance, while our adopted parabolic decay improves around 8%
+
+compared to the equal weighting. These results again confirm that the best way to train a model on
+
+class-balanced test sets is to initially train well on the original distribution (using a random sampler)
+
+and only towards the end change to a more balanced sampling to obtain a better classifier.
+
+Ablation Study on Keep Probability q. To better evaluate the effect of different re-sampling strength on the final performance, we conduct an ablation study on the keep probability q of unlabeled data on the class-imbalanced semi-supervised CIFAR-10 dataset under the setting of unlabeled ratio  = 2 with varying imbalanced ratio . We choose six values for q and draw the keep probability for unlabeled data with the mean sampler of different classes for each when  = 100 in the left part of Figure 4. As we can see, as q decreases, the re-sampling strength also gets weaker. The right side of Figure 4 shows the performance comparison of different values for q. If the value of q is too low (i.e.
+
+8
+
+Figure 3: Ablation study on decay strategies. Left: Four different decay schedules for  as a function of the training process. Note how different strategies reach the value of  = 0.5 at different times in the training process. Right: Performance comparison on class-imbalanced semi-supervised CIFAR-10 with unlabeled ratio  = 2.
+q = 0) or too high (i.e. q = 1) the performance significantly decreases, while the remaining values provide similar results. This shows that q is a relevant but not sensitive hyper-parameter.
+Figure 4: Ablation study on the keep probability q. Left: Keep probability of each class with mean sampler under imbalanced ratio  = 100 of each value. Right: Performance comparison on class-imbalanced semi-supervised CIFAR-10 with unlabeled ratio  = 2.
+5 Conclusion
+In this work, we studied the effect of data re-sampling strategies in class-imbalanced semi-supervised learning and made several interesting observations. We found that although long-tailed data distributions will lead to biased pseudo labels of the unlabeled data during SSL, these wrongly annotated samples do not harm the model when learning the feature extractor. On the contrary, accounting for the class-imbalanced through data re-sampling should be avoided as it harms the learning of the feature extractor. But on the other hand, data re-sampling was critical for training a well-balanced classifier. Based on these findings, we suggested to re-think the current paradigm of having only a single data re-sampling strategy in class-imbalanced SSL, and developed a simple yet highly effective Bi-Sampling training strategy which achieved state-of-the-art performance on a range of benchmarks. Limitations and Societal Impact. The main limitation of our work is the same with other previous works on imbalanced SSL that we explicitly assumed that the imbalanced ratio in training sets and test sets is the same. For us, the most promising future research direction would therefore be to extend our algorithm to estimate the imbalanced ratio of test sets based on the evaluation performance and adjust the strategy according to that. Like other approaches for imbalanced SSL, our framework belongs to the type of technical tools that do not introduce any additional foreseeable societal problems, but will in the long term make computer vision models generally better.
+9
+
+References
+[1] Sami Abu-El-Haija, Nisarg Kothari, Joonseok Lee, Paul Natsev, George Toderici, Balakrishnan Varadarajan, and Sudheendra Vijayanarasimhan. Youtube-8m: A large-scale video classification benchmark, 2016.
+[2] Philip Bachman, Ouais Alsharif, and Doina Precup. Learning with pseudo-ensembles. arXiv preprint arXiv:1412.4864, 2014.
+[3] David Berthelot, Nicholas Carlini, Ekin D Cubuk, Alex Kurakin, Kihyuk Sohn, Han Zhang, and Colin Raffel. Remixmatch: Semi-supervised learning with distribution alignment and augmentation anchoring. arXiv preprint arXiv:1911.09785, 2019.
+[4] David Berthelot, Nicholas Carlini, Ian Goodfellow, Nicolas Papernot, Avital Oliver, and Colin Raffel. Mixmatch: A holistic approach to semi-supervised learning. arXiv preprint arXiv:1905.02249, 2019.
+[5] Kaidi Cao, Colin Wei, Adrien Gaidon, Nikos Arechiga, and Tengyu Ma. Learning imbalanced datasets with label-distribution-aware margin loss. In Advances in Neural Information Processing Systems, 2019.
+[6] Ting Chen, Simon Kornblith, Kevin Swersky, Mohammad Norouzi, and Geoffrey Hinton. Big selfsupervised models are strong semi-supervised learners, 2020.
+[7] Xinlei Chen, Haoqi Fan, Ross Girshick, and Kaiming He. Improved baselines with momentum contrastive learning, 2020.
+[8] Yin Cui, Menglin Jia, Tsung-Yi Lin, Yang Song, and Serge Belongie. Class-balanced loss based on effective number of samples. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9268­9277, 2019.
+[9] Yves Grandvalet, Yoshua Bengio, et al. Semi-supervised learning by entropy minimization. In CAP, pages 281­296, 2005.
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition, 2015.
+[11] Minsung Hyun, Jisoo Jeong, and Nojun Kwak. Class-imbalanced semi-supervised learning. arXiv preprint arXiv:2002.06815, 2020.
+[12] C Daniel Johnson, Mei-Hsiu Chen, Alicia Y Toledano, Jay P Heiken, Abraham Dachman, Mark D Kuo, Christine O Menias, Betina Siewert, Jugesh I Cheema, Richard G Obregon, et al. Accuracy of ct colonography for detection of large adenomas and cancers. New England Journal of Medicine, 359(12):1207­1217, 2008.
+[13] Bingyi Kang, Saining Xie, Marcus Rohrbach, Zhicheng Yan, Albert Gordo, Jiashi Feng, and Yannis Kalantidis. Decoupling representation and classifier for long-tailed recognition. arXiv preprint arXiv:1910.09217, 2019.
+[14] Jaehyung Kim, Youngbum Hur, Sejun Park, Eunho Yang, Sung Ju Hwang, and Jinwoo Shin. Distribution aligning refinery of pseudo-label for imbalanced semi-supervised learning. arXiv preprint arXiv:2007.08844, 2020.
+[15] Jaehyung Kim, Jongheon Jeong, and Jinwoo Shin. M2m: Imbalanced classification via major-to-minor translation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 13896­13905, 2020.
+[16] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization, 2017.
+[17] Alex Krizhevsky, Geoffrey Hinton, et al. Learning multiple layers of features from tiny images. 2009.
+[18] Dong-Hyun Lee et al. Pseudo-label: The simple and efficient semi-supervised learning method for deep neural networks. In Workshop on challenges in representation learning, ICML, volume 3, 2013.
+[19] Tsung-Yi Lin, Michael Maire, Serge Belongie, Lubomir Bourdev, Ross Girshick, James Hays, Pietro Perona, Deva Ramanan, C. Lawrence Zitnick, and Piotr Dollár. Microsoft coco: Common objects in context, 2015.
+[20] Jialun Liu, Yifan Sun, Chuchu Han, Zhaopeng Dou, and Wenhui Li. Deep representation learning on long-tailed data: A learnable embedding augmentation perspective. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2020.
+[21] Jonathan Long, Evan Shelhamer, and Trevor Darrell. Fully convolutional networks for semantic segmentation, 2015.
+[22] Dhruv Mahajan, Ross Girshick, Vignesh Ramanathan, Kaiming He, Manohar Paluri, Yixuan Li, Ashwin Bharambe, and Laurens Van Der Maaten. Exploring the limits of weakly supervised pretraining. In Proceedings of the European Conference on Computer Vision (ECCV), pages 181­196, 2018.
+[23] Geoffrey J McLachlan. Iterative reclassification procedure for constructing an asymptotically optimal rule of allocation in discriminant analysis. Journal of the American Statistical Association, 70(350):365­369, 1975.
+10
+
+[24] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun. Faster r-cnn: Towards real-time object detection with region proposal networks, 2016.
+[25] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, Alexander C. Berg, and Li Fei-Fei. Imagenet large scale visual recognition challenge, 2015.
+[26] Mehdi Sajjadi, Mehran Javanmardi, and Tolga Tasdizen. Mutual exclusivity loss for semi-supervised deep learning. In 2016 IEEE International Conference on Image Processing (ICIP), pages 1908­1912. IEEE, 2016.
+[27] Mehdi Sajjadi, Mehran Javanmardi, and Tolga Tasdizen. Regularization with stochastic transformations and perturbations for deep semi-supervised learning. arXiv preprint arXiv:1606.04586, 2016.
+[28] Li Shen, Zhouchen Lin, and Qingming Huang. Relay backpropagation for effective learning of deep convolutional neural networks. In European conference on computer vision, pages 467­482. Springer, 2016.
+[29] Kihyuk Sohn, David Berthelot, Chun-Liang Li, Zizhao Zhang, Nicholas Carlini, Ekin D Cubuk, Alex Kurakin, Han Zhang, and Colin Raffel. Fixmatch: Simplifying semi-supervised learning with consistency and confidence. arXiv preprint arXiv:2001.07685, 2020.
+[30] Yu-Xiong Wang, Deva Ramanan, and Martial Hebert. Learning to model the tail. In I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett, editors, Advances in Neural Information Processing Systems, volume 30. Curran Associates, Inc., 2017.
+[31] Chen Wei, Kihyuk Sohn, Clayton Mellina, Alan Yuille, and Fan Yang. Crest: A class-rebalancing self-training framework for imbalanced semi-supervised learning. arXiv preprint arXiv:2102.09559, 2021.
+[32] Yuzhe Yang and Zhi Xu. Rethinking the value of labels for improving class-imbalanced learning. arXiv preprint arXiv:2006.07529, 2020.
+[33] Sergey Zagoruyko and Nikos Komodakis. Wide residual networks. arXiv preprint arXiv:1605.07146, 2016.
+[34] Jure Zbontar, Florian Knoll, Anuroop Sriram, Tullie Murrell, Zhengnan Huang, Matthew J. Muckley, Aaron Defazio, Ruben Stern, Patricia Johnson, Mary Bruno, Marc Parente, Krzysztof J. Geras, Joe Katsnelson, Hersh Chandarana, Zizhao Zhang, Michal Drozdzal, Adriana Romero, Michael Rabbat, Pascal Vincent, Nafissa Yakubova, James Pinkerton, Duo Wang, Erich Owens, C. Lawrence Zitnick, Michael P. Recht, Daniel K. Sodickson, and Yvonne W. Lui. fastMRI: An open dataset and benchmarks for accelerated MRI. 2018.
+[35] Yaoyao Zhong, Weihong Deng, Mei Wang, Jiani Hu, Jianteng Peng, Xunqiang Tao, and Yaohai Huang. Unequal-training for deep face recognition with long-tailed noisy data. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7812­7821, 2019.
+[36] Boyan Zhou, Quan Cui, Xiu-Shen Wei, and Zhao-Min Chen. Bbn: Bilateral-branch network with cumulative learning for long-tailed visual recognition. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9719­9728, 2020.
+11
+
+A Appendix
+
+A.1 Dataset Details
+We follow the procedure of DARP [14] to construct semi-supervised imbalanced CIFAR-10 dataset for a fair comparison and further extend it to CIFAR-100. Since DARP only uses a single value for unlabeled ratio , we extend it to various values to better support our analysis. To be specific, for CIFAR-10, the number of labeled data for head class N1 is set to be 1500 and that for CIFAR-100 is set to be 150. With different unlabeled ratio , the number of unlabeled data for head class M1 is N1 · . We manually create a long-tailed distribution and with varying imbalanced ratio , the number of labeled data and unlabeled data for tail class is N1 ·  and M1 ·  respectively.
+
+A.2 Training Details
+
+Following DARP [14], all experiments are conducted with Wide ResNet-28-2 [33]. The model is
+
+trained with batch size 64 for 2.5  105 training iterations. We choose Adam [16] as the optimizer
+
+and learning rate is set to be 0.002. For fine-tuning the classifier only, the learning rate is decreased
+
+to
+
+0.0001
+
+and
+
+we
+
+fine-tune
+
+it
+
+for
+
+3
+
+
+
+104
+
+iterations.
+
+The
+
+hyper-parameter
+
+q
+
+is
+
+set
+
+as
+
+1 3
+
+for
+
+FixMatch
+
+[29]
+
+and
+
+1 2
+
+for
+
+MixMatch
+
+[4].
+
+All
+
+experiments
+
+are
+
+conducted
+
+on
+
+a
+
+single
+
+Tesla
+
+V100
+
+GPU
+
+but
+
+any
+
+GPU with enough memory should also be able to work and produce similar results.
+
+A.3 More Experimental Results on CIFAR-100
+
+Joint Learning Results. Table 6 summarizes the joint learning results on CIFAR0-100. Re-sampling strategies can still bring consistent improvement under all settings compared to baseline. On average with changing re-sampling strategies FixMatch can obtain 1.5% improvement.
+
+Table 6: Empirical study of different sampling strategies for the labeled and unlabeled data in class-imbalanced SSL using a joint learning scheme. We report the classification accuracy (%) on CIFAR-100. The best results are marked in bold.
+
+Labeled Data Sampling Random Random Random Mean Mean Mean Reverse Reverse Reverse
+
+Unlabeled Data Sampling Random Mean Reverse Random Mean Reverse Random Mean Reverse
+
+Imbalanced Ratio  / Unlabeled Ratio  10/1 20/1 50/1 10/2 20/2 50/2 50.2 44.1 35.6 54.9 48.0 40.5 51.2 46.1 38.4 54.2 48.3 41.4 51.4 44.8 36.4 52.4 45.4 37.8 51.2 42.7 34.9 55.0 49.3 40.2 51.7 45.0 36.3 53.9 47.6 40.6 50.2 44.3 33.8 50.9 43.9 32.8 51.1 43.0 33.3 55.6 48.3 40.4 51.1 43.6 33.8 53.9 46.2 35.6 49.7 41.8 31.5 51.1 42.1 31.9
+
+Decoupled Learning Results. Table 7 summarizes the decoupled learning results on CIFAR-100. The same phenomenon in CIFAR-10 can be observed here as well. Training sets that keeps the original data distribution seems to be the best choice for learning the representation. Then proper re-sampling strategies can greatly improve the performance on class-balanced test sets.
+
+A.4 More Experimental Results on CIFAR-10 with different fine-tuning strategies.
+We present more results with different fine-tuning strategies on CIFAR-10 in this section. Table 8 summarizes the results of models fine-tuned with the mean sampler for labeled data and the random sampler for unlabeled data while Table 9 presents that with the mean sampler for labeled data and the reverse sampler for unlabeled data. Compare to Table 2, though the exact accuracy value varies, the trend that models with feature extractors trained without re-sampling achieve the most significant performance improvements and obtain the best performance in almost all settings remain unchanged. This phenomenon shows that our finding is irrelevant to the fine-tuning strategy. On the contrary, with proper fine-tuning strategy, feature extractors trained without re-sampling always help to get the best performance in the later stage.
+
+12
+
+Table 7: Classification accuracy (%) after fine-tuning the models from Table 6. We freeze the feature extractor and train the classifier with a mean sampling strategy on CIFAR-10. Performance variation is shown in brackets. Best results are bolded. Results with the greatest improvement are underlined.
+
+Sampling Strategy for labeled / unlabeled data
+Random / Random Random / Mean Random / Reverse Mean / Random Mean / Mean Mean / Reverse Reverse / Random Reverse / Mean Reverse / Reverse
+
+10/1 51.6(+1.4) 51.5(+0.3) 51.4(+0.0) 51.3(+0.1) 51.4(-0.3) 49.7(-0.5) 50.9(-0.2) 50.6(-0.5) 49.2(-0.5)
+
+Imbalanced Ratio  / Unlabeled Ratio 
+
+20/1
+
+50/1
+
+10/2
+
+20/2
+
+46.4(+2.3) 37.8(+2.2) 55.8(+0.9) 49.7(+1.7)
+
+46.0(-0.1) 39.1(+0.7) 53.7(-0.5) 48.7(+0.4)
+
+45.5(+0.7) 37.7(+1.3) 51.7(-0.7) 45.3(-0.1)
+
+43.1(+0.4) 35.3(+0.4) 54.4(-0.6) 48.9(-0.4)
+
+45.0(+0.0) 36.8(+0.5) 52.6(-1.3) 47.1(-0.5)
+
+44.0(-0.3) 34.1(+0.3) 49.3(-1.6) 42.7(-1.2)
+
+43.0(+0.0) 33.7(+0.4) 54.1(-1.5) 47.7(-0.6)
+
+43.1(-0.5) 33.2(-0.5) 52.7(-1.2) 43.9(-2.3)
+
+40.4(-1.4) 30.5(-1.0) 49.0(-2.1) 40.0(-2.1)
+
+50/2 42.5(+2.0) 42.2(+0.8) 38.1(+0.3) 40.8(+0.6) 39.7(-0.9) 32.3(-0.5) 39.9(-0.5) 34.1(-1.5) 30.2(-1.7)
+
+Table 8: Classification accuracy (%) after fine-tuning the models from Table 1. We freeze the feature extractor and train the classifier with the mean sampler for labeled data and the random sampler for unlabeled data on CIFAR-10. Performance variation is shown in brackets. Best results are bolded. Results with the greatest improvement are underlined.
+
+Sampling Strategy for labeled / unlabeled data
+Random / Random Random / Mean Random / Reverse Mean / Random Mean / Mean Mean / Reverse Reverse / Random Reverse / Mean Reverse / Reverse
+
+50/1 79.0(+3.2) 78.9(+0.5) 77.9(-0.7) 78.2(+0.4) 78.6(-0.9) 79.0(+0.0) 78.2(+1.7) 78.0(+0.0) 78.2(+0.2)
+
+Imbalanced Ratio  / Unlabeled Ratio 
+
+100/1
+
+150/1
+
+50/2
+
+100/2
+
+73.0(+5.7) 68.0(+5.6) 84.5(+3.7) 78.6(+4.7)
+
+72.3(+0.6) 70.9(+4.7) 83.6(+2.3) 77.3(+2.4)
+
+70.6(+0.1) 64.9(+0.3) 80.4(+1.9) 75.7(+4.1)
+
+70.1(+0.1) 64.8(-0.7) 83.5(+0.4) 76.4(+0.2)
+
+70.2(-1.6) 69.1(+0.8) 81.8(-0.7) 75.2(-1.6)
+
+73.2(+0.9) 69.5(+0.7) 79.4(-0.4) 72.8(-0.7)
+
+69.5(-1.0) 63.5(+2.2) 80.8(-2.1) 76.5(+0.1)
+
+69.0(-1.3) 65.6(-0.9) 80.9(-0.6) 73.5(-2.3)
+
+70.9(-1.1) 66.1(-2.8) 79.2(-0.7) 71.4(-1.9)
+
+150/2 74.2(+5.9) 76.0(+5.3) 71.6(+4.6) 71.5(+0.1) 71.6(+0.1) 70.8(+1.4) 71.6(+0.6) 69.7(-2.4) 66.1(-4.2)
+
+Table 9: Classification accuracy (%) after fine-tuning the models from Table 1. We freeze the feature extractor and train the classifier with the mean sampler for labeled data and the reverse sampler for unlabeled data on CIFAR-10. Performance variation is shown in brackets. Best results are bolded. Results with the greatest improvement are underlined.
+
+Sampling Strategy for labeled / unlabeled data
+Random / Random Random / Mean Random / Reverse Mean / Random Mean / Mean Mean / Reverse Reverse / Random Reverse / Mean Reverse / Reverse
+
+50/1 80.6(+4.8) 80.2(+1.8) 80.5(+1.9) 79.1(+1.3) 80.5(+1.0) 79.5(+0.5) 77.8(+1.3) 76.5(-1.5) 77.1(-0.9)
+
+Imbalanced Ratio  / Unlabeled Ratio 
+
+100/1
+
+150/1
+
+50/2
+
+100/2
+
+72.4(+5.1) 69.0(+6.6) 85.2(+4.4) 80.3(+6.4)
+
+76.3(+4.6) 71.3(+5.1) 84.8(+3.5) 78.3(+3.4)
+
+75.5(+5.0) 70.1(+5.5) 82.4(+3.9) 77.4(+5.8)
+
+71.4(+1.4) 66.3(+0.8) 84.5(+1.4) 78.4(+2.2)
+
+74.0(+1.2) 70.3(+2.0) 83.7(+1.2) 78.6(+1.8)
+
+74.1(+1.8) 70.9(+2.1) 80.8(+1.0) 75.7(+2.2)
+
+69.5(-1.0) 63.1(+1.8) 81.7(-1.2) 77.5(+1.1)
+
+68.1(-2.2) 64.6(-1.9) 80.4(-1.1) 72.1(-3.7)
+
+69.1(-2.9) 64.5(-4.4) 78.1(-1.8) 69.3(-4.0)
+
+150/2 75.0(+6.7) 77.1(+6.4) 73.6(+6.6) 73.6(+2.2) 73.9(+2.4) 72.9(+3.5) 73.2(+2.2) 67.7(-4.4) 65.1(-5.2)
+
+13
+
+

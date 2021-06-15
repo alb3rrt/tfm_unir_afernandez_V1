@@ -1,0 +1,1613 @@
+Linear-Time Gromov Wasserstein Distances using Low Rank Couplings and Costs
+
+arXiv:2106.01128v1 [cs.LG] 2 Jun 2021
+
+Meyer Scetbon CREST - ENSAE meyer.scetbon@ensae.fr
+
+Gabriel Peyré ENS - PSL & CNRS gabriel.peyre@ens.fr
+
+Marco Cuturi Google & CREST - ENSAE
+cuturi@google.com
+
+Abstract
+The ability to compare and align related datasets living in heterogeneous spaces plays an increasingly important role in machine learning. The Gromov-Wasserstein (GW) formalism can help tackle this problem. Its main goal is to seek an assignment (more generally a coupling matrix) that can register points across otherwise incomparable datasets. As a non-convex and quadratic generalization of optimal transport (OT), GW is NP-hard. Yet, heuristics are known to work reasonably well in practice, the state of the art approach being to solve a sequence of nested regularized OT problems. While popular, that heuristic remains too costly to scale, with cubic complexity in the number of samples n. We show in this paper how a recent variant of the Sinkhorn algorithm can substantially speed up the resolution of GW. That variant restricts the set of admissible couplings to those admitting a low rank factorization as the product of two sub-couplings. By updating alternatively each sub-coupling, our algorithm computes a stationary point of the problem in quadratic time with respect to the number of samples. When cost matrices have themselves low rank, our algorithm has time complexity O(n). We demonstrate the efficiency of our method on simulated and real data.
+1 Introduction
+The ever increasing interest for Gromov-Wasserstein... Several problems in machine learning involve comparing families of points that live in heterogeneous spaces. This situation arises typically when realigning two distinct sets of feature representations obtained from the similar source. Recent applications to single-cell genomics [15] and NLP [12, 1] provide two cases in point: Thousands of cells taken from the same tissue are split in two groups, each group is processed with a different experimental protocol, resulting in two distinct sets of heterogeneous feature vectors; Thousands of word embeddings for two languages are learned independently. In both cases, one expects to find a meaningful way to register points across sets living in heteregeneous spaces, since they contain similar overall information. That realignment is usually carried out using the Gromov-Wasserstein (GW) machinery proposed by Mémoli [27] and Sturm [37], which seeks a relaxed assignment matrix that is as "close" to an isometry as possible, using a quadratic score to quantify that closeness. GW has a lot of practical appeal: It has been used in supervised learning [42], generative modeling [7], domain adaptation [9], structured prediction [38], quantum chemistry [28] and alignment layers [17].
+... despite its cubic cost. Because it is an NP-hard problem, these applications rely on approximating GW, typically by solving a sequence of OT problems using entropic regularization. This heuristic is efficient yet costly, since it requires O(n3) operations to register two sets of n samples, a price that is paid when re-instantiating each OT problem. Our goal is to reduce substantially that complexity by exploiting low-factorization of both parameters (data) and variable (relaxed assignment) matrices in the GW problem, while maintaining state of the art performance in applications.
+Wasserstein: from cubic to linear complexity. A comparatively simpler problem is the registration of two populations embedded in the same space. This corresponds to the classic optimal transport
+
+(OT) problem, which has received considerable attention in ML [29]. OT has found applications in computer vision [30], NLP [24], single cell tracking [34] or multi-task regression in neuroimaging [22]. While the OT problem is originally cast as a linear program, with a O(n3 log(n)) cost, many of these works rely on solving instead a penalized OT problem using Sinkhorn's algorithm [35, 13]. In its most naive implementation, the Sinkhorn has quadratic complexity [2]. Recent works achieve O(n) complexity by targeting the matrix-vector updates in Sinkhorn's algorithm using low-rank approximations of the data kernel matrix [4, 3, 32]. This idea can be further improved by imposing the low-rank constraint on the optimization variables of the original OT problem [19], to modify Sinkorn's steps by enforcing a low rank factorization of the coupling variable [33].
+Gromov-Wasserstein: from NP-hard to linear approximations. The GW problem replaces the linear objective function in OT by a non-convex quadratic objective. Much like OT is a relaxation of the optimal assignment problem, GW can be seen as a relaxation of the quadratic assignment problem (QAP). Both GW and QAP are NP-hard to solve [8]. In practice, iteratively minimizing a linearization of that quadratic objective using Sinkhorn works surprisingly well [20, 36]. This method corresponds to a mirror-descent scheme [28], and in the special case of Euclidean distance matrices, the loss is concave and it can be also interpreted as a bi-linear relaxation [23]. In the most general case, this results in an O(n4) algorithm (the objective is a quadratic function of a n × n relaxed assignment matrix), that is reduced to O(n3) when using separable losses [28], a price that remains too high for several ML applications. It is possible to replace the GW distance by cheaper yet only distantly related proxies, such as lower bounds based on OT [27] (see also [31]) or sliced projections [39]. Whether GW can be efficiently sped up remains an open question. We propose in this work a novel approach that leverages, as done recently for OT, low-rank methods. A very recent line of works attacks this problem by quantizing first the two input spaces to GW loss: 0.35357 GW loss: 0.35389 solve a GW problem of reduced size, thus effectively producing an ad-hoc low-rank coupling [11]. A nice feature Figure 1: Top row: we compute the GW of this approach is that it maintains the triangular inequal- coupling between two curves in 2D and ity and provides a valid upper-bound on the GW distance. 3D, with n = m = 10000 points. These Related approaches which also approximate GW distance points are endowed with the squared L2 using clustering methods (possibly in a recursive way) distance. Bottom row: coupling obtained are [6] and [41]. We take in this paper a direct approach: with the SoTA entropic approach [20, instead of separating clustering and GW resolution in 2 28], compared with our linear method independent steps, we propose do address them simulta- with rank r = 10. See Appendix D.1 for neously: our method seeks the least-costly (in GW sense) more details. coupling with a low rank constraint, as illustrated in Fig. 1.
+Contributions We introduce the low-rank-GW problem, by imposing a low rank constraint on feasible couplings. This method works hand-in-hand with entropic regularization and leads to a Sinkhorn-like algorithm. Because of its exclusive reliance on matrix-vector products, the method streams well on GPUs. This method can also leverage low-rank factorizations of the input data matrices to further reduce the complexity of each iteration to reach linear time. Numerical evaluations on simulated and real datasets show that this low-rank approximation maintains the favorable property of entropic-regularized GW (namely its ability to compute "good" local minima) for a linear computational price, thus paving the way for larger scale uses of GW in ML.
+
+2 Background on the Gromov-Wasserstein Framework
+
+Comparing measured metric spaces. Let (X , dX ) and (Y, dY ) be two metric spaces, and µ and
+
+ 
+
+two :=
+
+discrete probability measures
+
+m i=j
+
+bj yj
+
+where
+
+n, m
+
+
+
+1,
+
+a,
+
+on X and Y, respectively. b are two histograms in the
+
+We write µ :=
+
+n i=1
+
+aixi
+
+and
+
+probability simplicies n, m of
+
+respective size n and m, and (x1, . . . , xn), (y1, . . . , ym) are two families in X and Y. For q  1, let us also denote A := (dqX (xi, xi ))1i,i n  Rn×n and B := (dqY (xj , xj ))1i,i m  Rm×m
+
+two pairwise cost matrices between the points in the respective supports of µ and . The Gromov-
+
+2
+
+Wasserstein (GW) discrepancy between two discrete metric measure spaces (µ, dX ) and (, dY ) is the solution of the following non-convex quadratic problem, instantiated here for simplicity as a function of (a, A) and (b, B), which contain all the information that is needed:
+
+GW((a, A), (b, B))
+
+= min EA,B(P ),
+P a,b
+
+where
+
+a,b
+
+:=
+
+{P
+
+
+
+n×m
+R+
+
+|P
+
+1m
+
+=
+
+a, P T 1n
+
+=
+
+b},
+
+(1)
+
+and the energy EA,B is a quadratic function parameterized by a loss L : R × R  R:
+
+EA,B(P ) :=
+
+L(Ai,i , Bj,j )Pi,j Pi ,j .
+
+(2)
+
+i,j,i ,j
+
+A typical choice of the loss is the Lp distance L(a, b) = |a - b|p with p  1. In that case, [27] proves that GW1/p defines a distance on the space of metric measure spaces quotiented by measurepreserving isometries. When p = 2, as we consider from now on, the GW objective can be evaluated efficiently using the marginal constraints imposed on P , as follows [28]:
+
+EA,B(P ) = A 2a, a + B 2b, b - 2 AP B, P .
+
+(3)
+
+Indeed, (3) can be computed efficiently in O(n2m + nm2) operations, using only matrix/matrix multiplications, instead of the O(n2m2) complexity of the naive evaluation of (2).
+Entropic Gromov-Wasserstein. The original GW problem (1) can be regularized using an entropic term [20, 36, 28], leading to the following problem:
+
+GW((a, A), (b, B)) = min EA,B(P ) - H(P ) ,
+
+(4)
+
+P a,b
+
+where H(P ) := - i,j Pi,j(log(Pi,j) - 1) is the entropy of P . By applying a Mirror Descent (MD) scheme with respect to the KL divergence and by choosing the step-size to be  = 1/, Peyré et al. [28] provide a simple algorithm which consists in solving a sequence of regularized OT problem as presented in Algorithm 1. Indeed, each KL projection in Algorithm 1 can be computed efficiently thanks to the Sinkhorn algorithm [13].
+
+Computational complexity. Given a cost matrix C, the KL projection of K onto the polytope (a, b), where KL(P, Q) = P, log(P/Q)-1 , is carried out in the inner
+loop of Algo. 1 using the Sinkhorn algorithm, through
+matrix-vector products. This quadratic complexity (in red) is dominated by the cost of updating matrix C at each iteration in Algorithm 1, which requires O(n2m + nm2) algebraic operations (cubic, in violet). As noted above, evaluating the objective EA,B(P ) has the same order. In the following we show that by considering a low rank
+exact decomposition (or approximation) of the distance matrices, the cubic cost of reupdating C and subsequently evaluating EA,B can be brought down to quadratic.
+
+Algorithm 1 Entropic-GW
+Inputs: A, B, a, b,  P = abT nm for = 0, . . . do
+C  -4AP B nm(n+m) K  exp(-C/) nm P  argmin KL(P, K) O(nm)
+P (a,b)
+end Result: EA,B(P ) nm(n+m)
+
+3 Exploiting a Low-Rank Factorization for Cost Matrices
+
+Exact factorization of cost matrices. In this section we consider the case where the cost matrices A and B admit a low-rank factorization. More precisely, we make the following assumption.
+Assumption 1. Assume that A and B admit a low-rank factorization, that is there exists A1, A2  Rn×d and B1, B2  Rm×d such that A = A1AT2 and B = B1B2T , where d n, d m.
+
+A case in point is when both A and B are squared Euclidean distance matrices, with a sample size
+
+that is larger than ambient dimension. This case is highly relevant, covering many applications of OT
+
+to ML. The d n assumption is also likely to hold for most applications, since cases where d n
+
+are known to pose challenges to the estimation of OT [16, 40]. Writing X = [x1, . . . , xn]  Rd×n, if
+
+A=
+
+xi - xj
+
+2 2
+
+i,j, then one has, writing z
+
+=
+
+(X
+
+2)T 1d  Rn that A = z1Tn + 1nzT - 2XT X.
+
+3
+
+
+
+
+
+Therefore by denoting A1 = [z, 1n, - 2XT ]  Rn×(d+2) and A2 = [1n, z, 2XT ]  Rn×(d+2)
+
+we obtain the factorization above.
+
+Under Assumption 1, the complexity of Algo. 1 is downgraded to quadratic in sample size: the two
+operations that make Algo. 1 cubic lie in the updates of the cost and the computation of the objective. Observe that for any given P  Rn×m, one can compute at each iteration
+
+C = -4A1AT2 P B1B2T
+in nm(d + d ) + dd (n + m) algebraic operations. Moreover thanks to the reformulation of EA,B(P ) given in (3), one can compute it in quadratic time as well. Indeed writing G1 := AT1 P B2 and G2 := AT2 P B1, both in Rd×d , one has AP B, P = 1Td (G1 G2)1d . Computing G1, G2 given P requires only 2(nmd + mdd ), and computing their dot product adds dd algebraic operations. The overall complexity to compute EA,B(P ) is O(nmd + mdd ).
+
+General distance matrices. When the original Algorithm 2 Quadratic Entropic-GW
+
+cost matrices A, B are not low-rank but describe distances, we propose to use a recent body of work that output their low-rank approximation
+
+Inputs: A1, A2, B1, B2, a, b,  P = abT nm for = 0, . . . do
+
+in linear time [5, 21]. These algorithms produce,
+
+for any distance matrix D  Rn×m and  > 0,
+
+matrices D1  Rn×d, D2  Rm×d in O((m +
+
+n)poly(
+
+d 
+
+))
+
+algebraic
+
+operations
+
+such
+
+that
+
+with
+
+G2  AT2 P B1 nmd + mdd' C  -4A1G2B2T nmd' + ndd' K  exp(-C/) nm
+P  argmin KL(P, K) O(nm)
+
+probability at least 0.99 one has
+
+P (a,b)
+
+D - D1D2T
+
+2 F
+
+
+
+D - Cd
+
+2 F
+
++
+
+D
+
+2 F
+
+where Cd denotes the best rank-d approximation to D. We fall back on this approach to obtain a low-rank factorization of a distance matrix in linear time whenever needed, aware that this incurs an additional approximation. See Appendix B for more details.
+
+end c1  A 2a, a + B 2b, b O(nm) G2  AT2 P B1 nmd + mdd' G1  AT1 P B2 nmd + mdd' c2  -21Td (G1 G2)1d O(dd') EA,B(P )  c1 + c2 Return: EA,B(P )
+
+4 Imposing a Low Nonnegative Low-Rank for the Coupling
+
+In this section, we shift our attention to a different opportunity for speed-ups, without assuming that Assumption 1 holds: we regularize the GW problem problem by decomposing the coupling as a product of two low-rank couplings, in the footsteps of [18, 33], using the following definition: Definition 1. Given M  Rn×m, the nonnegative (NN) rank of M is the smallest number of nonnegative rank-one matrices into which the matrix can be decomposed additively:
+q
+rk+(M ) := min q|M = Ri, i, rk(Ri) = 1, Ri  0 .
+i=1
+
+Following [18, 33], we propose to constrain GW, enforcing a rank r on the coupling:
+
+GW-LR(r)((a, A), (b, B)) := min EA,B(P ), where a,b(r) := {P  a,b, rk+(P )  r} . (5)
+P a,b(r)
+Note that the minimum is always attained as a,b(r) is compact and the objective is continuous. In [33], the authors show that one can parameterize any coupling in a,b(r) as a product of two low-rank couplings linked by a common marginal. For any g  r, the interior of r, writing
+a,g,b := P  Rn+×m, P = Q diag(1/g)RT , Q  a,g, and R  b,g .
+
+one has that gr a,g,b = a,b(r). Therefore GW-LR introduced in (5) can be reformulated as the following optimization problem
+
+GW-LR(r)((a, A), (b, B)) =
+
+min
+
+EA,B(Q diag(1/g)RT )
+
+(6)
+
+(Q,R,g)C(a,b,r)
+
+4
+
+where C(a, b, r) := C1(a, b, r)  C2(r), with
+
+C1(a, b, r) := (Q, R, g)  Rn+×r × Rm + ×r × (R+)r s.t. Q1r = a, R1r = b ,
+
+C2(r) := (Q, R, g)  Rn+×r × Rm + ×r × Rr+ s.t. QT 1n = RT 1m = g .
+
+Stabilization of the Method. [33] propose to stabilize the objective defined in (6) by adding to the constraints a lower bound  on the weight vector g such that g   coordinate-wise. Indeed, as a solution of (6) must satisfies g > 0 coordinate-wise, then for  sufficiently small, the solution of the same problem where one adds the constraint g   will remain the same. Therefore let us introduce our new set of constraints C(a, b, r, ) := C1(a, b, r, )  C2(r) where C1(a, b, r, ) := C1(a, b, r)  {(Q, R, g) | g  }. Another way to stabilize the method is by considering a double regularization scheme as proposed in [33] where in addition of constraining the nonnegative rank of the coupling, we regularize the objective by adding an entropic term in (Q, R, g), which is to be understood as that of the values of the three respective entropies evaluated for each term.
+
+GW-LR(r,) ((a,
+
+A),
+
+(b,
+
+B))
+
+:=
+
+min
+(Q,R,g)C(a,b,r,)
+
+EA,B (Q
+
+diag(1/g)RT
+
+)
+
+-
+
+H ((Q,
+
+R,
+
+g))
+
+.
+
+(7)
+
+Mirror Descent Scheme. As in [28], we propose to use a MD scheme with respect to the KL
+divergence to approximate GW-LR(r,) in (7). More precisely, for any   0, the MD scheme leads for all k  0 to the following updates which require solving a convex barycenter problem per step:
+
+(Qk+1, Rk+1, gk+1) := argmin KL(, Kk)
+
+(8)
+
+C(a,b,r,)
+
+where (Q0, R0, g0)  C(a, b, r) is an initial point such that Q0 > 0 and R0 > 0, Pk := Qk diag(1/gk)RkT , Kk := (Kk(1), Kk(2), Kk(3)), Kk(1) := exp(4APkBRk diag(1/gk) - ( - 1) log(Qk)), Kk(2) := exp(4BPkT DQk diag(1/gk) - ( - 1) log(Rk)), Kk(3) := exp(-4k/gk2 - ( - 1) log(gk)) with [k]i := [QTk APkBRk]i,i for all i  {1, . . . , r} and  is a positive step size. Solving (8) can be done efficiently thanks to the Dykstra's Algorithm as
+showed in [33]. See Appendix C for more details.
+
+Initialization. To initialize our algorithm, we adapt the First Lower Bound of [27] to our case of
+
+interest. More precisely, we show the following Proposition. See appendix A for the proof.
+
+Proposition 1.
+
+Let us denote x~ = A
+
+2a  Rn, y~ = B
+
+2b
+
+
+
+Rm
+
+and
+
+C~
+
+=
+
+ (| x~i
+
+-
+
+y~j |2)i,j 
+
+Rn×m. Then for all   0 and r  1 we have,
+
+GW-LR(r)((a, A), (b, B)) 
+
+min
+
+C~, Q diag(1/g)RT - H((Q, R, g)) . (9)
+
+(Q,R,g)C(a,b,r,)
+
+Note that the RHS of the inequality (9) is exactly the problem studied in [33] for which an algorithm was proposed. Therefore to initialize our algorithm, we propose to use their approach. Note that here the cost C~ is the squared Euclidean distance between two families {x~1, . . . , x~n} and {y~1, . . . , y~m} in 1-D which admits a low-rank factorization. Therefore we can apply the linear-time version of the algorithm presented in [33] to compute the solution. Algorithm 3 summarizes our approach, where D(·) denotes the operator extracting the diagonal of a square matrix.
+Computational Cost. Computing the initialization goes through the computations of x~ and y~ which requires O(n2 + m2) algebraic operations. Moreover, applying the algorithm proposed in [33] when the underlying cost is the squared Euclidean distances between two families in 1-D needs only O((n + m)r) algebraic operations. Solving the barycenter problem as defined in (8) can be done efficiently thanks to Dykstra's Algorithm. Indeed in [33, Algorithm 2] the authors show that given (Kk(1), Kk(2), Kk(3)), each iteration of their algorithm requires only O((n + m)r) algebraic operations since it involves only matrix/vector multiplications. However computing the kernel matrices (Kk(1), Kk(2), Kk(3)) at each iteration of Algorithm 3 requires a quadratic complexity with respect to the number of samples. Overall the proposed algorithm, while faster than the cubic implementation proposed in [28], still needs O((n2 + m2)r) operations per iteration. In the following we will see that by combining both nonnegative low-rank constraints on the coupling and low-rank approximations of the distance matrices, we can obtain a linear time algorithm with respect to the number of samples which computes an approximation of the GW distance.
+
+5
+
+Algorithm 3 Low-Rank GW, GW-LR(r,) ((a, A), (b, B))
+
+Inputs: A, B, a, b, r, , 
+
+x~  A 2a, y~  B 2b O(m2 + n2)  Step ( )
+
+z1 C~1
+
+ x~ 2, z2 y~ 2  [z1, 1n, - 2x~],
+
+O(m + n) C~2  [1m,
+
+z2
+
+,
+
+ 2y~]T
+
+O(n + m)
+
+(Q, R, g)  argmin C~1C~2, Q diag(1/g)RT - H((Q, R, g))
+
+(Q,R,g)C(a,b,r,)
+
+O((n + m)r)
+
+for k = 1, . . . do C1  -AQ diag(1/g), C2  RT B O((n2 + m2)r)  Step ( ) K(1)  exp(4C1C2R diag(1/g) - ( - 1) log(Q)) O((m + n)r2) K(2)  exp(4C2T C1T Q diag(1/g) - ( - 1) log(R)) O((m + n)r2)   D(QT C1C2R), K(3)  exp(-4/g2 - ( - 1) log(g)) O(nr2) Q, R, g  argmin KL(, (K(1), K(2), K(3))) O((m + n)r)
+C(a,b,r,)
+
+end
+
+c1  x~, a + y~, b n + m C1  -AQ diag(1/g), C2  RT B O((n2 + m2)r)  Step ( ) G  C2R, G  C1G, G  QT G diag(1/g) O((m + n)r2) c2  -2Tr(G) r E  c1 + c2 Return: E
+
+Convergence of the mirror descent. Even if the objective (7) is not convex in (Q, R, g), we obtain the non-asymptotic stationary convergence of the MD algorithm in this setting. For that purpose we consider the same convergence criterion as the one proposed in [33] to obtain non-asymptotic stationary convergence of the MD scheme defined as
+
+1 ,(, ) := 2 (KL(, G,(, )) + KL(G,(, ), ))
+
+where G,(, ) := argminC(a,b,r,){ EA,B(), 
+
++
+
+1 
+
+KL(,
+
+)}.
+
+For
+
+any
+
+1/r
+
+
+
+
+
+>
+
+0,
+
+we
+
+show in the following proposition the non-asymptotic stationary convergence of the MD scheme
+
+applied to the problem (7). See Appendix A for the proof.
+
+Proposition 2.
+
+Let   0,
+
+1 r
+
+  > 0 and N
+
+ 1.
+
+By denoting L,
+
+:= 27(
+
+A
+
+2
+
+B
+
+2/4 + )
+
+and
+
+by
+
+considering
+
+a
+
+constant
+
+stepsize
+
+in
+
+the
+
+MD
+
+scheme
+
+(8)
+
+
+
+=
+
+, 1
+2L,
+
+we
+
+obtain
+
+that
+
+min
+1kN
+
+,((Qk, Rk, gk), )
+
+
+
+4L,D0 . N
+
+where D0 := EA,B(Q0 diag(1/g0R0T ) - GW-LR(r)((a, A), (b, B)) is the distance of the initial value to the optimal one.
+
+Recall that for  sufficiently small, we have GW-LR(r,) ((a, A), (b, B)) = GW-LR(r)((a, A), (b, B)). Thus Proposition 2 show that our algorithm reach a stationary point of (7). In particular, if  = 0, the
+proposed algorithm converges towards a stationary point of (5).
+
+5 Double Low-rank Approach for Linear Time GW
+
+Almost all operations in Algorithm 3 are linear time, except for the three updates highlighted in red, involving C1 and C2, and the computations of x~ = A 2a and y~ = B 2b as they still require a quadratic number of algebraic operations. When adding Assumption 1 from §3 to the rank constrained
+approach from §4, we notice that the strengths of both approaches can work hand in hand, both in easier initial evaluations of x~, y~, but, most importantly, at each new recomputation of a factorized
+linearization of the quadratic objective:
+
+Linear time outer norms. Because A admits a low-rank factorization, one can obtain a low-rank
+
+factorization for A 2. Indeed, remark that for x, y  Rd, x, y 2 =
+
+d i,j=1
+
+xi
+
+xj
+
+yi
+
+yj
+
+.
+
+Therefore
+
+6
+
+by studying the rows of matrices A1 := [a(11); ...; a(n1)] and A2 := [a(12); ...; a(n2)], if one writes (x) := Vect(xxT )  Rd2 where Vect(·) is the vectorization operation, we obtain that
+A 2 = A~1A~2T where A~1 = [(a(11)), . . . , (a(n1))]T , A~2 = [(a(12)), . . . , (a(n2))]T .
+In Algorithm 3, the line "Step ( )" can thus be replaced by x~  A~1A~2T a and y~  B~1B~2T b Note that computing A~1 given A1 requires only O(nd2) operations, so that this alternate code only takes O(nd2) + O(m(d )2) operations.
+Linear time linearization of the GW objective. The linearization step, the critical step in Algo.1 that consists in updating C at each iteration, consumes a substantial portion of the computational budget of GW. Introducing the low-rank Sinkhorn approach makes this step quadratic in Algo.3; the complexity of that step is also quadratic using the low-rank assumption on costs A and B, in Algo.2. There is therefore an opportunity to marry both to speed-up that important step. We argue that this is indeed what happens, in the sense that combining the two yields indeed linear time complexities in sample sizes, by replacing in Algorithm 3, the lines "Step ( )" by
+C1  -A1AT2 Q diag(1/g) and C2  RT B2B1T .
+Note that this speed-up would not be achieved using other approaches that output a low rank approximation of the transport plan [4, 3, 32]. The crucial obstacle to using these methods here is that the cost matrix C in GW is "synthetic", in the sense that it is the output of a matrix product AP B involving the very last transport P . This stands in stark contrast with the requirements in [4, 3, 32] that the kernel matrix corresponding to K = e-C/ admits favorable properties, such as being p.s.d or admitting an explicit (random or not) finite dimensional feature approximation. Since C changes at each iteration in Algo.1, they are not directly applicable.
+Combining the results in §4 with those from §B results in updates for C1 and C2 that only require O(nrd) and O(mrd ) operations.
+Linear time GW. Finally all the quadratic operations appearing in Algorithm (3) can be replaced by linear counterparts. The iterations that have not been modified had an overall complexity of O(mr(r + d ) + nr(r + d)) at each iteration. The initialization and linearization steps can now be performed in linear time, with respective complexity of respectively O(n(r + d2) + m((d )2 + r)) and O((nr(r + d) + mr(r + d )).
+6 Experiments
+Our goal in this section is to demonstrate that, for a far smaller computational budget, the GW-LR approach is competitive with the direct entropic approach on datasets that are either synthesized to exhibit local clusters, or directly validated on a real high-dimensional dataset as well. Because both approaches have different hyperparameters, our goal is to stick to a realistic evaluation that stresses both optimality of solutions as a function of computational effort, as well as performance in real life applications. We start by investigating the sensitivity of hyperparamaters  and  on our method. Since GW is not convex, these may interact in unexpected ways. Experiments were run on a personal MacBook Pro 2019 laptop. We reused code from github.com/meyerscetbon/LOT, and downloaded genomics data from github.com/rsinghlab/SCOT.
+Benchmarks. We consider three synthetic problems and one real world problem to evaluate timeaccuracy trade-offs, and also compare the couplings obtained by our method and that of the entropic version [28]. More precisely, we compare the quadratic approach in GW-LR computed with algorithm (3) (and its linear time counterpat, Lin GW-LR as presented in §5), with EntropicGW, the cubic implementation of [28] (as well as its quadratic counterpart, Quad Entropic-GW presented in Algo. 2). For GW-LR and Lin GW-LR, and in all experiments, we set the lower bound on entries of g to  = 10-10.
+Initialization To initialize all algorithms with a common strategy, we adapted the first lower bound of [27, Def. 6.1] to the entropic case. In all experiments showing time-accuracy tradeoffs, we choose to use number of operations to provide platform independent quantities. Accuracy is measured by evaluating the ground-truth energy EA,B (even in scenarios when the method uses a low rank approximation for A, B at optimization time).
+7
+
+Figure 3: The number of cluster in each distribution is 10 and the number of samples is n = m = 5000. The ground cost is the Euclidean distance. As we can evaluate the distance between two arbitrary points, we can obtain in linear-time an efficient approximation of the distance matrices A and B as presented in 3. The rank of their factorizations is fixed to be d = d = 100. GW-LR and EntropicGW corresponds to the case where the full matrices A and B are considered while Lin GW-LR and Quad Entropic-GW take as inputs the low-rank approximations of the distance matrices. We plot the time-accuracy tradeoff for multiple choices of  and rank r defined as a fraction of n. For Entropic-GW and Quad Entropic-GW, we set  = 1/ as proposed in [28]. Recall that for low-rank methods, we set  = 0.
+
+Sensitivity to  and  Here we aim at showing the
+
+dependence in both  and  of our proposed method.
+
+In Figure 2, we compare the GW loss obtained by our
+
+algorithm when varying  and  on two mixtures. We
+
+show that when  = 0, the proposed method manage
+
+to consistently obtain small GW loss whatever  is.
+
+By allowing  > 0, the algorithm is able to reach even
+
+smaller GW loss, however, the choice of  depends
+
+highly on . Therefore in the following experiments,
+
+we fix  = 0 for our method. We also show the
+
+dependence in  and  of our method in other settings
+
+and observe similar behaviors. See Appendix D.2 for
+
+more details.
+
+Remark 1. As shown in Figure 8 in Appendix D.2, allowing  > 0 may also increase the speed of convergence of the algorithm. However choosing well  for a given  must be done carefully and we prefer in the following experiments to present the performance of our method in the simplest setting where  = 0.
+
+Figure 2: In this experiment, we consider two mixtures of (2 and 3) Gaussians in respectively 5-D and 10-D, sampled as discrete measures with n = m = 5000 points, see more details on setup in Appendix D.2. The ground cost is the squared Euclidean distance, which provides an exact low-rank factorization of
+
+the cost as presented in § 3. Results on speed
+
+(in Appendix) are therefore obtained using
+
+Synthetic low-rank problem In this experiment Lin GW-LR. The nonnegative rank of the
+
+we aim at comparing the time-accuracy tradeoff of coupling is set to r = 50 = n/100. We plot
+
+the different methods when the underlying distribu- the GW loss obtained by Lin GW-LR when
+
+tions has a low-rank structure. For that purpose, we varying for multiple choices of . Both size
+
+consider two distributions in respectively 10-D and and color have been used to quantify visually
+
+15-D, where the support of each distributions is the the value of the loss at that parameter pair. Oc-
+
+concatenation of clusters of points, and where the eu- casional inversions are due to the nonconvex
+
+clidean distance between the centroids of the clusters nature of the GW problem.
+
+is bigger than a threshold . Here we set  = 10.
+
+Both distributions are uniform, have the same number
+
+of clusters and the same number of points in each cluster. Some illustrations of the simulated data
+
+is provided in Appendix D.3. In Figure 3, when the underlying cost is the (not squared) Euclidean
+
+distance, our methods manage to consistently obtain similar accuracy that the ones obtained by
+
+entropic methods, with very low rank r = n/500, while being orders of magnitude faster. In Figure 4,
+
+we also compare the time-accuracy tradeoffs in the more favorable case where the underlying cost
+
+is the squared Euclidean distance and obtain similar results. We also show more experiments for
+
+different number of clusters in Appendix D.3, leading to similar conclusions.
+
+8
+
+Figure 4: The number of clusters in each distribution is 5 and the number of samples considered here is n = m = 10000. The ground cost is the squared Euclidean distance. We compare Lin GW-LR and Quad Entropic-GW as we have an exact factorization of the matrices A and B. We plot the time-accuracy tradeoff when varying  for multiple choices of r. For Quad Entropic-GW, we set  = 1/ and for Lin GW-LR we set  = 0.
+Figure 5: We plot, for each cells of the SNAREseq dataset, the FOSCTTM ranked in the increasing order for both GW-LR and Entropic-GW.
+Figure 6: Plot of the time-accuracy tradeoff when varying  for multiple choices of rank r on the SNAREseq dataset. For Entropic-GW we set  = 1/, for GW-LR, we set  = 0.
+Experiments on Single Cell Genomics Data. We reproduce the single-cell alignment experiment introduced in [14]. The dataset consists in single-cell multi-omics data generated by co-assays. In that setup, the ground truth one­to-one correspondence information between cells is known, and can therefore be used to benchmark GW strategies. The dataset considered is the SNAREseq [10], with n = m = 1047. We apply the exact same pre-processing steps as proposed in [14] by computing intra-domain distance matrices A and B with a k-NN graphs based on correlations, to compute shortest path distance matrices. Note that in that case, one cannot obtain directly in linear time a low-rank factorization of A and B using [5, 21], since the shortest path distances need to be computed first. Therefore we only consider the quadratic GW-LR and the cubic Entropic-GW. In Figure 6, we compare the alignment performance through the "fraction of samples closer than the true match" (FOSCTTM) introduced in [25]. We see that both algorithm obtain similar performance. However, in Figure 5, we show that whatever the  chosen, GW-LR reaches better accuracy while being order of magnitude faster than Entropic-GW for a very small rank r = 10. Conclusion. While the factorization introduced in [33] held the promise to speed up classic OT, we have shown in this work that it delivers an even larger impact when applied to the GW problem: Indeed, the combination of low-rank Sinkhorn factorization with-low rank cost matrices is the only one, to our knowledge, that ensures that the linearization step of the GW objective can be carried out with a linear complexity, throughout outer iterations. This linear complexity is comparable to that of the most recent OT solvers, yet still retains the appealing properties of the Entropic approach, such as stability and convergence to meaningful solutions.
+9
+
+Acknowledgments The work of G. Peyré was supported by the French government under management of Agence Nationale de la Recherche as part of the "Investissements d'avenir" program, reference ANR19-P3IA-0001 (PRAIRIE 3IA Insti- tute) and by the European Research Council (ERC project NORIA).
+10
+
+References
+[1] Jean Alaux, Edouard Grave, Marco Cuturi, and Armand Joulin. Unsupervised hyperalignment for multilingual word embeddings. arXiv preprint arXiv:1811.01124, 2018.
+[2] Jason Altschuler, Jonathan Weed, and Philippe Rigollet. Near-linear time approximation algorithms for optimal transport via sinkhorn iteration. arXiv preprint arXiv:1705.09634, 2017.
+[3] Jason Altschuler, Francis Bach, Alessandro Rudi, and Jonathan Niles-Weed. Massively scalable sinkhorn distances via the nyström method, 2018.
+[4] Jason Altschuler, Francis Bach, Alessandro Rudi, and Jonathan Weed. Approximating the quadratic transportation metric in near-linear time. arXiv preprint arXiv:1810.10046, 2018.
+[5] Ainesh Bakshi and David P. Woodruff. Sublinear time low-rank approximation of distance matrices, 2018.
+[6] Andrew J Blumberg, Mathieu Carriere, Michael A Mandell, Raul Rabadan, and Soledad Villar. Mrec: a fast and versatile framework for aligning and matching point clouds with applications to single cell molecular data. arXiv preprint arXiv:2001.01666, 2020.
+[7] Charlotte Bunne, David Alvarez-Melis, Andreas Krause, and Stefanie Jegelka. Learning generative models across incomparable spaces. arXiv preprint arXiv:1905.05461, 2019.
+[8] Rainer E Burkard, Eranda Cela, Panos M Pardalos, and Leonidas S Pitsoulis. The quadratic assignment problem. In Handbook of combinatorial optimization, pages 1713­1809. Springer, 1998.
+[9] Laetitia Chapel, Mokhtar Alaya, and Gilles Gasso. Partial optimal transport with applications on positive-unlabeled learning. In Advances in Neural Information Processing Systems 33 (NeurIPS 2020), 2020.
+[10] Song Chen, Blue B Lake, and Kun Zhang. High-throughput sequencing of the transcriptome and chromatin accessibility in the same cell. Nature biotechnology, 37(12):1452­1457, 2019.
+[11] Samir Chowdhury, David Miller, and Tom Needham. Quantized gromov-wasserstein. arXiv preprint arXiv:2104.02013, 2021.
+[12] Alexis Conneau, Guillaume Lample, Marc'Aurelio Ranzato, Ludovic Denoyer, and Hervé Jégou. Word translation without parallel data. arXiv preprint arXiv:1710.04087, 2017.
+[13] Marco Cuturi. Sinkhorn distances: Lightspeed computation of optimal transport. In Advances in neural information processing systems, pages 2292­2300, 2013.
+[14] Pinar Demetci, Rebecca Santorella, Björn Sandstede, William Stafford Noble, and Ritambhara Singh. Gromov-wasserstein optimal transport to align single-cell multi-omics data. bioRxiv, 2020. doi: 10.1101/2020.04.28.066787.
+[15] Pinar Demetci, Rebecca Santorella, Bjorn Sandstede, William Stafford Noble, and Ritambhara Singh. Gromov-wasserstein optimal transport to align single-cell multi-omics data. BioRxiv, 2020.
+[16] Richard Mansfield Dudley et al. Weak convergence of probabilities on nonseparable metric spaces and empirical measures on euclidean spaces. Illinois Journal of Mathematics, 10(1): 109­126, 1966.
+[17] Danielle Ezuz, Justin Solomon, Vladimir G Kim, and Mirela Ben-Chen. Gwcnn: A metric alignment layer for deep shape analysis. In Computer Graphics Forum, volume 36, pages 49­57. Wiley Online Library, 2017.
+[18] Aden Forrow, Jan-Christian Hütter, Mor Nitzan, Philippe Rigollet, Geoffrey Schiebinger, and Jonathan Weed. Statistical optimal transport via factored couplings, 2018.
+[19] Aden Forrow, Jan-Christian Hütter, Mor Nitzan, Philippe Rigollet, Geoffrey Schiebinger, and Jonathan Weed. Statistical optimal transport via factored couplings. In The 22nd International Conference on Artificial Intelligence and Statistics, pages 2454­2465. PMLR, 2019.
+[20] Steven Gold and Anand Rangarajan. Softassign versus softmax: Benchmarks in combinatorial optimization. Advances in neural information processing systems, pages 626­632, 1996.
+[21] Piotr Indyk, Ali Vakilian, Tal Wagner, and David Woodruff. Sample-optimal low-rank approximation of distance matrices, 2019.
+11
+
+[22] Hicham Janati, Thomas Bazeille, Bertrand Thirion, Marco Cuturi, and Alexandre Gramfort. Multi-subject meg/eeg source imaging with sparse multi-task regression. NeuroImage, page 116847, 2020.
+[23] Hiroshi Konno. Maximization of a convex quadratic function under linear constraints. Mathematical programming, 11(1):117­127, 1976.
+[24] Matt Kusner, Yu Sun, Nicholas Kolkin, and Kilian Q Weinberger. From word embeddings to document distances. In Proc. of the 32nd Intern. Conf. on Machine Learning, pages 957­966, 2015.
+[25] Jie Liu, Yuanhao Huang, Ritambhara Singh, Jean-Philippe Vert, and William Stafford Noble. Jointly embedding multiple single-cell omics measurements. BioRxiv, page 644310, 2019.
+[26] Haihao Lu, Robert M. Freund, and Yurii Nesterov. Relatively-smooth convex optimization by first-order methods, and applications, 2017.
+[27] Facundo Mémoli. Gromov­wasserstein distances and the metric approach to object matching. Foundations of computational mathematics, 11(4):417­487, 2011.
+[28] Gabriel Peyré, Marco Cuturi, and Justin Solomon. Gromov-wasserstein averaging of kernel and distance matrices. In International Conference on Machine Learning, pages 2664­2672, 2016.
+[29] Gabriel Peyré and Marco Cuturi. Computational optimal transport. Foundations and Trends in Machine Learning, 11(5-6), 2019. ISSN 1935-8245.
+[30] Yossi Rubner, Carlo Tomasi, and Leonidas J. Guibas. The earth mover's distance as a metric for image retrieval. International Journal of Computer Vision, 40(2):99­121, November 2000.
+[31] Ryoma Sato, Marco Cuturi, Makoto Yamada, and Hisashi Kashima. Fast and robust comparison of probability measures in heterogeneous spaces. arXiv preprint arXiv:2002.01615, 2020.
+[32] Meyer Scetbon and Marco Cuturi. Linear time sinkhorn divergences using positive features, 2020.
+[33] Meyer Scetbon, Marco Cuturi, and Gabriel Peyré. Low-rank sinkhorn factorization, 2021.
+[34] Geoffrey Schiebinger, Jian Shu, Marcin Tabaka, Brian Cleary, Vidya Subramanian, Aryeh Solomon, Joshua Gould, Siyan Liu, Stacie Lin, Peter Berube, et al. Optimal-transport analysis of single-cell gene expression identifies developmental trajectories in reprogramming. Cell, 176 (4):928­943, 2019.
+[35] Richard Sinkhorn. A relationship between arbitrary positive matrices and doubly stochastic matrices. Ann. Math. Statist., 35:876­879, 1964.
+[36] Justin Solomon, Gabriel Peyré, Vladimir G Kim, and Suvrit Sra. Entropic metric alignment for correspondence problems. ACM Transactions on Graphics (TOG), 35(4):1­13, 2016.
+[37] Karl-Theodor Sturm. The space of spaces: curvature bounds and gradient flows on the space of metric measure spaces. arXiv preprint arXiv:1208.0434, 2012.
+[38] Titouan Vayer, Laetita Chapel, Rémi Flamary, Romain Tavenard, and Nicolas Courty. Fused gromov-wasserstein distance for structured objects: theoretical foundations and mathematical properties. arXiv preprint arXiv:1811.02834, 2018.
+[39] Titouan Vayer, Rémi Flamary, Romain Tavenard, Laetitia Chapel, and Nicolas Courty. Sliced gromov-wasserstein. arXiv preprint arXiv:1905.10124, 2019.
+[40] Jonathan Weed and Francis Bach. Sharp asymptotic and finite-sample rates of convergence of empirical measures in wasserstein distance. Bernoulli, 25(4A):2620­2648, 2019.
+[41] Hongteng Xu, Dixin Luo, and Lawrence Carin. Scalable gromov-wasserstein learning for graph partitioning and matching. arXiv preprint arXiv:1905.07645, 2019.
+[42] Hongteng Xu, Dixin Luo, Hongyuan Zha, and Lawrence Carin Duke. Gromov-wasserstein learning for graph matching and node embedding. In International conference on machine learning, pages 6932­6941. PMLR, 2019.
+[43] Kelvin Shuangjian Zhang, Gabriel Peyré, Jalal Fadili, and Marcelo Pereyra. Wasserstein control of mirror langevin monte carlo, 2020.
+12
+
+Supplementary material A Proofs
+A.1 Proof of Proposition 1 Proof. Let (Q, R, g)  C(a, b, r, ), P := Q diag(1/g)RT . Remarks that for all i, j,
+
+|Ai,i - Bj,j |2Pi ,j 
+i ,j
+
+|Ai,i |2Pi ,j -
+i ,j
+
+ | x~i - y~j|
+
+Therefore we have
+
+|Bj,j |2Pi ,j
+i ,j
+
+|Ai,i - Bj,j |2Pi ,j Pi,j =
+i,i ,j,j
+
+|Ai,i - Bj,j |2Pi ,j Pi,j
+i,j i ,j
+
+
+
+| x~i - y~j |2Pi,j
+
+i,j
+
+Finally we obtain that
+
+|Ai,i - Bj,j |2Pi ,j Pi,j - H(Q, R, g)  | x~i - y~j |2Pi,j - H(Q, R, g)
+
+i,i ,j,j
+
+i,j
+
+and by taking the infimum over all (Q, R, g)  C(a, b, r, ), the results follows.
+
+A.2 Proof of Proposition 2
+To show the result, we first need to recall some notions linked to the relative smoothness. Let X a closed convex subset in a Euclidean space Rq. Given a convex function H : X  R continuously differentiable, one can define the prox-function associated to H as
+DH (x, z) := H(x) - H(z) - H(z), x - z .
+Let us now introduce the definition of the relative smoothness with respect the H. Definition 2 (Relative smoothness.). Let L > 0 and f continuously differentiable on X . f is said to be L-smooth relatively to H if
+f (y)  f (x) + f (x), y - x + LDH (y, x)
+
+In [33], the authors show the following general result on the non-asymptotic stationary convergence of the mirror-descent scheme defined by the following recursion:
+
+1
+
+xk+1 = argmin f (xk), x
+xX
+
++ k Dh(x, xk)
+
+where (k) a sequence of positive step-size.
+Proposition 3 ([33]). Let N  1, f continuously differentiable on X which is L-smooth relatively to H. By considering for all k = 1, . . . , N , k = 1/2L, and by denoting D0 = f (x0) - minxX f (x), we have
+
+min k
+0kN -1
+
+
+
+4LD0 . N
+
+where for all k = 1, . . . , N
+
+1 k := k2 (DH (xk, xk+1) + DH (xk+1, xk)).
+
+13
+
+Let us now show that our objective function is relatively smooth with respect the the KL divergence [26, 43]. The result of Propostion 2 will then follow from Proposition 3. Here X = C(a, b, r, ), H is the negative entropy defined as
+
+H(Q, R, g) := Qi,j(log(Qi,j) - 1) + Ri,j(log(Ri,j) - 1) + gj(log(gj) - 1),
+
+i,j
+
+i,j
+
+j
+
+and let us define for all (Q, R, g)  C(a, b, r, )
+
+F(Q, R, g) := -2 AQ diag(1/g)RT B, Q diag(1/g)RT + H(Q, R, g) .
+
+Let us now show the following proposition.
+
+Proposition 4.
+
+Let
+
+
+
+
+
+0,
+
+1 r
+
+  > 0 and let us denote L, := 27(
+
+A
+
+2
+
+B
+
+2/4 + ). Then for
+
+all (Q1, R1, g1), (Q2, R2, g2)  C(a, b, r, ), we have
+
+F(Q1, R1, g1) - F(Q2, R2, g2) 2  L, H(Q1, R1, g1) - H(Q2, R2, g2) 2
+
+Proof. Let (Q, R, g)  C(a, b, r, ) and let us denote P = Q diag(1/g)RT . We first have that
+
+F(Q, R, g) = (QF(Q, R, g), RF(Q, R, g), gF(Q, R, g))
+
+where
+
+QF(Q, R, g) := -4AP BR diag(1/g) +  log Q RF(Q, R, g) := -4BP T AQ diag(1/g) +  log R gF(Q, R, g) := -4D(QT AP BR)/g2 +  log g
+
+First remarks that
+
+QF(Q1, R1, g1) - QF(Q2, R2, g2) 2  4 AP1BR1 diag(1/g1) - AP2BR2 diag(1/g2) 2 +  log Q1 - log Q2 2 .
+
+Moreover we have
+
+AP1BR1 diag(1/g1) - AP2BR2 diag(1/g2) = A((P1 - P2)BR1 diag(1/g1) + P2B(R1 diag(1/g1) - R2 diag(1/g2))
+
+where and
+
+P1 - P2 = (Q1 - Q2) diag(1/g1)R1T + Q2(diag(1/g1)R1T - diag(1/g2)R2T )
+
+R1 diag(1/g1) - R2 diag(1/g2) = (R1 - R2) diag(1/g1) + R2(diag(1/g1) - diag(1/g2))
+
+Finally we obtain that
+
+AB AP1BR1 diag(1/g1) - AP2BR2 diag(1/g2)  
++A B
+
+Q1 - Q2 
+
++
+
+R1 - R2 
+
++
+
+1/g1 - 1/g2
+
+R1 - R2 
+
++
+
+1/g1 - 1/g2
+
+.
+
+As Q  H(Q) is 1-strongly convex w.r.t to the 2-norm on n×r, we have
+
+Q1 - Q2
+
+2 2
+
+
+
+log Q1 - log Q2, Q1 - Q2
+
+ log Q1 - log Q2 2 Q1 - Q2 2
+
+from which follows that
+
+Q1 - Q2 2  log Q1 - log Q2 2.
+
+Moreover we have
+
+1/g1 - 1/g2 2 
+
+g1 - g2 2
+
+2
+
+
+
+log g1 - log g2 2 2
+
+14
+
+Then we obtain that QF(Q1, R1, g1) - QF(Q2, R2, g2) 2 
+
+4A B 2 + 
+
+log Q1 - log Q2 2
+
+Similarly we obtain that Then we obtain that
+
+4A B
+
++ (1 + 1/) 
+
+log R1 - log R2 2
+
+4A B
+
+(1 + 1/) 2
+
+log g1 - log g2 2
+
+4A B
+
+RF(Q1, R1, g1) - RF(Q2, R2, g2) 2 
+
+2 +  log R1 - log R2 2
+
+Moreover we have
+
+4A B
+
++ (1 + 1/) 
+
+log Q1 - log Q2 2
+
+4A B
+
+(1 + 1/) 2
+
+log g1 - log g2 2
+
+gF(Q1, R1, g1) - gF(Q2, R2, g2) 2 4 D(QT1 AP1BR1)/g12 - D(QT2 AP2BR2)/g22 +  log g1 - log g2
+
+and
+
+D(QT1 AP1BR1)/g12 - D(QT2 AP2BR2)/g22 =(1/g12 - 1/g22)D(QT1 AP1BR1)
+
++
+
+1 g22
+
+(D(QT1
+
+AP1BR1)
+
+-
+
+D(QT2
+
+AP2BR2));
+
+.
+
+Note also that
+
+(1/g12 - 1/g22)D(QT1 AP1BR1)
+
+2A B  3
+
+log g1 - log g2
+
+and
+
+QT1 AP1BR1 - QT2 AP2BR2 = (QT1 - QT2 )AP1BR1 + QT2 A(P1BR1 - P2BR2)
+
+= (QT1 - QT2 )AP1BR1 + QT2 A((P1 - P2)BR1 + P2B(R1 - R2))
+
+from which follows that
+
+1 g22
+
+(D(QT1
+
+AP1BR1
+
+)
+
+-
+
+D(QT2
+
+AP2
+
+BR2))
+
+
+
+AB 2
+
+( log Q1 - log Q2
+
++
+
+log R1 - log R2
+
++
+
+P1 - P2 )
+
+and we obtain that
+
+4A B 1
+
+gF(Q1, R1, g1) - gF(Q2, R2, g2) 2 
+
+2
+
++ 
+
+log Q1 - log Q2
+
+4A B 1
+
++
+
+2
+
++ 
+
+log R1 - log R2
+
++
+
+Finally we have
+
+F(Q1, R1, g1) - F(Q2, R2, g2)
+
+2 2
+
+3
+
+4A B 8A B 4 + 3 +  log g1 - log g2
+
+4A B 2
+
++
+
+2 + (1 + 1/)2 16
+
+A2 2
+
+B
+
+2
+
++
+
+4A B 1 2
+
+2
+
++ 
+
+log Q1 - log Q2 2 + log R1 - log R2 2
+
++3
+
+2(1 + 1/)2 16
+
+A 2B 4
+
+2
++
+
+4A B 8A B
+
+2
+
+4 + 3 + 
+
+log g1 - log g2 2
+
+from which we obtain that
+
+F(Q1, R1, g1) - F(Q2, R2, g2)
+
+2 2
+
+ L2,
+
+log Q1 - log Q2 2 +
+
+and the result follows.
+
+log R1 - log R2 2 +
+
+log g1 - log g2 2
+
+15
+
+B Low-rank Approximation of Distance Matrices
+
+Here we recall the algorithm used to perform a low-rank approximation of a distance matrix [5, 21]. We use the implementation of [33].
+
+Algorithm 4 LR-Distance(X, Y, r, ) [5, 21]
+
+Inputs: X, Y, r, 
+
+Choose i  {1, . . . , n}, and j{1, . . . , m} uniformly at random.
+
+For
+
+i
+
+=
+
+1,
+
+..
+
+.
+
+, n,
+
+pi
+
+
+
+d(xi,
+
+yj)2
+
++
+
+d(xi ,
+
+yj)2
+
++
+
+1 m
+
+m j=1
+
+d(xi ,
+
+yj
+
+)2.
+
+Independently X (t)  [xi(1) ,
+
+choose i(1) . . . , xi(t) ],
+
+,. P
+
+..,
+(t)
+
+i(t) according  [ tpi(1) , . .
+
+(p1, . . . , pn). . , tpi(t) ], S
+
+
+
+d(X (t) ,
+
+Y
+
+)/P
+
+(t)
+
+Denote S = [S(1), . . . , S(m)],
+
+For j = 1, . . . , m, qj 
+
+S (j )
+
+22/
+
+S
+
+2 F
+
+Independently choose j(1), . . . , j(t) according (q1, . . . , qm).
+
+S(t)  [Sj(1) , . . . , Sj(t) ], Q(t)  [ tqj(1) , . . . , tqj(t) ], W  S(t)/Q(t)
+
+U1, D1, V1  SVD(W ) (decreasing order of singular values).
+
+N  [U1(1), . . . , U1(r)], N  ST N/ W T N F Choose j(1), . . . , j(t) uniformly at random in {1, . . . , m}. Y (t)  [yj(1) , . . . , yj(t) ], D(t)  d(X, Y (t))/ t.
+
+U2, D2, V2 = SVD(N T N ), U2  U2/D2, N (t)  [(N T )(j(1)), . . . , (N T )(j(t))], B  U2T N (t)/ t, A  (BBT )-1. Z  AB(D(t))T , M  ZT U2T Result: M, N
+
+C Nonnegative Low-rank Factorization of the Couplings
+
+In this section, we recall the algorithm presented in [33] to solve problem (8) where we denote p1 := a and p2 := b.
+
+Algorithm 5 LR-Dykstra((K(i))1i3, p1, p2, , ) [33]
+
+Inputs: K(1), K(2), g~ := K(3), p1, p2, , , q1(3) = q2(3) = 1r, i  {1, 2}, v~(i) = 1r, q(i) = 1r repeat
+
+u(i)  pi/K(i)v~(i) i  {1, 2},
+
+g  max(, g~ q1(3)), q1(3)  (g~ q1(3))/g, g~  g,
+
+g  (g~
+
+q2(3))1/3
+
+2 i=1
+
+(v(i)
+
+q(i)
+
+(K(i))T u(i))1/3,
+
+v(i)  g/(K(i))T u(i) i  {1, 2},
+
+q(i)  (v~(i) q(i))/v(i) i  {1, 2}, q2(3)  (g~ q2(3))/g, v~(i)  v(i) i  {1, 2}, g~  g
+
+until
+
+2 i=1
+
+u(i)
+
+K(i)v(i) - pi 1 < ;
+
+Q  diag(u(1))K(1) diag(v(1))
+
+R  diag(u(2))K(2) diag(v(2))
+
+Result: Q, R, g
+
+D Additional Experiements
+D.1 Illustration
+In Fig. 7, we show the time-accuracy tradeoffs of the two methods presented in Figure 1 on the same example. We see that our method, Lin GW-LR, manages to obtain similar accuracy as the one obtained by Quad Entropic-GW even when the rank r = n/1000 while being much faster with order of magnitude.
+16
+
+Figure 7: Here n = m = 10000, and the ground cost considered is the squared Euclidean distance. Note that for in that case we have an exact low-rank factorization of the cost. Therefore we compare only Quad Entropic-GW and Lin GW-LR. We plot the time-accuracy tradeoff when varying  for multiple ranks r.  = 1/ for Quad Entropic-GW and  = 0 for Lin GW-LR.
+
+D.2 Effect of  and 
+
+In Fig. 2, we consider two Gaussian mixture densities samples with n = m = 5000 points in respectively 5D and 10D where
+
+µ(X1) = [0, . . . , 0]  R5, µ(X2) = [0, 1, 0, . . . , 0]  R5, µ(X3) = [1, 1, 0, . . . , 0]  R5, Y(1) = [0.5, 0.5, 0, . . . , 0]  R10, Y(2) = [-0.5, 0.5, 0, . . . , 0]  R10, X = 0.05 × Id5 and Y = 0.05 × Id10.
+
+In Figure 8, we compare the time-accuracy tradeoff when varying  and . We show that when  = 0, the proposed method manage to consistently obtain the smallest GW loss whatever  is. By allowing  > 0, the algorithm is able to obtain a better time-accuracy tradeoff. However the choice of  for the best time-accuracy tradeoff depends highly on .
+
+0.20 0.15 0.10 0.05107
+
+: 100
+
+: 50
+
+: 30
+
+: 10
+
+0.20
+
+0.20
+
+0.20
+
+0.15
+
+0.15
+
+0.15
+
+0.10
+
+0.10
+
+0.10
+
+10O8peratio1n0s9
+
+1010 0.05 107
+
+1O0p8eratio1n0s9
+
+1010 0.05 107
+
+1O0p8eratio1n0s9
+
+1010 0.05 107
+
+O1p0e8rations109
+
+Lin GW-LR, r = 50, = 1.000
+
+Lin GW-LR, r = 50, = 0.100
+
+Lin GW-LR, r = 50, = 0.010
+
+Lin GW-LR, r = 50, = 0.000
+
+Lin GW-LR, r = 50, = 0.500
+
+Lin GW-LR, r = 50, = 0.020
+
+Lin GW-LR, r = 50, = 0.001
+
+Figure 8: In this experiment, we consider the exact same setting as presented in Figure 2. The ground cost is the squared Euclidean distance. We consider only the linear version of our algorithm. The rank is fixed to be r = n/100. We plot the time-accuracy tradeoff when varying for multiple choices of .
+
+GW loss
+
+D.3 Low-rank Problem
+In Fig. 3 and 4, we consider two distributions in respectively 10-D and 15-D where the support is a concatenation of clusters of points. In Fig. 9, we show an illustration of the distributions considered in smaller dimensions.
+In Fig. 10, 11, 10, we compare the time-accuracy tradeoffs of our method with the entropic one as proposed in [28] when the underlying cost is the Euclidean distance. The setting considered is the same as the one presented in Fig. 3 but we consider different number of clusters. In Fig. 13, 14, 13, we also compare the time-accuracy tradeoffs of our method with the entropic one when the underlying cost is the squared Euclidean distance. The setting is the same as the one presented in Fig. 4 but we consider different number of clusters. We show that our method consistenly manage to obtain similar accuracy as the entropic method while being orders of magnitude faster.
+17
+
+GW loss
+
+80 60 40 20 0
+0 20 40 60 80
+
+20 40 60
+
+80 60 40 20
+20406080 0
+
+Figure 9: The source distribution and the target distribution live respectively in R2 and R3. Both distributions have the same number of samples n = m = 10000, the same number of clusters which is set to be 10 here, the same number of points in each cluster, and we force the distance between the centroids of the cluster to be larger than  = 10 in each distribution.
+
+: 100
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 109 10O10pera1ti0o1n1s 1012
+
+GW-LR, r = Lin GW-LR,
+
+5rn0=0
+
+5n00
+
+: 50
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 109 10O1p0erat1i0o1n1s
+
+GW-LR, r = Lin GW-LR,
+
+1rn0=0
+
+1n00
+
+0.20 0.15 0.10 0.05 1012 0.00 109
+
+GW-LR, r = Lin GW-LR,
+
+5rn0=
+
+5n0
+
+: 30
+
+: 10
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+1O0p10erati1o0n1s1 1012 0.00 109 1O01p0erat1io0n11s 1012
+
+Entropic-GW
+
+Quad Entropic-GW
+
+Figure 10: The number of clusters is set to be 5 and the underlying cost is the Euclidean distance.
+
+: 100
+
+: 50
+
+: 30
+
+: 10
+
+0.06 0.04 0.02 0.00 109 10O1p0erat1i0o1n1s 1012
+GW-LR, r = 5n00 Lin GW-LR, r = 5n00
+
+0.06
+
+0.06
+
+0.04
+
+0.04
+
+0.02
+
+0.02
+
+0.00 109 10O10pera1t0io11ns 1012
+
+0.00 109
+
+GW-LR, r = 1n00 Lin GW-LR, r = 1n00
+
+GW-LR, r = 5n0 Lin GW-LR, r = 5n0
+
+10O10pera1t0io11ns 1012 Entropic-GW
+
+0.06 0.04 0.02 0.00 109 10O10pera1t0io11ns 1012
+Quad Entropic-GW
+
+Figure 11: The number of clusters is set to be 20 and the underlying cost is the Euclidean distance.
+
+: 100
+
+: 50
+
+: 30
+
+: 10
+
+0.04
+
+0.04
+
+0.04
+
+0.04
+
+0.02
+
+0.02
+
+0.02
+
+0.02
+
+0.00 109 10O10pera1t0io11ns 1012
+
+GW-LR, r = Lin GW-LR,
+
+5rn0=0
+
+5n00
+
+0.00 109 10O10pera1t0io11ns 1012
+
+0.00 109
+
+GW-LR, r = Lin GW-LR,
+
+1rn0=0
+
+1n00
+
+GW-LR, r = Lin GW-LR,
+
+5rn0=
+
+5n0
+
+10O10pera1t0io11ns 1012 Entropic-GW
+
+0.00 109 10O1p0 era1t0io11ns 1012 Quad Entropic-GW
+
+Figure 12: The number of clusters is set to be 30 and the underlying cost is the Euclidean distance.
+
+GW loss
+
+GW loss
+
+D.4 Ground Truth Experiment
+In this experiment we aim at comparing the different methods when the optimal coupling solving the GW problem has a full rank. For that purpose we consider a certain shape in 2-D which corresponds to the support of the source distribution and we apply two isometric transformations to it, which are a rotation and a translation to obtain the support the target distribution. See Figure 16 (left) for an illustration of the dataset. Here we set a and b to be uniform distributions and the underlying cost is
+
+18
+
+GW loss
+
+GW loss
+
+: 250
+
+0.05
+
+0.04
+
+0.03
+
+0.02
+
+0.01
+
+1010 Operation1s011
+
+Lin GW-LR, r = 10n00
+
+: 100
+
+: 50
+
+0.05
+
+0.05
+
+0.05
+
+0.04
+
+0.04
+
+0.04
+
+0.03
+
+0.03
+
+0.03
+
+0.02
+
+0.02
+
+0.02
+
+0.01
+
+1010Operations1011
+
+0.01
+
+101O0perations 1011
+
+0.01
+
+Lin GW-LR, r = 2n00
+
+Lin GW-LR, r = 1n00
+
+Quad Entropic-GW
+
+: 30
+10O10perations 1011
+
+Figure 13: The number of clusters is set to be 10 and the underlying cost is the squared Euclidean distance.
+
+: 250
+
+: 100
+
+: 50
+
+: 30
+
+0.04
+
+0.04
+
+0.04
+
+0.04
+
+0.03
+
+0.03
+
+0.03
+
+0.03
+
+0.02
+
+0.02
+
+0.02
+
+0.02
+
+1010Operatio1n0s11 Lin GW-LR, r = 10n00
+
+1010Operation1s011
+
+1010Operation1s011
+
+Lin GW-LR, r = 2n00
+
+Lin GW-LR, r = 1n00
+
+Quad Entropic-GW
+
+101O0 peration1s011
+
+Figure 14: The number of clusters is set to be 20 and the underlying cost is the squared Euclidean distance.
+
+: 250
+
+: 100
+
+: 50
+
+: 30
+
+0.04
+
+0.04
+
+0.04
+
+0.04
+
+0.03
+
+0.03
+
+0.03
+
+0.03
+
+0.02
+1010 Operatio1n0s11 Lin GW-LR, r = 10n00
+
+0.02
+1010Operatio1n0s11 Lin GW-LR, r = 2n00
+
+0.02
+
+0.02
+
+101O0 peration1s011
+
+Lin GW-LR, r = 1n00
+
+Quad Entropic-GW
+
+101O0 peration10s11
+
+Figure 15: The number of clusters is set to be 30 and the underlying cost is the squared Euclidean distance.
+
+GW loss
+
+Figure 16: We compare the couplings obtained when the ground truth is the identity matrix in the same setting as in Figure 7. Here the comparison is done when  = 250. Left: illustration of the dataset considered. Middle left: we show the coupling as well as the GW loss obtained by Quad Entropic-GW. Middle right, right: we show the couplings and the GW losses obtained by Lin GW-LR when the rank is respectively r = 10 and r = 100.
+the squared Euclidean distance. Therefore the optimal coupling solution of the GW problem is the identity matrix and the GW loss must be 0. In Figure 17, we compare the time-accuracy tradeoffs, and we show that even in that case, our methods obtain a better time-accuracy tradeoffs for all . See also Figure 16 for a comparison of the couplings obtained by the different methods.
+19
+
+Figure 17: The ground truth here is the identity matrix and the true GW loss to achieve is 0. We set the number of samples to be n = m = 10000. As we consider the squared Euclidean distance, only Quad Entropic-GW and Lin GW-LR are compared. We plot the time-accuracy tradeoff when varying  for multiple choices of rank r.  = 1/ for Quad Entropic-GW and  = 0 for Lin GW-LR.
+20
+
+

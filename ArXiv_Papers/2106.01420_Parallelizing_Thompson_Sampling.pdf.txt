@@ -1,0 +1,4127 @@
+Parallelizing Thompson Sampling
+
+Amin Karbasi Yale University
+
+Vahab Mirrokni Google Research
+
+Mohammad Shadravan Yale University
+
+arXiv:2106.01420v1 [cs.LG] 2 Jun 2021
+
+Abstract
+How can we make use of information parallelism in online decision making problems while efficiently balancing the exploration-exploitation trade-off? In this paper, we introduce a batch Thompson Sampling framework for two canonical online decision making problems, namely, stochastic multi-arm bandit and linear contextual bandit with finitely many arms. Over a time horizon T , our batch Thompson Sampling policy achieves the same (asymptotic) regret bound of a fully sequential one while carrying out only O(log T ) batch queries. To achieve this exponential reduction, i.e., reducing the number of interactions from T to O(log T ), our batch policy dynamically determines the duration of each batch in order to balance the exploration-exploitation trade-off. We also demonstrate experimentally that dynamic batch allocation dramatically outperforms natural baselines such as static batch allocations.
+1 Introduction
+Many problems in machine learning and artificial intelligence are sequential in nature and require making decisions over a long period of time and under uncertainty. Examples include A/B testing [Graepel et al., 2010], hyper-parameter tuning [Kandasamy et al., 2018], adaptive experimental design [Berry and Fristedt, 1985], ad placement [Schwartz et al., 2017], clinical trials [Villar et al., 2015], and recommender systems [Kawale et al., 2015], to name a few. Bandit problems provide a simple yet expressive view of sequential decision making with uncertainty. In such problems, a repeated game between a learner and the environment is played where at each round the learner selects an action, so called an arm, and then the environment reveals the reward. The goal of the learner is to maximize the accumulated reward over a horizon T . The main challenge faced by the learner is that the environment is unknown, and thus the learner has to follow a policy that identifies an efficient trade-off between the exploration (i.e., trying new actions) and exploitation (i.e., choosing among the known actions). A common way to measure the performance of a policy is through regret, a game-theoretic notion, which is defined as the difference between the reward accumulated by the policy and that of the best fixed action in hindsight.
+We say that a policy has no regret, if its regret growth-rate as a function of T is sub-linear. There has been a large body of work aiming to develop no-regret policies for a wide range of bandit problems (for a comprehensive overview, see [Lattimore and Szepesv´ari, 2020, Bubeck and CesaBianchi, 2012, Slivkins, 2019]). However, almost all the existing policies are fully sequential in nature, meaning that once an action is executed the reward is immediately observed by the learner and can be incorporated to make the subsequent decisions. In practice however, it is often more preferable (and sometimes the only way) to explore many actions in parallel, so called a batch of actions, in order to gain more information about the environment in a timely fashion. For instance,
+1
+
+in clinical trials, a phase of medical treatment is often carried out on a group of individuals and the results are gathered for the entire group at the end of the phase. Based on the collected information, the treatment for the subsequent phases are devised [Perchet et al., 2016]. Similarly, in a marketing campaign, the response to a line of products is not collected in a fully sequential manner, instead, a batch of products are mailed to a subset of costumers and their feedback is gathered collectively [Schwartz et al., 2017]. Note that developing a no-regret policy is impossible without any information exchange about the carried out actions and obtained rewards. Thus, the main challenge in developing a batch policy is to balance between how many actions to run in parallel (i.e., batch size) versus how frequently to share information (i.e., number of batches). At one end of the spectrum lie the fully sequential no-regret bandit policies where the batch size is 1, and the number of batches is T . At the other end of the spectrum lie the fully parallel policies where the batch size is T and all the actions are completely determined a priory without any amount of information exchange (such policies clearly suffer a linear regret).
+In this paper, we investigate the sweet spot between the batch size and the corresponding regret in the context of Thompson Sampling (TS). More precisely,
+· For the stochastic N -armed bandit, we develop Batch Thomson Sampling (B-TS), a batch version of the vanilla Thomson Sampling policy, that achieves the problem-dependent asymptotic optimal regret with O(N log T ) batches. B-TS policywith the same number of batches also achieves the problem independent regret bound of O( N T log T ) with Beta priors, and a slightly improved regret bound of O( N T log N ) with Gaussian priors.
+· For the stochastic N -armed bandit, we develop Batch Minimax Optimal Thompson Sampling (B-MOTS), a batch Thompson Sampling policy that achieves the optimal minimax problemindependent regret bound of O( N T ) with O(N log T ) batches. We also present B-MOTS-J, a variant of B-MOTS, designed for Gaussian rewards, which achieves both minimax and asymptotic optimality with O(N log(T )) batches.
+· Finally, for the linear contextual bandit with N arms, we develop Batch Thompson Sampling fO~o(rdC3/o2ntTex)tuwaitlhBOan(Nditlsog((BT-)T)Sb-aCt)chtehsa. t achieves the problem-independent regret bound of
+The main idea that allows our batch policy to achieve near-optimal regret guarantees while reducing the number of sequential interactions with the environment from T to O(log T ) is a novel dynamic batch mechanism that determines the duration of each batch based on an offline estimation of the regret accumulated during that phase. We also observe empirically that batch Thompson Sampling methods with a fixed batch size, but equal number of batches, incur higher regrets.
+2 Related Work
+In this paper, we mainly focus on Thompson Sampling (also known as posterior sampling and probability matching), the earliest principled way for managing the exploration-exploitation trade-off in sequential decision making problems [Thompson, 1933, Russo et al., 2017]. There has been a recent surge in understanding the theoretical guarantees of Thompson Sampling due to its strong empirical evidence and simple implementation [Chapelle and Li, 2011]. In particular, for the stochastic multiarmed bandit problem, Agrawal and Goyal [2012] proved a problem-dependent logarithmic bound
+2
+
+on expected regret of Thompson Sampling which was then showed to be asymptotically optimal
+
+[Kaufmann et al., 2012]. Subsequently, Agrawal and Goyal [2017] provided a problem-independent (i.e., worst-case) regret bound of O( N T log T ) on theexpected regret when using Beta priors. Interestingly, the expected regret can be improved to O( N T log N ) by using Gaussian priors. Very
+
+recently, Jin et al. [2020] developed Minimax Optimal Thompson Sampling (MOTS), a variant of Thompson Sampling that achieves the minimax optimal regret of O( N T ). Agrawal and Goyal
+
+[2013b] setting
+
+also extended the analysis and proved a regret bound
+
+of of
+
+O~m(du3lt/i2-arTm)edwhTehreomd pissotnheSdamimpelninsgiontoofthtehelicnoenatrexcotnvteecxttourasl.
+
+In this paper, we develop the first variants of Batch Thompson Sampling that achieve the afore-
+
+mentioned regret bounds (problem-dependent and problem-independent versions) while reducing
+
+the sequential interaction with the environment from T to O(N log T ), thus increasing the efficiency
+
+of running Thompson Sampling by an exponential factor (for a fixed N ).
+
+There has been a large body of work and numerous algorithms for regret minimization of
+
+multi-armed bandit problems, including upper confidence bound (UCB), -greedy, explore-then-
+
+commit, among many others. We refer the interested readers to some recent surveys for more
+
+details [Lattimore and Szepesv´ari, 2020, Slivkins, 2019]. The closest line of work to our paper is
+
+the proposed batch UCB algorithm [Gao et al., 2019], for which Esfandiari et al. [2021a] showed an
+
+asymptotically optimal regret bound with O(log T ) number of batches. Very recently, Esfandiari
+
+et al. [2021a] and Ruan et al. [2021] also addressed the batch linear bandits and the batch linear
+
+contextual bandits, respectively. Our work extends those results to the case of Thompson Sampling
+
+for the stochastic multi-armed bandit as well as the linear contextual bandit problems.
+
+As we have highlighted in our proofs, our work builds on previous art, especially Agrawal
+
+and Goyal [2012, 2017, 2013b] (we believe that giving due credits to previous work is a virtue
+
+and not vice). However, we build on a non-trivial way. As it is clear from their analysis (and
+
+more generally for randomized probability matching strategies), breaking the sequential nature of
+
+distribution updates is non-trivial. We show that by a careful batch-mode strategy, one can reduce
+
+the sequential updates from T to O(log(T )). We are unaware of any previous work that obtains
+
+such a result for Thompson Sampling. In contrast, UCB strategies are much more amenable to
+
+parallelization (and the analysis is simple) as one can simply use the arm elimination method
+
+proposed by Esfandiari et al. [2021a] and Gu et al. [2021]. There is no clear way to use the arm
+
+elimination strategy for batch TS. Moreover, batch TS clearly outperforms the fully sequential
+
+UCB in all of our empirical results.
+
+The benefits of batch-mode optimization has been considered in other machine learning set-
+
+tings, including convex optimization [Balkanski and Singer, 2018b, Chen et al., 2020], submodular
+
+optimization [Chen et al., 2019, Fahrbach et al., 2019, Balkanski and Singer, 2018a], Gaussian
+
+processes [Desautels et al., 2014, Kathuria et al., 2016, Contal et al., 2013], stochastic sequential
+
+optimization [Esfandiari et al., 2021b, Agarwal et al., 2019, Chen and Krause, 2013], and Bayesian
+
+optimization [Wang et al., 2018, Rolland et al., 2018], to name a few.
+
+3 Preliminaries and Problem Formulation
+As stated earlier, a standrad bandit problem is a repeated sequential game between a learner and the environment where at each round t = 1, 2, . . . , T, the learner selects an action a(t) from the set of actions A and then the environment reveals the reward ra(t)  R. Different structures on the set of actions and rewards define different bandit problems. In this paper, we mainly consider two
+
+3
+
+canonical variants, namely, stochastic multi-armed bandit, and stochastic linear contextual bandit.
+
+Stochastic Multi-Armed Bandit. In this setting, the set of actions A is finite, namely, A =
+
+[N ], and each action a  [N ] is associated with a sub-Gaussian distribution Pa (e.g., Bernoulli distribution, distributions supported on [0, 1], etc). When the player selects an action a, a reward
+
+ra is sampled independently from Pa. We denote by µa = EaPa[ra] the average reward of an action a and by µ = maxaA EaPa[ra] the action with the maximum average reward. Suppose the player
+selects actions a1, . . . , aT and receives the stochastic rewards ra(1), . . . , ra(T ). Then the (expected) regret is defined as
+
+T
+
+R(T ) = T µ - E
+
+ra(t) .
+
+t=1
+
+We say that a policy achieves no-regret, if E [R(T )] /T  0 as the horizon T tends to infinity. In
+
+order to compare the regret of algorithms, there are multiple choices in the literature. Once we fully
+
+specify the horizon T , the class of the bandit problem (e.g., multi-armed bandit with N arms) and
+
+the specific instance we encounter withing the class (e.g., µ1, . . . , µN in the stochastic multi-armed problem), then we can consider the problem-dependent regret bounds for each specific instance. In
+
+contrast, problem-independent bounds (also called worst-case bounds) only depends on the horizon
+
+T and class of bandits for which the algorithm is designed (which is the number of arms N in the multi-armed stochastic bandit problem), and not the specific instance within that class. 1 For the
+
+problem-dependent regret bound, it is known that UCB-like algorithms [Auer, 2002, Garivier and
+
+Capp´e, 2011, Maillard et al., 2011] and Thomson Sampling [Agrawal and Goyal, 2013a, Kaufmann et al., 2012] achieve the asymptotic regret of O(log T a>0 -a 1) where a = µ - µa  0. It is also known that no algorithm can achieve a better asymptotic regret bound [Lai and Robbins, 1985],
+
+thus implying that UCB and TS are both asymptotically optimal. In contrast, for the stochastic multi-armed bandit, UCB achieves the minimax problem-independent regret bound of N T [Auer, 2002] whereas TS (with Beta-priors) achieves a slightly worst regret of N T log T [Agrawal and
+
+Goyal, 2017]. Very recently, Jin et al. [2020] developedMinimax Optimal Thompson Sampling (MOTS) that achieves the minimax optimal regret of O( N T ).
+
+Contextual Linear Bandit. Contextual linear bandits generalise the multi-armed setting by allowing the learner to make use of side information. More specifically, each arm a is associated with a feature/context vector ba  Rd. At the beginning of each round t  [T ], the learner first observes the contexts ba(t) for all a  A, and then she chooses an action a(t)  A. We assume that a feature vector ba affects the reward in a linear fashion, namely, ra(t) = ba(t), µ + a,t. Here, the parameter µ is unknown to the learner, and a,t is an independent zero-mean sub-Gaussian noise given all the actions and rewards up to time t. Therefore, E[ra(t)|ba(t)] = ba(t), µ . The learner is trying to guess the correlation between µ and the contexts ba(t). For the set of actions a(1), . . . , a(T ), the regret is defined as
+
+T
+
+T
+
+R(T ) =
+
+ra(t)(t) -
+
+ra(t)(t) ,
+
+t=1
+
+t=1
+
+1There is a related notion of regret, called Bayesian regret, considered in the Thompson Sampling literature [Russo and Van Roy, 2014, Bubeck and Liu, 2013], where a known prior on the environment is assumed. The frequentist regret bounds considered in this paper immediately imply a regret bound on the Bayesian regret but the opposite is not generally possible [Lattimore and Szepesva´ri, 2020].
+
+4
+
+where a(t) = arg maxa ba(t), µ . The context vectors at time t are generally chosen by an adversary
+
+after observing the actions played and the rewards received up to time t - 1. In order to obtain
+
+scale-free regret bounds, it is a  A. By applying UCB to
+
+commonly assumed that µ 2 linear bandit, it is possible to
+
+ 1 and ba(t) achieve R(T ) =
+
+2O~(d1Tf)orwaitlhl
+
+arms high
+
+probability [Auer, 2002, Dani et al., 2008, Rusmevichientong and Tsitsiklis, 2010, Abbasi-Yadkori
+
+ectanalb.,e2b01o1u]n. dIendcboyntOr~a(sdt3,/A2grTaw).al and Goyal [2013b] showed that the regret of Thompson Sampling
+
+Batch Bandit. The focus of this paper is to parallelize the sequential decision making problem.
+In contrast to the fully sequential setting, where the learner selects an action and immediately
+receives the reward, in the batch mode setting, the learner selects a batch of actions and receives
+the rewards of all of them simultaneously (or only after the last action is executed). More formally,
+let the history Ht consists of all the actions and rewards up to time t, namely, {a(s)}s[t-1] and {ra(s)(s)}s[t-1], respectively. We also denote the observed set of contexts up to and including time t by Ct = {ba(s)}aA,s[t]. Note that in the multi-armed bandit problem Ct = . A fully sequential policy  at round t  [T ] maps the history and contexts to an action, namely, t : Ht × Ct  A. In contrast, a batch policy  only interacts with the environment at rounds 0 = t0 < t1 < t2 · · · < tm = T . The l-th batch of duration tl - tl-1 contains the time units {tl-1 + 1, tl-1 + 2, . . . , tl} which we denote it by the shorthand (tl-1, tl]. To select the actions in the l-th batch the policy is only allowed to use the history of actions/rewards observed in the previous batches, in addition to
+the contexts received so far. Therefore, a batch policy at time t  (tl-1, tl] is the following map: t : Htl-1 × Ct  A. Moreover, a batch policy with a predetermined fixed batch size is called static and the one with a dynamic batch size is called dynamic.
+
+4 Batch Thompson Sampling for Stochastic Multi-armed Bandit
+In the classic Thompson Sampling (TS), at any time t  [T ], we consider a prior distribution Da(t) on the underlying parameters of the reward distribution for every arm a  [N ]. TS works by first sampling a(t)  Da(t), independently for each a  [N ], and then choosing the one with the highest value, namely, at = argmaxa[N] a(t). Once the action at is played, we receive the reward rt, based on which the the prior distributions are updated as follows. If an arm a is not selected, its distribution does not change, i.e., Da(t + 1) = Da(t). However, if a = at, then we update Da(t + 1) given the information (at, rt) using the Bayes rule. By instantiating TS with different prior distributions (e.g., Beta, Gaussian), for which Bayes update is simple to compute, it is possible to show that one can achieve an asymptotically optimal regret [Agrawal and Goyal, 2012, 2017].
+The main idea behind the Batch Thompson Sampling (B-TS), outlined in Algorithm 1, is as follows. For each arm a  [N ], B-TS keeps track of {ka}a[N], the number of times the arm a has been selected so far. Initially, all ka's are set to 1. For each arm a and at the beginning of the batch, necessarily 2la-1  ka < 2la for some integer la  1. Now consider a new batch that starts at time t. Within this batch, B-TS samples arms according to the prior distributions up to time t - 1, namely [Da(t - 1)]a[N], and selects the one with the highest value. B-TS keeps selecting arms until the point that for one of the arms, say a, it reaches ka = 2la. At this point, B-TS queries all the arms selected during this batch. Based on the received rewards, B-TS updates {Da}a[N] and starts a new batch.
+
+5
+
+Algorithm 1 Batch Thompson Sampling
+
+1: Initialize: ka  0 (a  [N ]), la  0 (a  [N ]), batch   2: for t = 1, 2, · · · T do
+
+3: a(t)  Da(t) (a  [N ])
+
+4: a(t) := argmaxa[N] a(t).
+
+5:
+
+ka(t)  ka(t) + 1
+
+6:
+
+if ka(t) < 2la(t) then
+
+7:
+
+batch  batch  {a(t)}
+
+8: else
+
+9:
+
+la(t) = la(t) + 1
+
+10:
+
+Query(batch) and receive rewards
+
+11:
+
+Update Da(t) (a  batch)
+
+12:
+
+batch  
+
+13: end if
+
+14: end for
+
+Regret Bounds with Beta Priors. For the ease of presentation, we first consider the Bernoulli multi-armed bandit where ra  {0, 1} and µa = Pr[ra = 1]. In this setting, we can instantiate TS with Beta priors as follows. TS assumes an independent Beta-distributed prior, with parameters (a, a), over each µa. Due to the nice congugacy property of Beta distributions, it is very easy to update the posterior distribution, given the observations. In particular, the Bayes update can be performed as follows:
+
+(a, a) =
+
+(a, a) (a, a) + (r(t), 1 - r(t))
+
+if a(t) = a, if a(t) = a.
+
+TS initially assumes a = a = 1 for all arms a  [N ], which corresponds to the uniform distribution over [0, 1]. The update rule of B-TS in Algorithm 1 is also very similar. Let B(t) be the last time t  t - 1 that B-TS carried out a batch. Moreover, for each arm a, let Sa(t) be the number of instances arm a was selected by time t - 1 and ra = 1. Similarly, let Fa(t) be the number of instances arm a was selected by time t - 1 and ra = 0. We also denote by ka(t) = Sa(t) + Fa(t) the total number of instances arm a was selected by time t - 1. Initially, B-TS starts with the uniform distribution over [0, 1], i.e., Da(1) = Beta(1, 1) for all a  [N ]. Inspired by the update rule of TS, at any time t, B-TS updates the distribution Da(t) by Beta(Sa(B(t)) + 1, Fa(B(t)) + 1). Note that during a batch when arms are being selected, the distributions {Da}a[N] do not change. The updates only take place once the batch is carried out and the rewards are observed.
+First we bound the number of batch queries as follows.
+Theorem 4.1. The total number of batches carried out by B-TS is at most O(N log T ).
+The proof is given in Appendix A.2.
+Remark 4.2. One might be tempted to show a sublinear dependency on N . However, simple empirical results show that the number of batches carried out by B-TS indeed scales logarithmically in T but linearly in N . Please see figs 1a and 1b for more details.
+
+6
+
+queries queries
+
+250 200 150 100 50
+0 0
+
+B-TS (Beta) B-TS (Gaussian)
+20 40 60 80 100
+number of arms (a)
+
+50 40 30 20 10 0
+0
+
+B-TS (Beta) B-TS (Gaussian)
+2000 4000 6000 8000 10000
+time
+(b)
+
+Figure 1: (a) and (b) show the number of batch queries versus the number of arms and the horizon, respectively. We consider a synthetic Bernoulli setting where the horizon is set to T = 103 and the
+number of arms vary from N = 1 to N = 100. We report the average regret over 100 experiments.
+As we clearly see in Figure 1a, the regret increases linearly in N which rules out the possibility that
+the regret of B-TS may depend sub-linearly in N . For Figure 1b, we also consider the Bernoulli setting and set N = 10 and vary the horizon from T = 1 to T = 104. Again, as our theory suggests,
+the regret increases logarithmically in T .
+
+What is more challenging is to show is that this simple batch strategy achieves the same asymptotic regret as a fully sequential one.
+
+Theorem 4.3. Without loss of generality, let us assume that the first arm has the highest mean value, i.e., µ = µ1. Then, the expected regret of B-TS, outlined in Algorithm 1, with Beta priors can be bounded as follows
+
+R(T ) = (1 + )O
+
+N a=2
+
+ln T d(µa, µ1)
+
+a
+
++O
+
+N
+2
+
+,
+
+where
+
+d(µa,
+
+µ1)
+
+:=
+
+µa
+
+log
+
+µa µ1
+
++ (1 - µa) log
+
+(1-µa) 1-µ1
+
+and
+
+a
+
+= µ1 - µa.
+
+The complete proof is given in Appendix A.2.
+
+Remark 4.4. Even though we only provided the details for the Bernoulli setting, B-TS can be easily extended to general reward distributions supported over [0, 1]. To do so, once a reward rt  [0, 1] is observed, we flip a coin with bias rt and update the Beta distribution according to the outcome of the coin. It is easy to see that Theorem 4.3 holds for this extension as well.
+
+Remark 4.5. Gao et al. [2019] proved that for the B-batched N -armed bandit problem with time horizon T it is necessary to have B = (log T / log log T ) batches to achieve the problem-dependent asymptotic optimal regret. This lower bound implies that B-TS use almost the minimum number of batches needed (i.e., O(log T ) versus (log T /log log T )) to achieve the optimal regret.
+
+Now we present the problem independent regret bound for B-TS.
+
+7
+
+Theorem 4.6. Batch Thompson Sampling, outlined in Algorithm 1 and instantiated with Beta priors, achieves R(T ) = O( N T ln T ) with O(N log T ) batch queries.
+The proof is given in Appendix A.3.
+
+Regret Bounds with Gaussian Priors. In order to obtain a better regret bound, we can
+
+instantiate TS with Gaussian distributions. To do so, let us define the empirical mean estimator
+
+for each arm a as follows:
+
+µ^a(t) =
+
+t-1  =1
+
+ra( ) × ka(t)
+
+I(a( ) +1
+
+=
+
+a) ,
+
+where ka(t) denotes the number of instances that an arm a  [N ] has been selected up to time
+
+t - 1 and I(·) is the indicator function. Then, by assuming that the prior distribution of an arm a
+
+is N
+
+µ^a(t),
+
+1 ka(t)+1
+
+, and that the likelihood of rat given µa is N (µa, 1), the posterior will also be
+
+a Gaussian distribution with parameters N
+
+µ^a(t
+
++
+
+1),
+
+1 ka(t+1)+1
+
+.
+
+In B-TS, we need to slightly change the way we estimate µ^a(t) as the algorithm has only access to
+
+the information received by the previous batches. Recall that B(t) indicates the last time t  t - 1
+
+that B-TS carried out a batch query. For each arm a  [N ], we assume the prior distribution
+
+Da(t)  N
+
+µ^a(B(t)),
+
+1 ka(B(t))+1
+
+. We also update the empirical mean estimator as follows:
+
+µ^a(t) =
+
+B(t)  =1
+
+ra( )
+
+×
+
+I(a( )
+
+=
+
+ka(B(t) + 1) + 1
+
+a) .
+
+(1)
+
+Note that at any time t during the l-th batch, i.e., t  (tl-1, tl], the distribution Da(t) remains
+
+unchanged. Once the arms {at}t(tl-1,tl] are carried out and the rewards {rt}t(tl-1,tl] are observed,
+
+µ^a changes and the posterior is computed accordingly, namely, Da(tl+1)  N
+
+µ^a(tl
+
++
+
+1),
+
+1 ka(tl+1)+1
+
+.
+
+As we instantiate B-TS with Gaussian priors, the regret bound slightly improves.
+
+Theorem 4.7. Batch Thompson Sampling, outlined in Algorithm 1 and instantiated with Gaussian priors, achieves E[R(T )] = O( N T ln N ) with O(N log T ) batch queries.
+
+The proof is given in Appendix A.4.
+
+5 Batch Minimax Optimal Thompson Sampling
+So far, we have considered the parallelization of the vanilla Thompson Sampling which does not achieve the optimal minimax regret. In this section, we introduce Batch Minimax Optimal Thompson Sampling (B-MOTS), that achieves the optimal minimax bound of O( N T ), as well as the asymptotic optimal regret bound for Gaussian rewards. In contrast to the fully sequential MOTS developed by Jin et al. [2020], B-MOTS requires only O(N log T ) batches. The crucial difference between B-MOTS and B-TS is that instead of choosing Gaussian or Beta distributions, B-MOTS uses a clipped Gaussian distribution.
+To run B-MOTS, we need to slightly change the way Da(t) is updated. First, to initialize Da(t), B-MOTS plays each arm once in the beginning and sets ka(N + 1) to 1 and µ^a(N + 1) to the observed reward of each arm a  [N ]. To determine Da(t) for the subsequent batches, let us first define a confidence range (-, a(t)) for each arm a  [N ] as follows:
+8
+
+Algorithm 2 Batch Minimax Optimal Thompson Sampling (B-MOTS)
+1: Initialize: ka  0 (a  [N ]), la  0 (a  [N ]), batch   2: Initialize: Play each arm a once and initialize Da(t). 3: for t = N + 1, · · · T do 4: for all arms a  [N ] sample
+
+~a(t)  N (µ^a(B(t)), 1/(ka(B(t)))) a(t)  Da(t) = min{~a(t), a(t)}
+
+5: a(t) := argmaxa a(t)
+
+6:
+
+ka(t)  ka(t) + 1
+
+7:
+
+if ka(t) < 2la(t) then
+
+8:
+
+batch  batch  {a(t)}
+
+9: else
+
+10:
+
+la(t) = la(t) + 1
+
+11:
+
+Query(batch) and observe rewards
+
+12:
+
+Update Da(t), a  [N ]
+
+13:
+
+batch  
+
+14: end if
+
+15: end for
+
+a(t) = µ^a(B(t)) +
+
+ ka(B(t))
+
+log+
+
+T N ka(B(t))
+
+,
+
+(2)
+
+where log+(x) = max{0, log(x)} and the empirical mean for each arm a is estimated as
+
+µ^a(t) =
+
+B(t)  =1
+
+ra() × I(a( ) ka(B(t) + 1)
+
+=
+
+a) .
+
+(3)
+
+Note that the estimators in (3) and (1) slightly differ due to the initialization step of B-MOTS. For each arm a  [n], B-MOTS first samples ~a(t) from a Gaussian distribution with the
+following parameters ~a(t)  N (µ^a(B(t)), 1/(ka(B(t)))), where   (1/2, 1) is a tuning parameter. Then, the sample is clipped by the confidence range as follows:
+
+Da(t) = min{~a(t), a(t)}.
+
+(4)
+
+The rest is exactly as in Alg 1 for B-TS. If you are interested in the details, you can find the outline of B-MOTS algorithm in Appendix B.
+
+B-MOTS for SubGaussian Rewards. We state the regret bounds in the most general format, i.e., when the rewards follow a sub-Gaussian distribution. To remind ourselves, we say that a random variable X is  sub-Gaussian if E[exp(X - E[X])]  exp(22/2), for all   R.
+The following theorem shows that B-MOTS is minimax optimal.
+Theorem 5.1. If the reward of each arm is 1-subgussian then the regret of B-MOTS is bounded by R(T ) = O( N T + a:a>0 a). Moreover, the number of batches is bounded by O(N log T ).
+9
+
+The proof is given in Appendix B.2. The next theorem presents the asymptotic regret bound of B-MOTS for sub-Gaussian rewards.
+
+Theorem 5.2. Assume that the reward of each arm a  [N ] is 1-subgaussian with mean µa. For
+
+any fixed   (1/2, 1), the regret of B-MOTS can be bounded as R(T ) = O log(T )
+
+1 a:a>0 a
+
+.
+
+The proof is given in Appendix B.3 The asymptotic regret rate of B-MOTS matches the existing lower bound log(T ) a:a>0 1/a [Lai and Robbins, 1985] up to a multiplicative factor 1/. Therefore, similar to the analysis of the fully sequential setting [Jin et al., 2020], B-MOTS reaches the exact lower bound at a cost of minimax optimality. In the next section, we show that at least in the Gaussian reward setting, minimax and asymptotic optimally cab be achieved simultaneously.
+
+B-MOTS-J for Gaussian Rewards. In this part we present a batch version of Minimax Opti-
+
+mal Thompson Sampling for Gaussian rewards [Jin et al., 2020], called B-MOTS-J, which achieves
+
+both minimax and asymptotic optimality when the reward distribution is Gaussian. The only difference between B-MOTS-J and B-MOTS is the way ~a(t) are sampled. In particular, B-MOTS-J samples ~a(t) according to J (µ, 2) (instead of a Gaussian distribution), where the PDF is defined
+
+as
+
+J (x)
+
+=
+
+1 22
+
+|x
+
+-
+
+µ| exp
+
+1 -2
+
+x-µ 
+
+2
+
+.
+
+Note that when x is restricted to x  0, then J becomes a Rayleigh distribution. More precisely,
+
+to sample ~a(t), we set the parameters of J as follows: ~a(t)  J
+
+µ^a(B(t)),
+
+1 ka(B(t))
+
+, where µ^a(t))
+
+is estimated according to (3). The rest of the algorithm is run exactly like B-MOTS.
+
+Theorem 5.3. Assume that the reward of each arm a is sampled from a Gaussian distribution N (µa, 1) and  > 2. Then, the regret of B-MOTS-J can be bounded as follows:
+
+
+
+k
+
+R(T ) = O( KT + a),
+
+a=2
+
+lim R(T ) =
+
+2.
+
+T  log(T ) a:a>0 a
+
+The proof is given in Appendix B.4.
+
+6 Batch Thompson Sampling for Contextual Bandits
+In this section, we propose Batch Thompson Sampling for Contextual Bandits (B-TS-C), outlined in Algorithm 3. As in the fully sequential TS, proposed by Agrawal and Goyal [2013b], we assume Gaussian priors and Gaussian likelihood functions. However, we should highlight that the analysis of B-TS-C and the corresponding regret bound hold irrespective of whether or not the reward distribution matches the Gaussian priors and Gaussian likelihood functions (similar to the multi-armed bandit setting discussed in Section 4). More formally, given a context ba(t), and parameter µ, we assume that the likelihood of the reward ra(t) is given by N (ba(t)T µ, v2), where v =  9d ln(T /)
+
+10
+
+Algorithm 3 Batch TS for Contextual Bandits
+
+1: Initialize: ka  0 (a  [N ]), la  0 (a  [N ]), batch  , B = Id, µ^ = 0d
+
+2: for t = 1, 2, · · · T do
+
+3: µ~(t)  N (µ^(B(t)), v2B(B(t))-1)
+
+4: a(t) = argmaxa ba(t)T µ~(t)
+
+5:
+
+ka(t)  ka(t) + 1
+
+6:
+
+if ka(t) < 2la(t) then
+
+7:
+
+batch  batch  {a(t)}
+
+8: else
+
+9:
+
+la(t) = la(t) + 1
+
+10:
+
+Query(batch) and receive rewards
+
+11:
+
+Update µ^
+
+12:
+
+batch  
+
+13: end if
+
+14: end for
+
+and   (0, 1)2. Let us define the matrix B(t) as follows
+
+t-1
+B(t) = Id + ba()( )ba()( )T .
+ =1
+Note that the matrix B(t) depends on all the contexts observed up to time t - 1. We consider the prior N (µ^(B(t)), v2B(B(t))-1) for µ and update the the empirical mean estimator as follows:
+
+B(t)
+
+
+
+µ^(t) = B(B(t))-1  ba()( ) × ra()( ) .
+
+(5)
+
+ =1
+
+Note that in order to estimate µ^(t), we only consider the rewards received up to time B(t), namely,
+the rewards of arms pulled in the previous batches. At each time step t, B-TS-C generates a sample µ~(t) from N (µ^(B(t)), v2B(B(t))-1) and plays the arm a that maximizes ba(t)T µ~(t). The posterior distribution for µ at time t + 1 will be N (µ^(B(t + 1)), v2B(B(t + 1))-1).
+
+Theorem 6.1. The B-TS-C algorithm (Algorithm 3) achieves the total regret of
+
+R(T ) = O
+
+d3/2
+
+ T
+
+(ln(T
+
+)
+
++
+
+ln(T ) ln(1/))
+
+with probability 1 - . Moreover, B-TS-C carries out O(N log T ) batch queries.
+The proof is given in Appendix C.2.
+7 Experimental Results
+In this section, we compare the performance of our proposed batch Thompson Sampling policies (e.g., B-TS,B-MOTS, B-MOT-J and B-TS-C) with their fully sequential counterparts. We also
+2If the horizon T is unknown, we can use vt =  9d ln(t/).
+
+11
+
+avg regret
+
+0.6 0.5 0.4 0.3 0.2 0.1 0.0
+100
+
+UCB TS B-TS Static-TS
+
+101
+
+102
+
+103
+
+104
+
+time
+
+regret
+
+0.4
+
+B-TS
+
+TS
+
+UCB
+
+0.3
+
+Static-TS
+
+Static-TS-2
+
+0.2
+
+Static-TS-4
+
+0.1
+
+0 200 400 600 800 1000 number of Queries
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+regret
+
+1.0 0.8 0.6 0.4 0.2 0.0
+0.0
+
+TS-C  = 0.01, = 0.5 TS-C  = 0.5, = 0.5 TS-C  = 0.5,  = 0.01 B-TS-C  = 0.01, = 0.5 B-TS-C  = 0.5, = 0.5 B-TS-C  = 0.5,  = 0.01
+0.2 0.4 0.6 0.8 parameter value
+(e)
+
+regret
+
+0.40
+
+0.35
+
+0.30
+
+0.25 0.20
+0
+
+Static-TS-C TS-C B-TS-C
+2000 4000 6000 8000 10000 time
+(f )
+
+Figure 2: (a) and (b) compare the regret of UCB against TS and its batch variants. (c) and (d) compare the batch variants of TS and MOTS. (e) shows the sensitivity of TS-C and its batch variants to the tuning parameters. (f) shows the performance of TS-C and its batch variants on real data.
+include several baselines such as UCB and Thompson Sampling with static batch design (StaticTS). In particular, for Static-TS, Static-TS2, and Static-TS4, we set the total number of batches to that of B-TS, twice of B-TS, and four times of B-TS, respectively. However, in the static batch design, we use equal sized batches.
+
+Batch Thompson Sampling. In Figure 2a, we compare the performance of UCB against TS and its batch variants in a synthetic Bernoulli setting. We vary T from 1 to 104 and set N = 10. We run all the experiments 1000 times. Figure 2a compares the average regret, i.e., R(T )/T , versus the horizon T . As expected, TS outperforms UCB. Moreover, TS and B-TS follow the same trajectory and have practically the same regret. Note that for the static variant of TS, namely, Static-TS, we see that in the first few hundred iterations, its performance is even worst than UCB and then it catches with TS. Figure 2b more clearly shows the trade-off between the regret obtained by different baselines versus the number of batch queries (bottom-left is the desirable location). In this figure, we set T = 103. We see that the lowest regret is achieved by TS and B-TS but TS carries out many more queries. Also, we should highlight that while the static versions make fewer queries than TS, they do not achieve a similar regret. Notably, even Static-TS-4, that carries out 4 times more queries than B-TS, has a much higher regret. This shows the importance of a dynamic batch design.
+
+12
+
+Batch Minimax Optimal Thompson Sampling. In Figures 2c and 2d we compare the regret of MOTS Jin et al. [2020] and its batch versions. The synthetic setting is similar to Jin et al. [2020]. We set N = 50, T = 106 and the total number of runs to 2000. The reward of each arm is sampled from an independent Gaussian distribution. More precisely, the optimal arm has the expected reward and variance 1 while the other N - 1 arms have the expected reward 1 - and variance 1 (we set = 0.2). For MOTS, we set  = 0.9999 and  = 2 as suggested by Jin et al. [2020]. As we can see in Figure 2c, the batch variants of TS and MOTS achieve practically a similar regret. Also, as our theory suggests, B-MOTS (along with MOTS) have the lowest regret while B-MOTS drastically reduces the number of batches w.r.t MOTS. Moreover, the static batch designs, namely Static-TS and Static-MOTS, show the highest regret while carrying out the same number of batch queries as B-TS and B-MOTS. Therefore, the dynamic batch design of B-TS and B-MOTS seems crucial for obtaining good performances. A similar trend is shown in Figure 2d where we run MOTS-J (with  = 2) and its batch variants. Again, B-MOTS-J and MOTS-J are practically indistinguishable while achieving the lowest regret.
+Contextual Bandit. For the contextual bandit, we perform a synthetic and a real-data experiment. Figure 2e shows the performance of the sequential Thompson Sampling, namely, TS-C, and the batch variants, namely, B-TS-C, as we change different parameters ,  and  from 0 to 1. Here, the context dimension is 5 and we set the horizon to T = 104. We run all the experiments 1000 times. As we see in Figure 2e, TS-C and B-TS-C follow practically the same curves.
+For the experiment on real data, we use the MovieLens data set where the dimension of the context is 20, the horizon is T = 105, and we run each experiment 100 times. For the parameters, we set  = 0.61,  = 0.01, and = 0.71 as suggested by Beygelzimer et al. [2011]. We see that Static-TS-C performs a bit worst than TS-C and B-TS-C, again suggesting that it is crucial to use dynamic batch sizes.
+8 Conclusion
+In this paper, we revisited the classic Thompson Sampling procedure and developed the first Batch variants for the stochastic multi-armed bandit and linear contextual bandit. We proved that our proposed batch policies achieve similar regret bounds (up to constant factors) but with significantly fewer number of interactions with the environment. We have also demonstrated experimentally that our batch policies achieve practically the same regret on both synthetic and real data.
+References
+Yasin Abbasi-Yadkori, D´avid P´al, and Csaba Szepesv´ari. Improved algorithms for linear stochastic bandits. In Advances in Neural Information Processing Systems, pages 2312­2320, 2011.
+Arpit Agarwal, Sepehr Assadi, and Sanjeev Khanna. Stochastic submodular cover with limited adaptivity. In Proceedings of the Thirtieth Annual ACM-SIAM Symposium on Discrete Algorithms, pages 323­342. SIAM, 2019.
+Shipra Agrawal and Navin Goyal. Analysis of thompson sampling for the multi-armed bandit problem. In Conference on learning theory, pages 39­1, 2012.
+Shipra Agrawal and Navin Goyal. Further optimal regret bounds for thompson sampling. In Artificial intelligence and statistics, pages 99­107, 2013a.
+13
+
+Shipra Agrawal and Navin Goyal. Thompson sampling for contextual bandits with linear payoffs. In International Conference on Machine Learning, pages 127­135, 2013b.
+Shipra Agrawal and Navin Goyal. Near-optimal regret bounds for thompson sampling. Journal of the ACM (JACM), 64(5):1­24, 2017.
+Peter Auer. Using confidence bounds for exploitation-exploration trade-offs. Journal of Machine Learning Research, 3(Nov):397­422, 2002.
+Eric Balkanski and Yaron Singer. The adaptive complexity of maximizing a submodular function. In Proceedings of the 50th Annual ACM SIGACT Symposium on Theory of Computing, pages 1138­1151, 2018a.
+Eric Balkanski and Yaron Singer. Parallelization does not accelerate convex optimization: Adaptivity lower bounds for non-smooth convex minimization. arXiv preprint arXiv:1808.03880, 2018b.
+Donald A Berry and Bert Fristedt. Bandit problems: sequential allocation of experiments (monographs on statistics and applied probability). London: Chapman and Hall, 5(71-87):7­7, 1985.
+Alina Beygelzimer, John Langford, Lihong Li, Lev Reyzin, and Robert Schapire. Contextual bandit algorithms with supervised learning guarantees. In Proceedings of the Fourteenth International Conference on Artificial Intelligence and Statistics, pages 19­26. JMLR Workshop and Conference Proceedings, 2011.
+S´ebastien Bubeck and Nicolo Cesa-Bianchi. Regret analysis of stochastic and nonstochastic multiarmed bandit problems. arXiv preprint arXiv:1204.5721, 2012.
+S´ebastien Bubeck and Che-Yu Liu. Prior-free and prior-dependent regret bounds for thompson sampling. In Advances in Neural Information Processing Systems, pages 638­646, 2013.
+Olivier Chapelle and Lihong Li. An empirical evaluation of thompson sampling. Advances in neural information processing systems, 24:2249­2257, 2011.
+Lin Chen, Moran Feldman, and Amin Karbasi. Unconstrained submodular maximization with constant adaptive complexity. In Proceedings of the 51st Annual ACM SIGACT Symposium on Theory of Computing, pages 102­113, 2019.
+Lin Chen, Qian Yu, Hannah Lawrence, and Amin Karbasi. Minimax regret of switching-constrained online convex optimization: No phase transition. NeurIPS, 2020.
+Yuxin Chen and Andreas Krause. Near-optimal batch mode active learning and adaptive submodular optimization. ICML (1), 28(160-168):8­1, 2013.
+Wei Chu, Lihong Li, Lev Reyzin, and Robert Schapire. Contextual bandits with linear payoff functions. In Proceedings of the Fourteenth International Conference on Artificial Intelligence and Statistics, pages 208­214, 2011.
+Emile Contal, David Buffoni, Alexandre Robicquet, and Nicolas Vayatis. Parallel Gaussian process optimization with upper confidence bound and pure exploration. In Joint European Conference on Machine Learning and Knowledge Discovery in Databases, pages 225­240. Springer, 2013.
+14
+
+Varsha Dani, Thomas P Hayes, and Sham M Kakade. Stochastic linear optimization under bandit feedback. 2008.
+Thomas Desautels, Andreas Krause, and Joel W Burdick. Parallelizing exploration-exploitation tradeoffs in Gaussian process bandit optimization. Journal of Machine Learning Research, 15: 3873­3923, 2014.
+Hossein Esfandiari, Amin Karbasi, Abbas Mehrabian, and Vahab Mirrokni. Regret bounds for batched bandits. AAAI, 2021a.
+Hossein Esfandiari, Amin Karbasi, and Vahab Mirrokni. Adaptivity in adaptive submodularity. In COLT, 2021b.
+Matthew Fahrbach, Vahab Mirrokni, and Morteza Zadimoghaddam. Submodular maximization with nearly optimal approximation, adaptivity and query complexity. In Proceedings of the 2019 Annual ACM-SIAM Symposium on Discrete Algorithms, pages 255­273, 2019. doi: 10.1137/1. 9781611975482.17. URL https://epubs.siam.org/doi/abs/10.1137/1.9781611975482.17.
+Zijun Gao, Yanjun Han, Zhimei Ren, and Zhengqing Zhou. Batched multi-armed bandits problem. In Advances in Neural Information Processing Systems, pages 503­513, 2019.
+Aur´elien Garivier and Olivier Capp´e. The kl-ucb algorithm for bounded stochastic bandits and beyond. In Proceedings of the 24th annual conference on learning theory, pages 359­376, 2011.
+Thore Graepel, Joaquin Quinonero Candela, Thomas Borchert, and Ralf Herbrich. Web-scale bayesian click-through rate prediction for sponsored search advertising in microsoft's bing search engine. In ICML, 2010.
+Quanquan Gu, Amin Karbasi, Khashayar Khosravi, Vahab Mirrokni, and Dongruo Zhou. Batched neural bandits, 2021.
+Tianyuan Jin, Pan Xu, Jieming Shi, Xiaokui Xiao, and Quanquan Gu. Mots: Minimax optimal thompson sampling. arXiv preprint arXiv:2003.01803, 2020.
+Kirthevasan Kandasamy, Akshay Krishnamurthy, Jeff Schneider, and Barnab´as P´oczos. Parallelised bayesian optimisation via thompson sampling. In International Conference on Artificial Intelligence and Statistics, pages 133­142. PMLR, 2018.
+Tarun Kathuria, Amit Deshpande, and Pushmeet Kohli. Batched Gaussian process bandit optimization via determinantal point processes. In Advances in Neural Information Processing Systems, pages 4206­4214, 2016.
+Emilie Kaufmann, Nathaniel Korda, and R´emi Munos. Thompson sampling: An asymptotically optimal finite-time analysis. In International conference on algorithmic learning theory, pages 199­213. Springer, 2012.
+Jaya Kawale, Hung H Bui, Branislav Kveton, Long Tran-Thanh, and Sanjay Chawla. Efficient thompson sampling for online matrix-factorization recommendation. In Advances in neural information processing systems, pages 1297­1305, 2015.
+15
+
+Tze Leung Lai and Herbert Robbins. Asymptotically efficient adaptive allocation rules. Advances in applied mathematics, 6(1):4­22, 1985.
+Tor Lattimore and Csaba Szepesv´ari. Bandit algorithms. Cambridge University Press, 2020. Odalric-Ambrym Maillard, R´emi Munos, and Gilles Stoltz. A finite-time analysis of multi-armed
+bandits problems with kullback-leibler divergences. In Proceedings of the 24th annual Conference On Learning Theory, pages 497­514, 2011. Vianney Perchet, Philippe Rigollet, Sylvain Chassang, and Erik Snowberg. Batched bandit problems. Ann. Statist., 44(2):660­681, 04 2016. doi: 10.1214/15-AOS1381. URL https: //doi.org/10.1214/15-AOS1381. Extended abstract in COLT 2015. Paul Rolland, Jonathan Scarlett, Ilija Bogunovic, and Volkan Cevher. High-dimensional bayesian optimization via additive models with overlapping groups. arXiv preprint arXiv:1802.07028, 2018. Yufei Ruan, Jiaqi Yang, and Yuan Zhou. Linear bandits with limited adaptivity and learning distributional optimal design. arXiv preprint arXiv:2007.01980, 2021. Paat Rusmevichientong and John N Tsitsiklis. Linearly parameterized bandits. Mathematics of Operations Research, 35(2):395­411, 2010. Daniel Russo and Benjamin Van Roy. Learning to optimize via posterior sampling. Mathematics of Operations Research, 39(4):1221­1243, 2014. Daniel Russo, Benjamin Van Roy, Abbas Kazerouni, Ian Osband, and Zheng Wen. A tutorial on thompson sampling. arXiv preprint arXiv:1707.02038, 2017. Eric M Schwartz, Eric T Bradlow, and Peter S Fader. Customer acquisition via display advertising using multi-armed bandit experiments. Marketing Science, 36(4):500­522, 2017. Aleksandrs Slivkins. Introduction to multi-armed bandits. arXiv preprint arXiv:1904.07272, 2019. William R Thompson. On the likelihood that one unknown probability exceeds another in view of the evidence of two samples. Biometrika, 1933. Sof´ia S Villar, Jack Bowden, and James Wason. Multi-armed bandit models for the optimal design of clinical trials: benefits and challenges. Statistical science: a review journal of the Institute of Mathematical Statistics, 30(2):199, 2015. Zi Wang, Clement Gehring, Pushmeet Kohli, and Stefanie Jegelka. Batched large-scale bayesian optimization in high-dimensional spaces. In International Conference on Artificial Intelligence and Statistics, pages 745­754. PMLR, 2018.
+16
+
+Appendices
+
+A Batch Thompson Sampling for Multi-armed Bandit
+In this section, we follow the notations used in Agrawal and Goyal [2012, 2017] and adapt them to the batch setting.
+
+A.1 Notations and Definitions
+Definition A.1. For a Binomial distribution with parameters  and , we refer to its CDF as FnB,p(.), and pdf as fnB,p(.). We furthermore denote by Fbe,ta(.) the CDF of Beta distribution. It is easy to show that for all ,  > 0,
+
+Fbe,ta(y) = 1 - FB+-1,y( - 1) .
+Definition A.2 (History/filtration Ft). For time steps t = 1, · · · , T define the history of the arms that have been played upto time t as
+
+Ft = {a( ), ra(t)( ),   t} .
+
+Definition A.3. For a given arm a, we denote by j the time step in which a has been queried for the j-th time. We let 0 = 0. Note that T  T .
+
+Definition A.4. Denote by a(t) the sample for arm a at time t from the posterior distribution at time B(t), namely Beta(Sa(B(t)) + 1, ka(B(t)) - Sa(B(t)) + 1).
+
+Definition A.5. Without loss of generality, we assume that a = 1 is the optimal arm. For a non-optimal arm a = 1, we have two thresholds xa, ya depending on the type of upper bounds we are proving (i.e., problem dependent or independent) such that µa < xa < ya < µ1.
+
+Definition
+
+A.6.
+
+We denote by a
+
+:= µ1 - ya
+
+and Da
+
+:=
+
+ya
+
+ln
+
+ya µ1
+
++
+
+(1
+
+-
+
+ya)
+
+ln
+
+1-ya 1-µ1
+
+.
+
+Also
+
+define
+
+d(µa, µ1)
+
+:=
+
+µ log
+
+µa µ1
+
++
+
+(1
+
+-
+
+µa) log
+
+1-µa 1-µ1
+
+.
+
+Definition A.7. For a non-optimal arm a (i.e., a = 1), we use Eaµ(t) for the event {µ^a(B(t))  xa} and we use Ea(t) for the event {a(t)  ya}.
+
+Definition A.8. The (conditional) probability that for a non optimal arm a, the generated sample for the optimal arm a = 1 at time t exceeds the threshold ya is defined as
+
+pa,t := Pr(1(t) > ya|FB(t)) .
+
+Here is our first lemma regarding the relationship between batch bandit and sequential bandit.
+
+Lemma
+
+A.9.
+
+For
+
+any
+
+arm
+
+a,
+
+we
+
+have
+
+ka(B(t))
+
+
+
+1 2
+
+ka(t).
+
+Proof.
+
+The
+
+reason
+
+is
+
+that
+
+if
+
+ka(B(t))
+
+<
+
+1 2
+
+ka(t)
+
+then
+
+B-TS
+
+(Algorithm
+
+1)
+
+should
+
+have
+
+queried
+
+a
+
+batch after time B(t) which is a contradiction.
+
+17
+
+A.2 Problem-dependent Regret Bound with Beta Priors
+Theorem 4.1. The total number of batches carried out by B-TS is at most O(N log T ).
+
+Proof. Every time we query a batch, there is one arm a, for which ka = 2 a. In order to count the total number of batches, we assign each time step t to a batch B. Note that the assigned batch for t is not necessarily the batch that a(t) will be added to. Suppose ka = 2 a, and the algorithm queries a batch B, we assign time steps in which arm a was queried for the 2 a-1 + 1, · · · , 2 a-th times to the batch B (although some of the elements might have been queried in the previous batches). Let's denote this set by Ta(B). Then for each arm a, the total number of batches corresponding to arm a is at most O(log T ) (since the last time step arm a is being played is at most T ). Therefore, we can upper bound the total number of batches by O(N log T ) batches.
+
+First, note that in the batch algorithm B-TS (Algorithm 1), we define a(t) based on FB(t). As a result of these modifications the following lemma is immediate. It is a batch variation of [Agrawal
+and Goyal, 2017, Lemma 2.8].
+
+Lemma A.10. For all t,all suboptimal arm a = 1, and all instantiation FB(t) we have
+
+Pr(a(t)
+
+=
+
+a, Eaµ(t), Ea(t)|FB(t))
+
+
+
+1
+
+- pa,t pa,t
+
+Pr(a(t)
+
+=
+
+1, Eaµ(t), Ea(t)|FB(t))
+
+.
+
+Proof. Eaµ(t) is determined by FB(t). Therefore it is enough to show that for any instantiation
+
+FB(t)
+
+Pr(a(t)
+
+=
+
+a|Ea(t), FB(t))
+
+
+
+1
+
+- pa,t pa,t
+
+Pr(a(t)
+
+=
+
+1|Ea(t), FB(t))
+
+.
+
+Now given Ea(t), we have a(t) = a only if j(t)  ya, j. Therefore, for a = 1 and any instantiation FB(t) we have
+
+Pr(a(t) = a|Ea(t), FB(t))  Pr(j(t)  ya, j|Ea(t), FB(t)) = Pr(1(t)  ya|FB(t)). Pr(j(t)  ya, j = 1|Ea(t), FB(t)) = (1 - pa,t). Pr(j(t)  ya, j = 1|Ea(t), FB(t)) .
+
+In the first equality given FB(t), the random variable 1(t) is independent of all other j(t) and Ea(t). The argument for a = 1 is similar.
+Now we prove the main lemma which provides a problem-dependent upper bound on the regret.
+
+Theorem 4.3. Without loss of generality, let us assume that the first arm has the highest mean value, i.e., µ = µ1. Then, the expected regret of B-TS, outlined in Algorithm 1, with Beta priors can be bounded as follows
+
+R(T ) = (1 + )O
+
+N a=2
+
+ln T d(µa, µ1)
+
+a
+
++O
+
+N
+2
+
+,
+
+where
+
+d(µa,
+
+µ1)
+
+:=
+
+µa
+
+log
+
+µa µ1
+
++ (1 - µa) log
+
+(1-µa) 1-µ1
+
+and
+
+a
+
+= µ1 - µa.
+
+18
+
+Proof. The proof closely follows [Agrawal and Goyal, 2017, Theorem 1.1] and is adapted to the batch setting. For a non optimal arm a = 1, we decompose the expected number of plays of arm a as follows
+
+T
+
+E [ka(t)] = Pr(a(t) = a)
+
+t=1
+
+T
+
+T
+
+T
+
+= Pr(a(t) = a, Eaµ(t), Ea(t)) + Pr(a(t) = a, Eaµ(t), Ea(t)) + Pr(a(t) = a, Eaµ(t)) .
+
+t=1
+
+t=1
+
+t=1
+
+(6)
+
+The first term can be bounded by lemma A.10 as follows:
+
+T
+
+T
+
+Pr(a(t) = a, Eaµ(t), Ea(t))  E Pr(a(t) = a, Eaµ(t), Ea(t)|FB(t))
+
+t=1
+
+t=1
+
+T
+E
+t=1
+
+(1
+
+- pa,t) pa,t
+
+Pr(a(t)
+
+=
+
+1,
+
+Ea (t),
+
+Eaµ(t))|FB(t)
+
+T
+=E
+t=1
+
+E
+
+1
+
+- pa,t pa,t
+
+I (a(t)
+
+=
+
+1,
+
+Ea (t),
+
+Eaµ(t))|FB(t)
+
+T
+E
+t=1
+
+1
+
+- pa,t pa,t
+
+I (a(t)
+
+=
+
+1,
+
+Ea (t),
+
+Eaµ(t))
+
+.
+
+Note that as before, given FB(t), the probability pa,t is fixed which implies the second inequality. The difference between this argument and that of The proof closely follows [Agrawal and Goyal,
+2017, Theorem 1.1] is that conditioning is until the last time the B-TS algorithm has queried a
+batch, i.e., B(t). Note that pa,t = Pr({1(t) > ya|FB(t)}) changes only after a batch queries the optimal arm. Hence as before pa,t remains the same at all time steps t  {k + 1, · · · , k+1} (refer to Definition A.3). Thus we can get the following decomposition
+
+T
+E
+t=1
+
+1
+
+- pa,t pa,t
+
+I(a(t)
+
+=
+
+1,
+
+Ea (t),
+
+Eaµ(t))
+
+
+
+T -1 k=0
+
+E
+
+ 
+
+(1 - pa,k+1) pa,k + 1
+
+k+1 t=k +1
+
+I(a(t)
+
+=
+
+1,
+
+Ea (t),
+
+ Eaµ(t))
+
+T -1
+E
+k=0
+
+1 - pa,k+1 pa,k +1
+
+.
+
+(7)
+
+Now for the term E
+
+1 pa,k +1
+
+, since ka(B(t))  1/2ka(t) (Lemma A.9), we can get a modification
+
+of the bound provided in Agrawal and Goyal [2017, Lemma 2.9], as follows.
+
+Lemma A.11. Let k be the time step that optimal arm 1 has been played for the k-th time, Then for non optimal arm a = 1 we have,
+
+
+
+E
+
+1 pa,k +
+
+1
+
+-
+
+1
+
+=
+
+
+
+3 a
+
+,
+
+ exp(-a2k/4)
+
++
+
+exp(-Dak/2) (k/2+1)a2
+
++
+
+1 exp(a2k/16)-1
+
+,
+
+for
+
+k
+
+<
+
+16 a
+
+,
+
+otherwise.
+
+19
+
+Similar to Agrawal and Goyal [2017, Lemma 2.10], we obtain the following lemma. Lemma A.12. For a non optimal arm a = 1, we have
+
+T t=1
+
+Pr(a(t)
+
+=
+
+a, Eaµ(t), Ea(t))
+
+
+
+48 a2
+
++
+
+
+j>16/a
+
+e-a2j/4
+
++
+
+(j
+
+2 + 1)a2
+
+e-Daj/2
+
++
+
+1 ea2j/8
+
+-
+
+. 1
+
+Now by substituting the above lemma into equation 7, we can upper bound other terms in equation (6) to prove the following lemma.
+
+Lemma A.13. For a non optimal arm a = 1, we have
+
+T t=1
+
+Pr(a(t)
+
+=
+
+a,
+
+Eaµ(t))
+
+
+
+2 d(xa, µa)
+
++
+
+1
+
+.
+
+Proof. Let k be the k-th play of arm a. The LHS can be upper bounded by
+
+T -1 k=0
+
+Pr(Eaµ(k+1
+
+)).
+
+Note that µ^a will be updated when the algorithm queries a batch. Using Chernoff-Hoeffding bound
+
+Pr(µ^a(B(k+1))
+
+>
+
+xa)
+
+
+
+e-
+
+1 2
+
+kd(xa
+
+,µa
+
+)
+
+,
+
+where xa is defined in Definition A.5. Note that at time B(k+1), arm a has been played at least k/2 times. Thus,
+
+T t=1
+
+Pr(Eaµ(k+1))
+
+=
+
+T -1
+Pr(µ^a(B(k+1))
+k=0
+
+>
+
+xa)
+
+
+
+1
+
++
+
+T
+
+-1
+
+exp(-
+
+1 2
+
+kd(xa,
+
+µa
+
+))
+
+k=1
+
+
+
+1
+
++
+
+2 d(xa,
+
+µa)
+
+.
+
+The statement of the following lemma is similar to [Agrawal and Goyal, 2017, Lemma 2.12]. However, we prove it for the batch policy.
+Lemma A.14. For a non optimal arm a = 1, we have
+
+T
+Pr(a(t) = a, Ea(t), Eaµ(t))  La(t) + 1,
+t=1
+
+where
+
+La(t)
+
+=
+
+ln d(xa
+
+T ,ya
+
+)
+
+.
+
+Proof. We can consider two cases when ka(B(t)) is large (greater than La(t)) or small (less than La(t)). This way, we have
+
+T
+
+T
+
+Pr(a(t) = a, Ea(t), Eaµ(t)) = Pr(a(t) = a, ka(B(t))  La(t), Ea(t), Eaµ(t))
+
+t=1
+
+t=1
+
+T
+
++ Pr(a(t) = a, ka(B(t)) > La(t), Ea(t), Eaµ(t)).
+
+(8)
+
+t=1
+
+20
+
+Same as before the first term is bounded by E
+
+T t=1
+
+I(a(t)
+
+=
+
+a,
+
+ka(B(t))
+
+
+
+La(t))
+
+which is bounded
+
+by La(t). Again we bound the second term by 1. The main idea is to show that for large enough ka(B(t)), and given Eaµ(t) is true, the probability of Ea(t) being false is small. We can write
+
+T
+
+T
+
+Pr(a(t) = a, ka(B(t)) > La(t), Ea(t), Eaµ(t)) = E
+
+I(ka(t) > La(t), Eaµ(t)) Pr(a(t) = a, Ea(t)|FB(t))
+
+t=1
+
+t=1
+
+T
+
+E
+
+I(ka(t) > La(t), µa(B(t^))  xa) Pr(a(t) > ya|FB(t)) .
+
+t=1
+
+Note that FB(t) determines both ka(B(t)) and Eaµ(t). Now, a(t) is distributed according to
+
+a(t)  Beta(µ^a(B(t))ka(B(t) + 1, (1 - µ^a(B(t))ka(B(t)))).
+
+Given Eaµ(t), it is stochastically dominated by Beta(xaka(B(t))+1, (1-xa)ka(B(t))). Now, if FB(t) contains the events Eaµ(t) and {ka(B(t)) > La(t)}, we have
+
+Pr(a(t) > ya|FB(t))  1 - Fxbaetkaa(B(t))+1,(1-xa)ka(B(t))(ya) .
+
+Using the Chernouf-Hoefding inequality, we can show that the RHS of the above inequality is at most
+
+1 - Fxbaetkaa(B(t))+1,(1-xa)ka(B(t))(ya) = FkBa(B(t))+1,ya (xa(ka(t) + 1))  exp(-(ka(B(t)) + 1)d(xa, ya))  exp(-(La(t))d(xa, ya))  1/T .
+
+Summing over t yields the upper bound 1 for the second term in 8.
+
+The rest of the proof is by combining the above lemmas and by setting the right value for xa and ya as discussed in Agrawal and Goyal [2017]. In particular, by combining Lemma A.12, A.13, and A.14 we have
+
+E [ka(t)]
+
+
+
+48 a2
+
++
+
+(e-a2j/4 + (j
+
+j>16/a
+
++
+
+2 1)a2
+
+)e-(Da
+
+)j
+
+/2
+
++
+
+ea2
+
+j
+
+1
+/8
+
+-
+
+1
+
+)
+
++
+
+La(t)
+
++
+
+1+
+
+1 d(xa,
+
+µa)
+
++1
+
+.
+
+Now we should set the right value to parameters xa, ya. For 0  < 1, set xa  (µa, µ1) such that d(xa, µ1) = d(µa, µ1)/(1 + ) and set ya  (xa, µ1) such that d(xa, ya) = d(xa, µ1)/(1 + ) = d(µa, µ1)/(1 + )2. For these values, the regret bound easily follows. We will use different values for problem independent case in the next section.
+
+A.3 Problem-independent Regret Bound with Beta Priors
+Now we prove the problem independent regret bound. Theorem 4.6. Batch Thompson Sampling, outlined in Algorithm 1 and instantiated with Beta priors, achieves R(T ) = O( N T ln T ) with O(N log T ) batch queries.
+21
+
+Proof. The proof follows [Agrawal and Goyal, 2017, Theorem 1.2] and adapted to the batch setting.
+
+For each sub-optimal arm a = 1, in the analysis of the algorithm we use two thresholds xa and ya
+
+such that µa < xa < ya < µ1. These parameters respectively control the events that the estimate
+
+µ^a and sample a are not too far away from the mean of arm a, namely, µa. To remind the notation in Definition A.7, Eaµ(t) represents the event {µ^a(B(t))  xa} and Ea(t) represents the event {a(t)  ya}. The probability of playing each arm will be upper bounded based on whether
+
+or not the above events are satisfied.
+
+Furthermore, the threshold ya is also used in the definition of pa,t (see Definition A.8) and
+
+Lemma A.10 to bound the probability of playing any suboptimal arm a = 1 at the current step t by
+
+a linear function of pa,t. Additionally, in Lemma A.13 we show an upper bound for the probability
+
+of selecting arm a in terms of xa and ya, i.e., La(T ) := O(ln T /d(xa, ya)).
+
+For the problem-independent setting, we need to set xa = µa + a/3 and ya = µ1 - a/3.
+
+This choice implies a2 = (µ1 - ya)2 = 2a/9. Then we can lower bound d(xa, µa)  22a/9.
+
+Thus
+
+La(T )
+
+=
+
+O(
+
+ln T 2a
+
+).
+
+Now by substituting a
+
+and d(xa, µ - a) in Theorem 4.3 for a = 1, we
+
+get
+
+E[ka(T )]
+
+
+
+O(
+
+ln T 2a
+
+).
+
+Now for arms with a >
+
+N
+
+ln T
+
+T
+
+,
+
+we
+
+can
+
+upper
+
+bound
+
+the
+
+regret
+
+by
+
+a
+
+E[ka(T
+
+)] 
+
+=
+
+O(
+
+T
+
+ln N
+
+T
+
+),
+
+and
+
+for
+
+arms
+
+with
+
+a
+
+
+
+N
+
+ln T
+
+T
+
+,
+
+we can 
+
+upper
+
+bound
+
+the
+
+expected
+
+regret by N T ln T . All in all, it results in the total regret of O( N T ln T ).
+
+A.4 Problem-independent Regret Bound with Gaussian Priors
+
+Theorem 4.7. Batch Thompson Sampling, outlined in Algorithm 1 and instantiated with Gaussian priors, achieves E[R(T )] = O( N T ln N ) with O(N log T ) batch queries.
+The proof is similar to the proof of Theorem 4.6 and follows essentially [Agrawal and Goyal, 2017, Theorem 1.3]. with Beta priors. We set xa = µa + a/3 and ya = µ1 - a/3. The lemmas in the previous section for Beta priors hold here with slight modifications. The main lemma that changes for the Gaussian distributions is Lemma A.14.
+
+Lemma A.15. Let j be the j-th time step in which the optimal arm 1 has been queried. Then
+
+where
+
+La(t)
+
+=
+
+18
+
+ln(T 2a 2a
+
+)
+
+.
+
+E
+
+1 pa,j +1
+
+-1
+
+
+
+e11 + 5,
+
+T
+
+4 2a
+
+,
+
+j, j > 8La(t),
+
+Proof. Note that pa,t is the probability Pr(a(t) > ya|FB(t)). If the prior comes from the Gaussian
+
+distribution
+
+then
+
+a(t)
+
+has
+
+distribution
+
+N (µ^a(t),
+
+ka
+
+1 (B(t))+1
+
+).
+
+Given
+
+the
+
+definition
+
+of
+
+
+
+and
+
+pa,t,
+
+the
+
+proof follows from Agrawal and Goyal [2017, Lemma 2.13].
+
+By using Lemma A.15 and substituting it in eq. (7), we can easily obtain the following lemma.
+
+Lemma A.16. For any arm a  [n] we have
+
+T t=1
+
+Pr(a(t)
+
+=
+
+a,
+
+Eaµ(t),
+
+Ea (t))
+
+
+
+(e64
+
++
+
+4)(8La(t))
+
++
+
+8 2a
+
+.
+
+22
+
+Lemma A.17. For any arm a  [n], we have
+
+T t=1
+
+Pr(a(t)
+
+=
+
+a, Eaµ(t))
+
+
+
+1 d(xa, ya)
+
++
+
+1
+
+
+
+9 22a
+
++
+
+1.
+
+Similar to Lemma A.14, we can prove the following lemma.
+
+Lemma A.18. For any arm a  [n], we have
+
+T t=1
+
+Pr(a(t)
+
+=
+
+a,
+
+Ea (t),
+
+Eaµ(t))
+
+
+
+La(t)
+
++
+
+1 2a
+
+.
+
+where
+
+La(t)
+
+=
+
+36
+
+ln(T 2a 2a
+
+)
+
+.
+
+Proof. The proof follows from [Agrawal and Goyal, 2017, Lemma 2.16] and is adapted to the batch setting. The decomposition is as in Lemma A.14. As before, the first term in the decomposition can be upper bounded by La(t). Instead of bounding the second term with 1, we should bound it with 1/2a. First, note that
+
+T
+
+T
+
+Pr a(t) = a, ka(B(t)) > La(t), Ea(t), Eaµ(t))  E
+
+Pr(a(t) > ya|ka(B(t)) > La(t), µ^a(B(t))  xa), FB(t) .
+
+t=1
+
+t=1
+
+We
+
+also
+
+know
+
+that
+
+a(t)
+
+is
+
+distributed
+
+as
+
+N (µ^a(t),
+
+ka
+
+(B
+
+1 (t))+1
+
+).
+
+So given {µ^a(t)  xa}, we have
+
+that
+
+a(t)
+
+is
+
+stochastically
+
+dominated
+
+by
+
+N (xa,
+
+ka
+
+1 (B(t))+1
+
+).
+
+Therefore,
+
+Pr(a(B(t)) > ya|ka(B(t)) > La(t), µ^a(B(t))  xa, FB(t))  Pr N
+
+xa,
+
+1 ka(B(t))
+
++
+
+1
+
+> ya|FB(t), ka(B(t)) > La(t) .
+
+By using concentration bounds, we have
+
+Thus,
+
+Pr N
+
+xa,
+
+ka(B
+
+1 (t))
+
++
+
+1
+
+> ya
+
+
+
+1 e-
+
+La
+
+(t)(ya 4
+
+-xa )2
+
+2
+
+
+
+1 T 2a
+
+.
+
+Pr(a(t) > ya|ka(B(t)) > La(t), µ^a(t)  xa, FB(t))  1/T 2a .
+
+(9)
+
+Summing over t will follow the result.
+
+Using lemmas A.18, A.16, A.17 we can upperbound
+
+E [ka(t)]
+
+
+
+(e64
+
++
+
+4) 2
+
+×
+
+72 ln(T 2a) 2a
+
++
+
+2×4 2a
+
++
+
+18 ln(T 2a) 2a
+
++
+
+1 2a
+
++
+
+9 2a
+
++
+
+1.
+
+Thus, we can upper bound the expected regret due to arm a. Similar to the previous proofs we
+
+can upper bound
+
+aE[ki(T )]  O
+
+1 a
+
++
+
+ln(T 2a) a
+
++ a.
+
+Then, if a > e
+
+N ln N T
+
+we can
+
+upper 
+
+bound
+
+the
+
+regret by
+
+O(
+
+N ln T N
+
++ 1).
+
+If
+
+a
+
+
+
+e
+
+N ln N T
+
+we
+
+can upper bound the regret with O( N T ln T ). Consequently, we can upper bound the total regret
+
+by O( N T ln T ) assuming T  N .
+
+23
+
+B Batch Minimax Optimal Thompson Sampling
+In order to increase clarity, we first introduce the main notations used in the proofs. We follow closely the notations used in Jin et al. [2020] and adapt them to the batch setting.
+
+B.1 Notations and Definitions
+
+Without loss of generality, we assume the optimal arm is arm a = 1 with µ1 = maxa[N] µa. Definition B.1. Define µ^as to be the average reward of arm a when it has been played s times.
+
+Definition B.2. We denote by Fs the history of plays of Algorithm 2 (B-MOTS) up to the s-th pull of arm 1.
+
+Definition B.3. Let h(j) be the largest power of 2 that is less than or equal to j.
+
+Definition B.4. Define
+
+B = {s = 2i|i = 0, · · · , log T } .
+
+We slightly modify Jin et al. [2020, eq.(16)] as follows.
+
+Definition B.5. Define
+
+ = µ1 - min µ^1s +
+sB
+
+ s
+
+log+
+
+T sN
+
+.
+
+(10)
+
+Definition B.6. Similar to the definitions of Da(t) and a(t), we define Das as the distribution of arm a when it is played for the s-th time. Also, we define as as a sample from distribution Das.
+
+Lemma B.7. Let X1, X2, · · · be independent 1-subgaussian random variables with zero mean. Let's
+
+define µ^t = 1/t
+
+t s=1
+
+Xs.
+
+Then
+
+for
+
+
+
+
+
+4
+
+and
+
+any
+
+
+
+>
+
+0
+
+Pr s  B : µ^s +
+
+ s
+
+log+(T
+
+/sN
+
+)
+
++
+
+
+
+
+
+0
+
+
+
+15N T 2
+
+.
+
+The above lemma follows immediately from Lattimore and Szepesv´ari [2020, Lemma 9.3] as we consider B  [T ]. We can strengthen Lemma B.7 for Gaussian variables, as described by Jin et al. [2020, Lemma 1] as follows.
+
+Lemma B.8. Let Xa's be independent Guassian r.v. with zero mean and variance 1. Denote
+
+^t = 1/t
+
+t s=1
+
+Xs.
+
+Then
+
+for
+
+
+
+>
+
+2
+
+and
+
+any
+
+
+
+>
+
+0,
+
+Pr s  B : ^s +
+
+ s
+
+log+
+
+(T
+
+/sN
+
+)
+
++
+
+
+
+
+
+0
+
+
+
+4N T 2
+
+.
+
+Now similar to eq.(19) in Jin et al. [2020], define as as follows. Definition B.9. Define
+
+as = µ^as +
+
+ s
+
+log+(
+
+T sN
+
+)
+
+.
+
+(11)
+
+24
+
+Definition B.10. We define Fas as the CDF of distribution for arm a when ka(t - 1) = s. Also Gas( ) is defined as 1 - Fas(µ1 - ).
+Definition B.11. Let us define Fas to be the CDF of N (µ^as, 1/(s)). Moreover, let us define Gas( ) = 1 - Fas(µ1 - ). Let ~as denote a sample from N (µ^as, 1/(s)).
+Definition B.12. Define the event Ea(t) = {a(t)  µ1 - }.
+The following two lemata deal with concentration inequalities that we need for subGaussian random variables.
+
+Lemma B.13 (Jin et al. [2020], Lemma 2). Let w > 0 be a constant and X1, X2, · · · be independent
+
+and 1-subGaussian r.v.
+
+with zero mean.
+
+Denote by µ^n =
+
+1 n
+
+n s=1
+
+Xs.
+
+Then for  > 0 and any
+
+N  T,
+
+T
+Pr µ^n +
+n=1
+
+ n
+
+log+(N/n)
+
+
+
+w
+
+
+
+1
+
++
+
+
+
+log+(N w2) w2
+
++
+
+3 w2
+
++
+
+The following lemma is a variant of Jin et al. [2020, Lemma4].
+
+2
+
+log+(N w2
+
+w2)
+
+.
+
+Lemma B.14. Let   (1/2, 1) be a constant and > 0. Assuming the reward of each arm is 1-sbuGaussian with mean µa. For any fixed   (1/2, 1) and  > 4, there exists a constant c > 0 s.t.
+
+T -1
+E
+s=1
+
+1 G1h(s)(
+
+)
+
+-1
+
+
+
+c
+2
+
+.
+
+(12)
+
+Proof. The proof closely follows the steps of Jin et al. [2020, Lemma4]. However, for completeness, and for a few differences, we provide the full proof. The main difference is that in Lemma B.14 we have the terms G1h(s) instead of G1s. We will prove the following two parts:
+· First, there exists a constant c such that
+
+E
+
+1 G1h(s)(
+
+)
+
+-1
+
+ c , s,
+
+and
+
+· Second, for L = 64/ 2 , we have
+
+E
+
+T
+(
+s=L
+
+1 G1h(s)(
+
+)
+
+- 1)
+
+
+
+4 e2
+
+(1
+
++
+
+16
+2
+
+)
+
+.
+
+Denote by s = N (µ^1h(s), 1/(h(s))). Also, let Ys be the number of trials until a sample from s becomes greater than µ1 - . By the definition of Gah(s) we have
+
+E
+
+1 G1h(s)(
+
+)
+
+-1
+
+= E [Ys] .
+
+25
+
+Similar to [Jin et al., 2020, Eq. (59)] one can show that
+
+Pr(Ys
+
+<
+
+r)
+
+
+
+1
+
+-
+
+r-2
+
+-
+
+r-
+
+ 
+
+.
+
+ Define z = 2 log r, for r  1, where   (, 1). Also let Mr be the maximum of r independent samples from s. Thus
+
+Pr(Ys < r)  Pr(Mr > µ1 - ) E E I(Mr > µ^1h(s) +
+
+z h(s)
+
+,
+
+µ^1h(s)
+
++
+
+z h(s)
+
+
+
+µ1
+
+-
+
+)
+
+|Fh(s)
+
+=E I(µ^1h(s) +
+
+z h(s)
+
+
+
+µ1
+
+-
+
+) × Pr
+
+Mr > µ^1h(s) +
+
+z h(s) |Fh(s)
+
+.
+
+For a random variable Z  N (µ, 2) we have the following tail bound
+
+Pr(Z > µ + x) 
+
+1 2
+
+x2
+
+x +
+
+1
+
+e-
+
+x2 2
+
+.
+
+Thus, for r > e2,
+
+Pr Mr > µ^1h(s) +
+
+z h(s) |Fh(s)
+
+ 1 - exp
+
+r1- -
+8 log r
+
+.
+
+Similar to Jin et al. [2020], we can show that if r  exp(10/(1 -  )2) we have
+
+Pr Mr > µ^1h(s) +
+
+z h(s) |Fh(s)
+
+1-
+
+1 r2
+
+.
+
+Also, for > 0, we have
+
+Pr µ^1h(s) +
+
+z h(s)
+
+
+
+µ1
+
+-
+
+ 1 - r- / .
+
+Therefore, for r  exp(10/(1 -  )2), we obtain
+
+Pr(Ys < r)  1 - r-2 - r- / .
+
+For any  >  we get
+
+
+E [Ys] = Pr(Ys  r)  2 exp
+r=0
+
+10 (1 -  )2
+
++
+
+1 (1 - ) - (1 - 
+
+)
+
+.
+
+By setting 1 -  = (10)/2,
+
+E
+
+1 G1h(s)(
+
+)
+
+-1
+
+2
+
+40 (1 - )2
+
++
+
+2 1-
+
+.
+
+26
+
+Now because  is fixed, there exists a universal constant c > 0 s.t.
+
+E
+
+1 G1h(s)(
+
+)
+
+-1
+
+c .
+
+Proof of the second part is similar.
+
+In the above proof, we had to be careful about the conditional expectations as the history in
+the batch mode, namely, Fh(s), is different from the sequential setting Fs. Apart from that, as we stated, the proof is identical to Jin et al. [2020, Lemma4].
+
+B.2 Clipped Gaussian Distribution
+Theorem 5.1. If the reward of each arm is 1-subgussian then the regret of B-MOTS is bounded by R(T ) = O( N T + a:a>0 a). Moreover, the number of batches is bounded by O(N log T ). Proof. We closely follow the proof of of the fully sequential algorithm, provided in Jin et al. [2020, Theorem 1], and adapt it to the batch setting. Let us define
+
+S := {a : a > max{2, 8 N/T }} . Then, as Jin et al. [2020, eq. (17)] argued, we have
+
+R(T ) 
+
+aE [ka(t)]
+
+a:a>0
+
+
+
+ E [2T ] + 8 N T + E aka(t) .
+
+(13)
+
+aS
+
+where as in Jin et al. [2020, eq. (18)] (which immediately follows from Lemma B.8) we have E [2T ]  4/ 15N T . By Definition B.9, we have as = a(t) when ka(t) = s. Thus, for a  S, we
+
+get
+
+1s
+
+
+
+µ1
+
+-
+
+
+
+
+
+µ1
+
+-
+
+a 2
+
+.
+
+Therefore, for ~is as defined in the definition B.11, we have
+
+Pr(~1s  µ1 - a/2) = Pr(1s  µ1 - a/2).
+
+Hence for a  S, we have
+
+G1s(a/2) = G1s(a/2).
+
+For Algorithm 2, we need to revise Theorem 36.2 in Lattimore and Szepesv´ari [2020] as follows. Note that we start from t = N + 1 and s = 1 since the algorithm plays each arm once in the beginning.
+
+Lemma B.15. For > 0, the expected number of times Algorithm 2 plays arm a is bounded by
+
+27
+
+T
+
+T
+
+E [ka(t)] E I{a(t) = a, Ea(t)} + E I{a(t) = a, Ea(t)}
+
+t=1
+
+t=1
+
+T -1
+1 + E
+t=0
+
+1 G1k1(p1(t))
+
+-1
+
+T -1
+
+I{a(t) = 1} + E
+
+I{a(t) = a, Ea(t)}
+
+t=N +1
+
+(14)
+
+T -1
+2 + E
+s=0
+
+1 G1h(s)(
+
+)
+
+-1
+
+T -1
+
++E
+
+I{Gah(s)( ) > 1/T } .
+
+s=0
+
+(15)
+
+Proof. We follow the steps in Lattimore and Szepesv´ari [2020] and make appropriate modifications for our batch mode algorithm. As defined in Definition B.12, Ea(t) = {a(t)  µ1 - }. Thus,
+
+Pr(1(t)  µ1 - |FB(t)) = G1k1(B(t)) .
+
+Now we consider the following decomposition based on Ea(t) as follows,
+
+T
+
+T
+
+E [ka(t)] = E I{a(t) = a, Ea(t)} + E I{a(t) = a, Ea(t)} .
+
+(16)
+
+t=1
+
+t=1
+
+An upper bound for the first terms is as follows. Let a (t) = argmaxa=1 a(t). Then,
+
+Pr(a(t) = 1, Ea(t)|FB(t))  Pr(a (t) = a, Ea(t), 1(t)  µ1 - |FB(t))
+
+= Pr(1(t)  µ1 - |FB(t)) Pr(a (t) = a, Ea(t)|FB(t))
+
+
+
+1
+
+G1k1(B(t)) - G1k1(B(t))
+
+Pr(a(t)
+
+=
+
+a, Ea(t)|FB(t))
+
+.
+
+In the first equality, we use the fact that 1(t) is conditionally independent of a (t) and Ea(t), given FB(t). For the second inequality we use
+
+Pr(a(t) = a, Ea(t)|FB(t))  (1 - Pr(1(t) > µ1 - |FB(t))) Pr(a (t) = a, Ea(t)|FB(t)) .
+
+Therefore,
+
+Pr(a(t) = a, Ea(t)|FB(t)) 
+
+By substituting this into (16), we obtain
+
+1 G1k1(B(t))
+
+-
+
+1
+
+Pr(a(t) = 1|FB(t)) .
+
+E
+
+T
+I{a(t) = a, Ea(t)}
+t=1
+
+E
+
+T
+(
+
+1
+
+t=1 G1k1(B(t))
+
+-
+
+1)I{a(t)
+
+=
+
+1}|FB(t)
+
+=E
+
+T t=1
+
+(
+
+1 G1k1(B
+
+(t))
+
+-
+
+1)I(a(t)
+
+=
+
+1)
+
+E
+
+T -1
+(
+s=0
+
+1 G1h(s)
+
+-
+
+1)
+
+.
+
+28
+
+Now define  = {t  [T ] : 1 - Faka(B(t))(µ1 - ) > 1/T } .
+For the second expression in (16), we get
+
+T
+
+E I(a(t) = a, Ea(t)) E I(a(t) = a) + E I(Ea(t))
+
+t=1
+
+t
+
+t/
+
+T -1
+
+E
+
+I{1 - Fah(s)(µ1 - )} > 1/T
+
+s=0
+
++E
+
+1 T
+t/
+
+T -1
+
+E
+
+I(Gah(s) > 1/T ) + 1.
+
+s=0
+
+Now by setting = a/2 we can show that
+
+aE [ka(t)]  a + aE
+
+T -1
+I{a(t) = a, Ea(t)}
+N +1
+
++ aE
+
+T -1
+(
+t=1
+
+G1k1
+
+1 (B(t))(a
+
+/2)
+
+-
+
+1)I(a(t)
+
+=
+
+1)
+
+.
+
+(17)
+
+To bound the first term we note that
+
+Ea(t)  µ^a(B(t)) +
+
+ ka(B(t))
+
+log+
+
+T N ka(B(t))
+
+> µ1 - a/2
+
+.
+
+Define a as the sum of the event in the right hand side of the above equation, namely,
+
+T
+a = I µ^ah(s) +
+s=1
+
+/h(s)
+
+log+(T /h(s)N )
+
+>
+
+µ1
+
+-
+
+a 2
+
+.
+
+(18)
+
+Hence,
+
+T -1
+
+T
+
+aE
+
+I{a(t) = a, Ea(t)}  aE [a] = aE
+
+I µ^ah(s) +
+
+N +1
+
+s=1
+
+ h(s)
+
+log+
+
+T h(s)N
+
+> µ1 - a/2
+
+.
+
+Using Lemma B.13 and the fact that a = µ1 - µa we have
+
+T
+aE [a]  a Pr µ^ah(s) - µa +
+s=1
+
+ h(s)
+
+log+(T /h(s)N )
+
+>
+
+a 2
+
+(19)
+
+
+
+a
+
++
+
+12 a
+
++
+
+4 a
+
+log+
+
+(
+
+T 2a 4N
+
+)
+
++
+
+2
+
+log+
+
+(
+
+T 2a 4N
+
+)
+
+.
+
+(20)
+
+Now it implies that E [aa] = O( T /k + a). For bounding the second term of (17), a slight modification of Lemma B.14, provides
+
+29
+
+T -1
+aE
+t=1
+
+1 G1k1(B(t))(a/2)
+
+-
+
+1
+
+T -1
+I(a(t) = 1) = aE
+s=1
+
+1 G1h(s)(a/2)
+
+-
+
+1
+
+= O( T /N ) .
+
+B.3 MOTS 1-subgaussian asymptotic regret bound
+
+Theorem 5.2. Assume that the reward of each arm a  [N ] is 1-subgaussian with mean µa. For
+
+any fixed   (1/2, 1), the regret of B-MOTS can be bounded as R(T ) = O log(T )
+
+1 a:a>0 a
+
+.
+
+First we should prove the following lemma, which a simple variant of Jin et al. [2020, Lemma
+
+6] for the batch setting.
+
+Lemma B.16. For any T > 0, and > 0 that satisfies + T < a, it holds that
+
+E
+
+T -1
+I{Gah(s) > 1/T }
+s=1
+
+1+
+
+4
+2 T
+
++
+
+4 log T (a - -
+
+T )2
+
+.
+
+Proof. The proof closely follows Jin et al. [2020, Lemma 6] and adapted to the batch setting. As
+
+before µa + T  µ1 - , and by using the tail-bound for -subGaussian random variables we have
+
+Pr(µ^ah(s) > µa +
+
+T)
+
+
+
+exp(-h(s)
+
+2 T
+
+/2)
+
+
+
+exp(-s
+
+2 T
+
+/4).
+
+Furthermore
+
+
+exp
+s=1
+
+-
+
+s
+
+2 T
+
+4
+
+
+
+4/
+
+2 T
+
+.
+
+Define
+
+La = 4 log T /((a - - T )2).
+
+For s  La, let Xas be sampled from N (µ^ah(s), 1/(h(s))). Then if we have µ^ah(s)  µa + T , the Guassian tail bound implies
+
+Pr(Xas  µ1 -
+
+)
+
+
+
+1 2
+
+exp
+
+- h(s)(a - 2
+
+- T )2
+
+ 1/T .
+
+Now, denote the event {µ^ah(s)  µa + T } by Yas. By using the fact that Pr(A)  Pr(A|B) + 1 - Pr(B), we have
+
+T -1
+
+T -1
+
+E
+
+I{Gah(s)( ) > 1/T } = Pr({Gah(s)( ) > 1/T })
+
+s=1
+
+s=1
+
+T -1
+
+T -1
+
+ Pr({Gah(s)( ) > 1/T }|Yas) + (1 - Pr(Yas))
+
+s=1
+
+s=1
+
+T -1
+
+ La + (1 - Pr(Yas))
+
+s=1
+
+1+
+
+4
+2 T
+
++
+
+4 log T (a - -
+
+T )2
+
+.
+
+30
+
+Now, closely following the proof of Jin et al. [2020, Theorem 2], we define
+
+Z( ) = s  B : µ^1s +
+
+ s
+
+log+(
+
+T sN
+
+)
+
+
+
+µ1
+
+-
+
+.
+
+(21)
+
+For an arm a  [N ], we have
+
+E [ka(t)] E [ka(t)|Z( )] Pr(Z( )) + T (1 - Pr(Z( )))
+
+2 + E
+
+T -1
+(
+s=1
+
+1 G1h(s)(
+
+)
+
+- 1)|Z(
+
+)
+
++ T (1 - Pr(Z( ))) + E
+
+T -1
+I(Gah(s)( ) > 1/T )
+s=1
+
+2 + E
+
+T -1
+(
+s=1
+
+1 G1h(s)(
+
+))
+
++ T (1 - Pr(Z( ))) + E
+
+T -1
+I(Gah(s)( ) > 1/T )
+s=1
+
+.
+
+The second inequality is due to Lemma B.15 and the last inequality is due to the fact that given Z( ), we have G1h(s)( ) = G1h(s)( ). Also, note that if
+
+µ^ah(s) +
+
+ h(s)
+
+log+(T
+
+/h(s)N
+
+)
+
+
+
+µ1
+
+-
+
+,
+
+then we have Gah(s)( ) = Gah(s)( ), or otherwise we have Gah(s)( ) = 0  Gas( ).
+
+Now from Lemma B.7 and by setting
+
+=
+
+T
+
+=
+
+log
+
+1 log
+
+T
+
+,
+
+we
+
+have
+
+T (1 - Pr(Z( )))  15N (log log T )2.
+
+By using Lemma B.14 Then, by Lemma B.16
+
+E
+
+T -1
+(
+s=1
+
+1 G1h(s)(
+
+)
+
+- 1)
+
+ O((log log T )2) .
+
+E
+
+T -1
+I(Gah(s)( ) > 1/T )
+s=1
+
+
+
+1 + 4(log log T )2
+
++
+
+4 log T (a - 2/ log log T )2
+
+.
+
+The theorem will follow easily by combining the above equations, namely,
+
+lim
+T 
+
+E [aka(t)] log T
+
+=
+
+2 a
+
+.
+
+B.4 MOTS for Gaussian Rewards
+
+Theorem 5.3. Assume that the reward of each arm a is sampled from a Gaussian distribution N (µa, 1) and  > 2. Then, the regret of B-MOTS-J can be bounded as follows:
+
+
+
+k
+
+R(T ) = O( KT + a),
+
+a=2
+
+lim
+T 
+
+R(T ) log(T )
+
+=
+
+a:a>0
+
+2 a
+
+.
+
+31
+
+Recall that Fas denotes the CDF of J (µ^as, 1/s) for any s  1 and Gas = 1 - Fas(µ1 - ). We closely follow the recipe of [Jin et al., 2020, Theorem 4]. The proof of the minimax and asymptoticoptimal bounds are similar to the proof of Theorem 5.1 and 5.2 with a few differences. Note that in the proof of Theorem 5.1, we used the fact that  < 1 (used in the definition of the Gaussian distribution ~a). In Theorem 5.3, we do not have the parameter . Therefore instead of Lemma B.14 we prove the following, which is a batch variant of Jin et al. [2020, Lemma 9].
+
+Lemma B.17. There exists a universal constant c, s.t.,
+
+E
+
+T -1
+(
+s=1
+
+1 G1h(s)(
+
+)
+
+- 1)
+
+ c/ 2 .
+
+Proof. Similar to (Lemma B.14), the following two statements need to be proven: (i) there exists a universal constant c s.t.
+
+L
+E
+s=1
+
+1 G1h(s)(
+
+)
+
+-1
+
+
+
+c
+2
+
+,
+
+s
+
+.
+
+(ii) for L = 64/ 2
+
+E
+
+T
+(
+s=L
+
+1 G1h(s)(
+
+)
+
+- 1)
+
+
+
+4 e2
+
+(1
+
++
+
+16/
+
+2)
+
+.
+
+The proof of statement (ii) is similar to the one in Lemma B.8. Therefore, We focus on the first statement here, which closely follows the proof of Jin et al. [2020, Lemma 9].
+Let µ^1h(s) = µ1 +x. Let Z be a sample from J (µ^1h(s), 1/h(s)). For x < - , applying Lemma B.8 with z = - h(s)( + x) > 0 we have
+
+G1h(s)( ) = Pr(Z > µ1 -
+
+)
+
+=
+
+1 2
+
+exp
+
+h(s)( + x)2 -
+2
+
+.
+
+(22)
+
+Note that x  N (0, 1/h(s)). Let f (x) be the PDF of N (0, 1/h(s)).
+
+ExN (0,1/h(s))
+
+1 G1h(s)(
+
+)
+
+-1
+
+-
+= f (x)
+
+
+1 G1h(s)(
+
+)
+
+-1
+
+-
+
+dx +
+
+f (x)
+
+-
+
+1 G1h(s)(
+
+)
+
+-1
+
+dx
+
+-
+ f (x)
+-
+
+2 exp
+
+h(s)( + x)2 2
+
+-1
+
+
+dx + f (x)
+-
+
+1 G1h(s)
+
+(
+
+)-1
+
+dx
+
+-
+ f (x)
+-
+
+2 exp
+
+h(s)( + x)2 2
+
+-1
+
+
+dx + f (x)dx
+-
+
+ 2
+
+e-s 
+
+2/4
+
++
+
+1
+
+s
+
+The first inequality is because of eq. (22). The second inequality is because G1h(s)( ) = Pr(Z > µ1 - )  1/2, since µ^1h(s) = µ1 + x  µ1 - . And the last inequality is due to the definition of h(s).
+
+32
+
+Also for s  L, we have e-s 2/4 = O(1), thus for L =
+
+64
+2
+
+,
+
+L
+E
+s=1
+
+1 G1h(s)(
+
+)
+
+-1
+
+=O
+
+L1 
+s=1 s
+
+= O(1/ 2) .
+
+From the above lemma we have
+
+T -1
+aE
+s=1
+
+1 G1h(s)
+
+(a/2)
+
+-
+
+1
+
+ O( T /K + a).
+
+The rest of the proof for minimax optimality is similar to the proof of Theorem 5.1. For the asymptotic regret bound, we first state the following lemma, which the batch mode
+version of
+
+Lemma B.18. for any T > 0, > 0 that satisfies + T < a, we have
+
+E
+
+T -1
+I{Gih(s) > 1/T }
+s=1
+
+1+
+
+4
+2 T
+
++
+
+4 log T (a - -
+
+T )2 .
+
+Proof. The proof is similar to the proof of Lemma B.16.
+
+The proof asymptotic regret bound is similar to the proof of Theorem 5.2 where we use Lemmas B.17, B.8, and B.18.
+
+C Batch Thompson Sampling for Contextual Bandits
+First, we reintroduce a number of notations from Agrawal and Goyal [2013b] and adapt them to the batch setting.
+C.1 Notations and Definitions
+In time step t of the B-TS-C algorithm, we generate a sample µ~(t) from N (µ^(B(t)), v2B(B(t))-1) and play the arm a with maximum a(t) = ba(t)T µ~(t). Definition C.1. Let us define the standard deviation of empirical mean in the batch setting as
+sa(B(t)) := ba(t)T B(B(t))-1ba(t).
+Definition C.2. Let us define the history of the process up to time t by
+Ht = {a( ), ra()( ), ba( )|a  [N ],   [t]}, where a( ) indicates the arm played at time  , ba( ) indicates the context vector associated with arm a at time  , and ra() indicates the reward at time  .
+
+33
+
+Definition C.3. Define the filtration FB(t) as the union of history until time B(t), and the context vectors up to time t, i.e.,
+
+FB(t) = {HB(t), ba(t )|a  [N ], t  (B(t), t]}.
+Definition C.4. We assume that a,t = ra(t) - ba(t), µ , conditioned on FB(t), is -subGaussian for some   0.
+
+Definition C.5. Define
+
+l(t) = 
+
+d
+
+ln
+
+t3 
+
++
+
+1,
+
+v(t) = 
+
+9d
+
+ln
+
+t 
+
+,
+
+p
+
+=
+
+1 4e 
+
+,
+
+g(t) = min{ 4d ln(t),
+
+4 log(tN )}v(t) + l(t).
+
+Definition C.6. Define Eµ(t) as the event that for any arm a
+
+| ba(t), µ^(B(t)) - ba(t) µ |  l(t)sa(B(t)) .
+
+Definition C.7. Define E(t) as the event
+
+{a : |a(t) - ba(t), µ^(B(t)) |  (g(t) - l(t))sa(B(t))} .
+Definition C.8. Define the difference between the mean reward of the optimal arm at time t, denoted by a(t), and arm a as follows
+
+a(t) = ba(t)(t), µ - ba(t), µ .
+
+Definition C.9. We say that an arm is saturated at time t if a(t) > g(t)sa(B(t)). We also denote by C(t) the set of saturated arms at time t. An arm a is unsaturated at time t of a / C(t).
+
+Lemma C.10 (Abbasi-Yadkori et al. [2011]). Let Ft be a filteration. Consider two random pro-
+
+cesses mt  Rd and µt  R where mt is Ft-1-measurebale and µt is a martingale difference process
+
+and Ft-measurebale. Define, t =
+
+t 
+
+=1
+
+m
+
+µt
+
+and
+
+Mt
+
+=
+
+Id
+
++
+
+t 
+
+=1
+
+m
+
+m
+
+.
+
+Assume
+
+that
+
+given
+
+Ft ,
+
+µt is -subGaussian. Then, with probability 1 - ,
+
+t Mt-1  
+
+d
+
+ln
+
+t
+
++ 
+
+1.
+
+C.2 Analysis
+Theorem 6.1. The B-TS-C algorithm (Algorithm 3) achieves the total regret of 
+R(T ) = O d3/2 T (ln(T ) + ln(T ) ln(1/))
+
+with probability 1 - . Moreover, B-TS-C carries out O(N log T ) batch queries.
+
+34
+
+The proof closely follows [Agrawal and Goyal, 2013b, Theorem 1]. We first start with the following lemma, that is a batch version of [Agrawal and Goyal, 2013b, Lemma 1].
+Lemma C.11. For all t, and 0 <  < 1, we have Pr(Eµ(B(t)))  1 - /t2. Moreover, For all filtration FB(t), we have Pr(E(t)|FB(t))  1 - 1/t2.
+Proof. The proof closely follows Agrawal and Goyal [2013b, Lemma 1] where we adapt it to the batch setting. We only prove the first part as the second part very similar. We first invoke Lemma C.10 as follows. Set mt = ba(t)(t), t = ra(t)(t) - ba(t)(t)T µ, and
+Ft = {a( + 1), m+1 :   t}  { :   B(t)}.
+Note that t is conditionally -subgaussian, and is a martingale difference process. Therefore,
+
+E t|FB(t) = E ra(t)|ba(t)(t), a(t) - ba(t)(t), µ = 0 .
+
+Thus, we have
+
+t
+Mt = Id + m m
+ =1
+
+and
+t
+t = m  .
+ =1
+
+Similar to Agrawal and Goyal [2013b, Lemma 1], we have B(t) = Mt-1, but we need to change µ^(t) - µ = MB-(1t)(B(t) - µ). For any vector y  R and matrix A  Rd×d, let us define the norm
+y A := yT Ay. Hence, for all a,
+
+| ba(t), µ^(t) - ba(t), µ | = ba(t) B(t)-1 × B(t) - µ . MB-(1t) Since B(t)  t - 1, Lemma C.10 implies that with probability at least 1 -  ,
+
+B(t) MB-(1t)   d ln(t/ ).
+
+Thus,
+
+B(t) - µ MB-(1t)   d ln(t/ ) + µ MB-(1t)   d ln(t/ ) + 1.
+
+Now by setting 
+
+=
+
+ t2
+
+we have with probability 1 - /t2, and for all arms a,
+
+| ba(t), µ^(B(t)) - ba(t), µ |  l(t)sa(B(t)) .
+
+Now, we lower bound the probability that a(t)(t) becomes larger than ba(t)(t), µ . Lemma C.12. For any filtration FB(t), if Eµ(t) holds true, we have
+Pr a(t)(t) > ba(t)(t), µ |FB(t)  p.
+35
+
+Proof. The proof easily follows from Agrawal and Goyal [2013b, Lemma 2]. Suppose Eµ(t) holds true, then
+| ba(t)(t), µ^(t) - ba(t)(t), µ |  (t)sa(t)(B(t)) .
+
+The Gaussian random variable a(t)(t) has mean ba(t)(t), µ^(t) and standard deviation vtsa(t)(B(t)).
+
+Therefore, we have
+
+Pr(a(t)(t) 
+
+ba(t)(t), µ
+
+|FB(t))
+
+
+
+1 
+
+e-Zt2
+
+4
+
+.
+
+where |Zt| =
+
+ba(t)(t),µ^(t) - ba(t)(t),µ v(t)sa(t)(B(t))
+
+ 1.
+
+The following lemma bounds the probability that an arm played at time t is not saturated.
+
+Lemma C.13. Given FB(t), if Eµ(t) is true,
+
+Pr(a(t) / C(t)|FB(t))  p -
+
+1 t2
+
+.
+
+Proof. The proof is a slight modification of Agrawal and Goyal [2013b, Lemma 3] for the batch
+setting. If j  C(t) we have a(t)(t) > j(t), then one of the unsaturated actions much be played which leads us to
+
+Pr(a(t) / C(t)|FB(t))  Pr(a(t)(t) > j(t), j  C(t)|FB(t)). Note that for all saturated arms j  C(t), we have
+
+j(t) > g(t)sj(B(t)). In the case that Eµ(t) and E(t) are both true, we have
+
+j(t)  bj(t), µ + g(t)sj(B(t)).
+Hence, conditioned on FB(t) if Eµ(t) is true, we have either the event E(t) is false or for all j  C(t),
+j(t)  bj(t), µ + g(t)sj(B(t))  ba(t)(t), µ , Thus, for any FB(t) that Eµ(t) holds,
+
+Pr(a(t)(t) > j(t), j  C(t)|FB(t))  Pr(a(t)(t) > ba(t)(t), µ |FB(t)) - Pr(E(t)|FB(t))
+
+p -
+
+1 t2
+
+.
+
+The above inequalities are due to Lemmas C.11 and C.12.
+
+Lemma C.14. For any filtration FB(t), assuming Eµ(t) holds true,
+
+E a(t)(t)|FB(t)
+
+
+
+3g(t) pE
+
+sa(t)(B(t))|FB(t)
+
++
+
+2g(t) pt2
+
+.
+
+36
+
+Proof. The proof follows closely Agrawal and Goyal [2013b, Lemma 4] and adapts it to the batch setting. First define
+a¯(t) = arg min sa(B(t)),
+a/ C (t)
+Since FB(t) defines B(B(t)) and also ba(t) are independent of unobserved rewards (before making a batch query) thus given FB(t) and context vectors ba(t), the value of a¯(t) is determined. Now by applying Lemma C.13, for any FB(t) and by assuming that Eµ() is true, we have
+
+E sa(t)(B(t))|FB(t)  E sa(t)(B(t))|FB(t), a(t) / C(t) · Pr(a(t) / C(t)|FT -1)
+
+
+
+sa¯(t)(B(t))(p
+
+-
+
+1 t2
+
+).
+
+Again if both Eµ(t) and E(t) are true, then for all a we have,
+
+a(t)  ba(t), µ + g(t)sa(B(t)).
+
+Moreover, we know that for all a, a(t)(t)  a(t), thus
+
+Consequently,
+
+a(t)(t) = a¯(t)(t) + ( ba¯(t)(t), µ - ba(t)(t), µ )  2g(t)sa¯(t)(B(t)) + g(t)sa(t)(B(t)).
+
+E
+
+a(t)|FB(t)
+
+2g(t)
+
+
+
+p
+
+-
+
+4 t2
+
+E
+
+sa(t)(B(t))|FB(t)
+
++ g(t)E
+
+sa(t)(B(t))|FB(t)
+
++
+
+1 t2
+
+
+
+3 p
+
+g(t)E
+
+sa(t)(B(t))|FB(t)
+
++
+
+2g(t) pt2
+
+.
+
+The first inequality is because a  1 for all a. The second inequality uses Lemma C.11 to
+
+get Pr(E(t)) 
+
+1 t2
+
+.
+
+Furthermore, in the last inequality we use the fact that 0  sa(t)(B(t)) 
+
+|ba(t)(t)|  1.
+
+Similar to Agrawal and Goyal [2017] we have the following definitions.
+
+Definition C.15.
+
+R (t) := R(t) × I(Eµ(t)).
+
+Definition C.16. Define
+
+Xt
+
+=
+
+R
+
+(t)
+
+-
+
+3g(t) p
+
+sa(t)
+
+(B(t))
+
+-
+
+2g(t)2 pt2
+
+t
+
+Yt = Xw.
+
+w=1
+
+Becasue of the way we defined Yt, namely, the filteration FB(t), we can easily show the following lemma.
+
+Lemma C.17. The sequence {Yt}Tt=0 is a super martingale with respect to FB(t).
+
+37
+
+Proof. The proof follows closely Agrawal and Goyal [2013b, Lemma 5] and adapts it to filtration FB(t) induced by the batch algorithm. Basically, we need to show that for all t  0,
+
+E Yt - Yt-1|FB(t)  0,
+
+In other words
+
+E
+
+R (t)|FB(t)
+
+3g(t)  pE
+
+sa(B(t))(t)|FB(t)
+
++
+
+2g(t) pt2
+
+,
+
+First, note that FB(t) determines the event Eµ(t). Assuming that FB(t) is such that Eµ(t) is not true, then R (t) = 0 ] and the above inequality is trivial. Otherwise, if for FB(t), the event Eµ(t) holds, Lemma C.14 implies the result.
+
+The following Lemma is a batch variant of Chu et al. [2011, Lemma 3].
+
+Lemma C.18.
+
+T
+
+
+
+sa(t)(B(t))  5 dT ln T .
+
+(23)
+
+t=1
+
+Proof. Upper bounding the expression t sa(t)(B(t)) follows by the same steps in Chu et al. [2011, Lemma 3] for the matrix B(B(t)) (we loose a constant factor in the process). The reason is that the
+term sB(t),a(t) can be written in terms of eigenvalues of B(B(t)) matrices. More precisely, from Lemma 2 in Chu et al. (2011) we can arrange eigenvalues of B(t) to obtain the following bound
+
+sa(t)(B(t))2  10
+
+j
+
+t+1,j - t,j
+
+t,j
+
+.
+
+Note that the above upper bound is independent of our batch algorithm. Then for  = |T +1| (in Chu et al. [2011, Lemma 3]) we have
+
+sa(t)(B(t)) =
+
+tT +1
+
+tT +1
+
+10
+
+j
+
+(
+
+t+1,j t,j
+
+- 1),
+
+for each matrix B(B(t)) in T +1. The function f can be defined similar to Chu et al. [2011, Lemma 3] for T +1. As in Lemma 3, the ratio of eigenvalues remain greater than or equal 1. The following sum product can be bounded by  + d since the norm of each xta(t) is bounded by 1. For t = B(t) between T /2 and T + 1,
+
+j
+
+t
+
+t+1,j  t,j
+
+j
+
+t ,j =
+
+t
+
+||xt,a(t)||2 + d   + d.
+
+So, we can similarly bound
+ sa(t)(B(t))   10d ( + 1)1/ - 1.
+tT +1
+
+Thus, by using Chu et al. [2011, Lemma 9] for  we can obtain eq. (23).
+
+38
+
+Proof of Theorem 6.1. We rely on the proof technique by Agrawal and Goyal [2013b, Theorem 1]. First, note that Xt is bounded as
+
+|Xt|
+
+
+
+1
+
++
+
+3 p
+
+g(t)
+
++
+
+2 pt2
+
+g(t)
+
+
+
+6 p
+
+g(t).
+
+Also g(t)  g(T ). Thus, by applying Azuma-Hoeffding inequality for Martingale sequences, we have
+
+Pr
+
+T
+
+R
+
+(t)
+
+
+
+3g(T ) p
+
+T
+
+sa(t)(B(t))
+
++
+
+2g(T p
+
+)
+
+T
+
+1 t2
+
++
+
+6g(T ) p
+
+2T ln(2/)
+
+
+
+1
+
+-
+
+ 2
+
+.
+
+t=1
+
+t=1
+
+t=1
+
+Therefore,
+
+by
+
+invoking
+
+Lemma
+
+C.18
+
+we
+
+know
+
+that
+
+with
+
+probability
+
+1-
+
+ 2
+
+we
+
+have
+
+T
+
+
+
+
+
+R (t) = O d T × (min{ d, log N }) × (ln(T ) + ln(T ) ln(1/)) .
+
+t=1
+
+Furthermore, Lemma C.11 implies that with probability of at least 1 - /2, the event Eµ(t) holds for all t. Thus, with probability of at least 1 - ,
+
+
+
+
+
+R(T ) = O d T × (min{ d, log N }) × (ln(T ) + ln(T ) ln(1/)) .
+
+39
+
+

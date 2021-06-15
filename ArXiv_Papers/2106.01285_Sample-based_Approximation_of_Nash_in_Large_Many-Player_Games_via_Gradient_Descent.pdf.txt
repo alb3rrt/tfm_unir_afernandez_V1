@@ -1,0 +1,3178 @@
+arXiv:2106.01285v1 [cs.GT] 2 Jun 2021
+
+Sample-based Approximation of Nash in Large Many-Player Games via Gradient Descent
+Ian Gemp, Rahul Savani, Marc Lanctot, Yoram Bachrach, Thomas Anthony, Richard Everett, Andrea Tacchetti, Tom Eccles, János Kramár
+DeepMind
+Abstract
+Nash equilibrium is a central concept in game theory. Several Nash solvers exist, yet none scale to normal-form games with many actions and many players, especially those with payoff tensors too big to be stored in memory. In this work, we propose an approach that iteratively improves an approximation to a Nash equilibrium through joint play. It accomplishes this by tracing a previously established homotopy which connects instances of the game defined with decaying levels of entropy regularization. To encourage iterates to remain near this path, we efficiently minimize average deviation incentive via stochastic gradient descent, intelligently sampling entries in the payoff tensor as needed. This process can also be viewed as constructing and reacting to a polymatrix approximation to the game. In these ways, our proposed approach, average deviation incentive descent with adaptive sampling (ADIDAS), is most similar to three classical approaches, namely homotopy-type, Lyapunov, and iterative polymatrix solvers. We demonstrate through experiments the ability of this approach to approximate a Nash equilibrium in normal-form games with as many as seven players and twenty one actions (over one trillion outcomes) that are orders of magnitude larger than those possible with prior algorithms.
+1 Introduction
+Core concepts from game theory underpin many advances in multi-agent systems research. Among these, Nash equilibrium is particularly prevalent. Despite the difficulty of computing a Nash equilibrium (Daskalakis et al., 2009; Chen et al., 2009), a plethora of algorithms (Lemke & Howson, 1964; Sandholm et al., 2005; Porter et al., 2008; Govindan & Wilson, 2003; Blum et al., 2006) and suitable benchmarks (Nudelman et al., 2004) have been developed, however, none address large normal-form games with many actions and many players, especially those too big to be stored in memory. In this work, we develop an algorithm for approximating a Nash equilibrium of a normal-form game with so many actions and players that only a small subset of the possible outcomes in the game can be accessed at a time. We refer the reader to McKelvey & McLennan (1996) for a review of approaches for normal-form games. Several algorithms exactly compute a Nash equilibrium for small normal-form games and others efficiently approximate Nash equilibria for special game classes, however, efficient algorithms for approximating Nash in large normal-form games with many players, e.g. 7, and many actions, e.g., 21, is lacking. Computational efficiency is of paramount importance for large games because a general normal-form game with n players and m actions contains nmn payoffs; simply enumerating all payoffs can be intractable and renders classical approaches ineligible. A common approach is to return the profile found by efficient no-regret algorithms that sample
+corresponding author: imgemp@google.com
+Preprint. Under review.
+
+payoffs as needed (Blum & Mansour, 2007) although Flokas et al. (2020) recently proved that many from this family do not converge to mixed Nash equilibria in all games, 2-player games included.
+While significant progress has been made for computing Nash in 2-player normal-form games which can be represented as a linear complementarity problem, the many-player setting induces a nonlinear complementarity problem, which is "often hopelessly impractical to solve exactly" (Shoham & Leyton-Brown (2009), p. 105).2 The combination of high dimensionality (mn vs m2 distinct outcomes) and nonlinearity (utilities are degree-n polynomials in the strategies vs degree-2) makes many-player games much more complex.
+This more general problem arises in cutting-edge multi-agent research when learning (Gray et al., 2020) and evaluating (Anthony et al., 2020) agents in Diplomacy, a complex 7-player board game. Gray et al. (2020) used no-regret learning to approximate a Nash of subsampled games, however, this approach is brittle as we show later in Figure 4. In Anthony et al. (2020), five Diplomacy bots were ranked according to their mass under an approximate Nash equilibrium. We extend that work to encourage convergence to a particular Nash and introduce sampling along with several technical contributions to scale evaluation to 21 Diplomacy bots, a >1000-fold increase in meta-game size.
+Equilibrium computation has been an important component of AI in multi-agent systems (Shoham & Leyton-Brown, 2009). It has been (and remains) a critical component of super-human AI in poker (Bowling et al., 2015; Moravcík et al., 2017; Brown & Sandholm, 2017; Brown et al., 2020). Nash computation also arises when strategically summarizing a larger domain by learning a lower dimensionality empirical game (Wellman, 2006); such an approach was used in the AlphaStar League, leading to an agent that beat humans in StarCraft (Vinyals et al., 2019a,b). Ultimately, this required solving for the Nash of a 2-player, 888-action game, which can take several seconds using state-ofthe-art solvers on modern hardware. In contrast, solving an empirical game of Diplomacy, e.g., a 7-player 888-action game, would naively take longer than the current age of the universe. This is well beyond the size of any game we inspect here, however, we approximate the Nash of games several orders of magnitude larger than previously possible, thus taking a step towards this ambitious goal.
+Our Contribution: We introduce stochastic optimization into a classical homotopy approach resulting in an algorithm that avoids the need to work with the full payoff tensor all at once and is, to our knowledge, the first algoithm capable of practically approximating Nash in large (trillions of outcomes) many-player, many-action normal-form games. We demonstrate our algorithm on 2, 3, 4, 5, 6, 7 and 10 player games (5 and 10 in Appx. H; others in §5). We also perform various ablation studies of our algorithm (Appx. E), compare against several baselines including solvers from the popular Gambit library (more in Appx. G), and examine a range of domains (more in Appx. H).
+The paper is organized as follows. After formulating the Nash equilibrium problem for a general n-player normal-form game, we review previous work. We discuss how we combine the insights of classical algorithms with ideas from stochastic optimization to develop our final algorithm, average deviation incentive descent with adaptive sampling, or ADIDAS. Finally, we compare our proposed algorithm against previous approaches on large games of interest from the literature: games such as Colonel Blotto (Arad & Rubinstein, 2012), classical Nash benchmarks from the GAMUT library (Nudelman et al., 2004), and games relevant to recent success on the 7-player game Diplomacy (Anthony et al., 2020; Gray et al., 2020).
+2 Preliminaries
+In a finite n-player game in normal form, each player i  {1, . . . , n} is given a strategy set Ai = {ai1, . . . , aimi } consisting of mi pure strategies. The pure strategies can be naturally indexed by non-negative integers, so we redefine Ai = {0, . . . , mi - 1} as an abuse of notation for convenience. Each player i is also given a payoff or utility function, ui : A  R where A = i Ai. In games where the cardinality of each player's strategy set is the same, we drop the subscript on mi. Player i may play a mixed strategy by sampling from a distribution over their pure strategies. Let player i's mixed strategy be represented by a vector xi  mi-1 where mi-1 is the (mi - 1)-dimensional probability simplex embedded in Rmi . Each function ui is then extended to this domain so that
+2While any n-player game can, in theory, be efficiently solved for approximate equilibria by reducing it to a two-player game, in practice this approach is not feasible for solving large games due to the blowups involved in the reductions. Details in Appx. B.
+2
+
+ui(x) = aA ui(a) j xjaj where x = (x1, . . . , xn) and aj  Aj denotes player j's component of the joint action a  A. For convenience, let x-i denote all components of x belonging to players other than player i.
+We say x  i mi-1 is a Nash equilibrium iff, for all i  {1, . . . , n}, ui(zi, x-i)  ui(x) for all zi  mi-1, i.e., no player has any incentive to unilaterally deviate from x. Nash is most commonly relaxed with -Nash, an additive approximation: ui(zi, x-i)  ui(x) + for all zi  mi-1.
+As an abuse of notation, let the atomic action ai also denote the mi-dimensional "one-hot" vector with all zeros aside from a 1 at index ai; its use should be clear from the context. And for convenience, denote by Hiil = Ex-il [ui(ai, al, x-il)] the Jacobian of player i's utility with respect to xi and xl; x-il denotes all strategies belonging to players other than i and l and ui(ai, al, x-il) separates out l's strategy xl from the rest of the players x-i. We also introduce ixi as player i's utility gradient. Note player i's utility can now be written succinctly as ui(xi, x-i) = xi ixi = xi Hiilxl for any l.
+In a polymatrix game, interactions between players are limited to local, pairwise games, each of which is represented by matrices Hiij and Hijj. This reduces the exponential nmn payoffs required to represent a general normal form game to a quadratic n(n - 1)m2, an efficiency we leverage later.
+
+2.1 Related work
+
+Several approaches exist for computing Nash equilibria of n-player normal form games3. Simpli-
+
+cial Subdivision (SD) (van der Laan et al., 1987) searches for an equilibrium over discretized
+
+simplices; accuracy depends on the grid size which scales exponentially with the number of
+
+player actions. Govindan & Wilson (2003) propose a homotopy method (GW) that begins with
+
+the unique Nash distribution of a regularized game and anneals this regularization while up-
+
+dating the Nash to that of the transformed game; GW is considered an extension of the clas-
+
+sic Lemke-Howson algorithm (1964) to 3+ player games (Shoham & Leyton-Brown, 2009).
+
+Another homotopy approach evolves
+
+the Nash distribution using a predictor-
+
+corrector method to integrate a differential
+
+equation (Turocy, 2005). Similarly, Perolat et al. (2020) propose an adaptive regularization scheme that repeatedly solves for the
+
+ 
+0
+
+Restricted Game Classes: Polymatrix [D17], Zero-Sum (LP), Monotone VIs & LCPs
+[FP07]
+
+equilibrium of a transformed game. Simple search methods (Porter et al., 2008) that
+
+Homotopy Methods: Lemke-Howson [LH64] Govinda-Wilson [GW03/4]
+& Others [T05, P20]
+
+Nonlinear LCPs: Simplicial Subdivision [V87]
+
+-1/-1 -3/0 0/-3 -2/-2
+P2
+
+approach Nash computation as a constraint satisfaction problem appear to scale better than GW and SD as measured on GAMUT benchmarks (Nudelman et al., 2004). Lyapunov approaches minimize non-convex energy functions with the property that zero
+
+CSPs: Porter-Nudelman-Shoham [P08]
+
+Assign X1 
+...
+
+{ }
+
+...
+X
+
+Assign X2
+
+...
+
+X
+
+X
+
+ADIDAS (this work)
+Optimization Methods: Descent [SLB08] MIP [S05]
+
+Example P1 Polymatrix
+Game
+
+-1/-1 -3/0 0/-3 -2/-2
+
+-1/-1 -3/0
+
+P3
+
+0/-3 -2/-2
+
+energy implies Nash (Shoham & Leyton- ... ... ... ...
+
+X
+
+Brown, 2009), however these approaches
+
+
+
+may suffer from convergence to local minima with positive energy. In some settings,
+
+Figure 1: Algorithm Comparison and Overview.
+
+such as polymatrix games with payoffs in
+
+[0,
+
+1],
+
+gradient
+
+descent
+
+on
+
+appropriate
+
+energy
+
+functions4
+
+guarantees
+
+a
+
+(
+
+1 2
+
++)-Nash
+
+in
+
+time
+
+polynomial
+
+in
+
+1 
+
+(Deligkas
+
+et
+
+al.,
+
+2017)
+
+and
+
+performs
+
+well
+
+in
+
+practice
+
+(Deligkas
+
+et
+
+al.,
+
+2016).
+
+Teaser Our proposed algorithm consists of two key conceptual schemes. One lies at the crux of homotopy methods (see Figures 1 and 2). We initialize the Nash approximation to the joint uniform distribution, the unique Nash of a game with infinite-temperature entropy regularization. The temperature is then annealed over time. To recover the Nash at each temperature, we minimize an appropriately adapted energy function via stochastic gradient descent. This minimization approach
+
+3Note that Double-Oracle (McMahan et al., 2003) and PSRO (Lanctot et al., 2017) can be extended to n-player games, but require an n-player normal form meta-solver. This work provides an approximate meta-solver.
+4Equation (1) but with max instead of over player regrets. Note that for symmetric games with symmetric equilibria, these are equivalent up to a multiplicative factor n.
+
+3
+
+can be seen as simultaneously learning a suitable polymatrix decomposition of the game similarly to Govindan & Wilson (2004) but from batches of stochastic play, i.e., we compute Monte Carlo estimates of the payoffs in the bimatrix game between every pair of players by observing the outcomes of the players' sampled joint actions rather than computing payoffs as exact expectations.
+
+3 Deviation Incentive & Warm-Up
+
+We propose minimizing the energy function in equation (1) below, average deviation incentive (ADI),
+
+to approximate a Nash equilibrium of a large, entropy-regularized normal form game. This loss
+
+measures, on average, how much a single agent can exploit the rest of the population by deviating from
+
+a joint strategy x. For sake of exposition, we drop the normalizing constant from the denominator
+
+(number of players n), and consider the sum instead of the average. This quantity functions as a
+
+loss that can be minimized over X = i mi-1 to find a Nash distribution. Note that when ADI is zero, x is a Nash. Also, if k is replaced by maxk, this loss measures the of an -Nash, and therefore, equation (1) is an upper bound on this . Lastly, note that, in general, this loss function is
+
+non-convex and so convergence to local, suboptimal minima is theoretically possible if minimizing
+
+via first order methods, where uk is player k's
+
+e.g., gradient descent. Let BRk = BR(x-k) = arg utility regularized by entropy with temperature 
+
+maxzkmk-1 uk(zk and formally define
+
+,
+
+x-k
+
+)
+
+Ladi(x) = uk(BRk, x-k) - uk(xk, x-k).
+
+(1)
+
+k
+
+If  = 0, we drop the superscript and use Ladi. The Nash of the game regularized with Shannon entropy is called a quantal response equilibrium, QRE( ).
+Average deviation incentive has been interpreted as distance from Nash in prior work, where it is referred to as NashConv (Lanctot et al., 2017). We prefer average deviation incentive because it more precisely describes the function and allows room for exploring alternative losses in future work. The objective can be decomposed into terms that depend on xk (second term) and x-k (both terms). Minimizing the second term w.r.t. xk seeks strategies with high utility, while minimizing both terms w.r.t. x-k seeks strategies that cannot be exploited by player k. In reducing Ladi, each player k seeks a strategy that not only increases their payoff but also removes others' temptation to exploit them.
+A related algorithm is Exploitability Descent (ED) (Lockhart et al., 2019). Rather than minimizing Ladi, each player independently maximizes their utility assuming the other players play their best responses. In the two-player setting, ED is equivalent to extragradient (Korpelevich, 1976) (see Appx. J.2). However, ED is only guaranteed to converge to Nash in two-player, zero-sum games. We include a comparison against ED as well as Fictitious-play, another popular multi-agent algorithm, in Appx. G.1. We also relate Ladi to Consensus optimization (Mescheder et al., 2017) in Appx. J.1.
+
+3.1 Warm-Up
+
+McKelvey & Palfrey (1995) proved the existence of a continuum of QREs starting at the uniform
+
+distribution (infinite temperature) and ending at what they called the limiting logit equilibrium.
+
+Furthermore, they showed this path is unique for almost all games, partially circumventing the
+
+equilibrium selection problem. We follow this path by alternating between annealing the temperature
+
+and re-solving for the Nash at that temperature by minimizing Ladi. We present a basic version of
+
+our approach that converges to the limiting logit equilibrium assuming access to exact gradients in
+
+Algorithm
+
+1
+
+(proof
+
+in
+
+Appx.
+
+C).
+
+We
+
+substitute
+
+
+
+=
+
+1 
+
+and
+
+initialize
+
+
+
+=
+
+0
+
+in
+
+order
+
+to
+
+begin
+
+at
+
+infinite
+
+temperature. The proof of this simple warm-up algorithm relies heavily on the detailed examination
+
+of the continuum of QREs proposed in McKelvey & Palfrey (1995) and further analyzed in Turocy
+
+(2005). Theorem 1 presented below is essentially a succinct repetition of one of their known results
+
+(assumptions 1 and 2 below detailed in Appx. C). In subsequent sections, we relax the exact gradient
+
+assumption and assume gradients are estimated from stochasic play (i.e., each agent samples an
+
+action from their side of the current approximation to the Nash).
+
+4
+
+Algorithm 1 Warm-up: Anneal & Descend
+
+1: Given: Total anneal steps T, total optimizer iterations T , and anneal step size .
+
+2:  = 0
+
+3:
+
+x
+
+
+
+{
+
+1 mi
+
+1
+
+
+
+i}
+
+4: for t = 1 : T do
+
+5:    + 
+
+6: x  OPT(xinit = x, iters = T )
+
+7: end for
+
+8: return x
+
+Theorem 1. Assume the QREs along the homotopy path have bounded sensitivity to  given by a
+parameter  (Assumption 1), and basins of attraction with radii lower bounded by r (Assumption 2). Let the step size   (r - ) with tolerance . And let T  be the supremum over all T such that
+Assumption 2 is satisfied for any inverse temperature   . Then, assuming gradient descent for OPT, Algorithm 1 converges to the limiting logit equilibrium x= = x=0 in the limit as T  .
+
+3.2 Evaluating Ladi with Joint Play
+In the warm up, we assumed we could compute exact gradients which required access to the entire payoff tensor. However, we want to solve very large games where enumerating the payoff tensor is prohibitively expensive. Therefore, we are particularly interested in minimizing ADI when only given access to samples of joint play, a  i xi. The best response operator, BR, is nonlinear and hence can introduce bias if applied to random samples. For example, consider the game given in Table 1 and assume x2 = [0.5, 0.5] .
+
+u1 a21 a22
+
+u2 a21 a22
+
+a11 0 0
+
+a11 0 0
+
+a12 1 -2
+
+a12 0 0
+
+a13 -2 1
+
+a13 0 0
+
+Table 1: A 2-player game with biased stochastic BR's.
+
+E[BR0] = [0.00, 0.50, 0.50] (2) E[BR=1]  [0.26, 0.37, 0.37] (3) E[BR=10]  [0.42, 0.29, 0.29] (4)
+
+Consider computing player 1's best response to a single action sampled from player 2's strategy x2. Either a21 or a22 will be sampled with equal probability, which results in a best response of either a12 or a13 respectively. However, the true expected utilities for each of player 1's actions given player 2's strategy are [0, -0.5, -0.5] for which the best response is the first index, a11. The best response operator completely filters out information on the utility of the true best response a11. Intuitively, a soft best response operator that allows some utility information for each of the actions to pass through
+could alleviate the problem (see equations (2)-(4)). By adding an entropy regularizer to the utilities,
+ H(xi), we induce a soft-BR. Therefore, the homotopy approach has the added benefit of partially alleviating gradient bias for moderate temperatures.
+
+4 ADIDAS
+In the previous section, we laid out the conceptual approach we take and identified bias as a potential issue to scaling up computation with Monte Carlo approximation. Here, we inspect the details of our approach, introduce further modifications to reduce the issue of bias, and present our resulting algorithm ADIDAS. Finally, we discuss the advantages of our approach for scaling to large games.
+5
+
+4.1 Deviation Incentive Gradient
+
+Regularizing the utilities with weighted Shannon entropy, Sk (xk, x-k) = - ak xkak ln(xkak ), leads to the following average deviation incentive gradient where BRj = softmax(jxj / ):
+
+policy gradient
+
+xi Ladi(x) = - (ixi -  (ln(xi) + 1)) +
+
+Jxi (BRj ) (jxj -  (ln(BRj ) + 1)) + Hijj (BRj - xj )
+
+j=i
+
+(5)
+
+with
+
+Jxi (BRj )
+
+=
+
+1  (diag(BRj)
+
+-
+
+BRj BRj
+
+)Hjji.
+
+(6)
+
+In the limit, xi Ladi(x) =0+ -ixi + j=i Hijj (BRj - xj ). Each Hijj models the approximate bimatrix game between players i and j. Recall from the preliminaries that in a polymatrix game,
+these matrices capture the game exactly. We also explore an adaptive Tsallis entropy in the Appx. D.
+
+4.2 Amortized Estimates with Historical Play
+
+Section 3.2 discusses the bias that can be introduced when best responding to sampled joint play and
+how the annealing process of the homotopy method helps alleviate it by softening the BR operator with entropy regularization. To reduce the bias further, we could evaluate more samples from x,
+however, this increases the required computation. Alternatively, assuming strategies have changed minimally over the last few updates (i.e., x(t-2)  x(t-1)  x(t)), we can instead reuse historical play to improve estimates. We accomplish this by introducing an auxiliary variable yi that computes an exponentially averaged estimate of each player i's payoff gradient ixi throughout the descent similarly to Sutton et al. (2008). We also use yi to compute an estimate of ADI, L^adi as follows:
+
+L^adi(x, y) = yk (B^Rk - xk) + Sk (B^Rk, x-k) - Sk (xk, x-k)
+
+(7)
+
+k
+
+where B^Rk = arg maxzkmk-1 yk zk + Sk (zk, x-k). Likewise, replace all instances of kxk with yk and BRk with B^Rk in equations (5) and (6) when computing the gradient.
+
+4.3 Putting It All Together
+Algorithm 2, ADIDAS, is our final algorithm. ADIDAS attempts to approximate the unique continuum of quantal response equilibria by way of a quasi-stationary process--see Figure 2. Whenever the algorithm finds a joint strategy x exhibiting ADI below a threshold for the game regularized with temperature  , the temperature is reduced (line 15 of ADIDAS). Incorporating stochastic optimization into the process enables scaling the classical homotopy approach to extremely large games (payoff tensors). At the same time, the homotopy approach selects a unique limiting equilibrium and, symbiotically, helps alleviate gradient bias, further amortized by the reuse of historical play.
+No-regret algorithms scale, but have been proven not to converge to Nash (Flokas et al., 2020) and classical solvers (McKelvey et al., 2016) converge to Nash, but do not scale. To our knowledge, ADIDAS is the first algorithm that can practically approximate Nash in many-player, many-action normal-form games.
+
+Alg Family
+
+Classical No-Regret This Work
+
+Convergence to Nash Yes
+
+No
+
+Yes
+
+Payoffs Queried
+
+nmn
+
+T nm
+
+T (nm)2
+
+Table 2: Comparison of solvers. See Appx. C.2. Reduce to T at the expense of higher variance.
+
+6
+
+i = mi-1
+
+1i
+
+
+n
+
+
+
+
+
+0
+
+(a) ADIDAS pathologies
+
+(b) 10-player, 2-action El Farol homotopy
+
+Figure 2: (a) In the presence of multiple equilibria, ADIDAS may fail to follow the path to the
+uniquely defined Nash due to gradient noise, gradient bias, and a coarse annealing schedule. If these issues are severe, they can cause the algorithm to get stuck at a local optimum of Ladi--see Appx. H.2.2. (b) Such concerns are minimal for the El Farol Bar stage game by Arthur (1994).
+
+Algorithm 2 ADIDAS
+
+1: Given: Strategy learning rate x, auxiliary learning rate y, initial temperature  (= 100), ADI
+
+threshold , total iterations T , simulator Gi that returns player i's payoff given a joint action.
+
+2:
+
+x
+
+
+
+{
+
+1 mi
+
+1
+
+
+
+i}
+
+3: y  {0  i}
+
+4: for t = 1 : T do
+
+5: ai  xi  i
+
+6: for i  {1, . . . , n} do
+
+7: for j = i  {1, . . . , n} do
+
+8:
+
+Hiij[r, c]  Gi(r, c, a-ij)  r  Ai, c  Aj
+
+9: end for
+
+10: end for
+
+11: ixi = Hiijxj for any xj (or mean over j)
+
+12: 13:
+
+yi xi
+
+ 
+
+yi xi
+
+- -
+
+max(
+
+1 t
+
+xxi
+
+L, ayd)i((deixfi.
+
+- in
+
+yi) §4.1
+
+and
+
+python
+
+code
+
+in
+
+Appx.
+
+K)
+
+14: 15:
+
+if L^adi(x2 , y) < (def. in equation (7)) then
+
+16: end if
+
+17: end for
+
+18: return x
+
+4.4 Complexity and Savings
+
+A normal form game may also be represented with a tensor U in which each entry U [i, a1, . . . , an] specifies the payoff for player i under the joint action (a1, . . . , an). In order to demonstrate the computational savings of our approach, we evaluate the ratio of the number of entries in U to the
+number of entries queried (in the sense of (Babichenko, 2016; Fearnley et al., 2015; Fearnley & Savani, 2016)) for computing a single gradient, Ladi. This ratio represents the number of steps that a gradient method can take before it is possible to compute ADI exactly in expectation.
+
+Without further assumptions on the game, the number of entries in a general payoff tensor is nmn. In
+
+contrast, computing the stochastic deviation incentive gradient requires computing Hijj for all i, j
+
+requiring
+
+less
+
+than
+
+(nm)2
+
+entries5.
+
+The
+
+resulting
+
+ratio
+
+is
+
+1 n
+
+mn-2.
+
+For
+
+a
+
+7-player,
+
+21-action
+
+game,
+
+this implies at least 580, 000 descent updates can be used by stochastic gradient descent.
+
+If the game is symmetric and we desire a symmetric Nash, the payoff tensor can be represented more
+
+concisely
+
+with
+
+(m+n-1)! n!(m-1)!
+
+entries
+
+(number
+
+of
+
+multisets
+
+of
+
+cardinality
+
+n
+
+with
+
+elements
+
+taken
+
+from
+
+a
+
+finite set of cardinality m). The number of entries required for a stochastic gradient is less than m2.
+
+Again, for a 7-player 21-action game, this implies at least 2, 000 update steps. Although there are
+
+5Recall ixi can be computed with ixi = Hiij xj for any xj .
+
+7
+
+fewer unique entries in a symmetric game, we are not aware of libraries that allow sparse storage of or efficient arithmetic on such permutation-invariant tensors. ADIDAS can exploit this symmetry.
+
+5 Experiments
+
+We demonstrate the performance of ADIDAS empirically on very large games. We begin by considering the Colonel Blotto game, a deceptively complex challenge domain still under intense research (Behnezhad et al., 2017; Boix-Adserà et al., 2020), implemented in OpenSpiel (Lanctot et al., 2019). For reference, both the 3 and 4-player variants we consider are an order of magnitude (> 20×) larger than the largest games explored in (Porter et al., 2008). We find that no-regret approaches as well as existing methods from Gambit (McKelvey et al., 2016) begin to fail at this scale, whereas ADIDAS performs consistently well. At the same time, we empirically validate our design choice regarding amortizing gradient estimates (§4.2). Finally, we end with our most challenging experiment, the approximation of a unique Nash of a 7-player, 21-action (> trillion outcome) Diplomacy meta-game.
+We use the following notation to indicate variants of the algorithms compared in Table 3. A y superscript prefix, e.g., yQRE, indicates the estimates of payoff gradients are amortized using historical play; its absence indicates that a fresh estimate is used instead. x¯t indicates that the average deviation incentive reported is for the average of xt over learning. A subscript of  indicates best responses are computed with respect to the true expected payoff gradient (infinite samples). A superscript auto indicates the temperature  is annealed according to line 15 of Algorithm 2. An s in parentheses indicates lines 5 to 10 of ADIDAS are repeated s times, and the resulting Hiij's are averaged for a more accurate estimate. Each game is solved on 1 CPU, except Diplomacy (see Appx. A).
+
+FTRL RM ATE QRE
+
+Simultaneous Gradient Ascent Regret-Matching (Blackwell et al., 1956)
+
+x x-1 · y
+
+
+10-5, 10-4, 10-3, 10-2, 10-1 1, 10, 100 0.0, 0.01, 0.05, 0.10
+
+ADIDAS with Tsallis (Appx. F) ADIDAS with Shannon
+Table 3: Algorithms
+
+(Ladi) Boolean
+
+Bregman-(x)
+
+{
+
+1 2
+
+||x||2
+
+,
+
+-H(x)}
+
+0.01, 0.05
+
+Table 4: Hyperparameter Sweeps
+
+Sweeps are conducted over whether or not to project gradients onto the simplex ((Ladi)), whether to use a Euclidean projection or entropic mirror descent (Beck & Teboulle, 2003) to constrain iterates to the simplex, and over learning rates. Averages over 10 runs of the best hyperparameters are then presented6. Performance is measured by Ladi, a.k.a. NashConv (Lanctot et al., 2017).
+Med-Scale re. §4.4 Govindan-Wilson is considered a state-of-the-art Nash solver, but it does not scale well to large games. For example, on a symmetric, 4-player Blotto game with 66 actions (10 coins, 3 fields), GW, as implemented in Gambit, is estimated to take 53,000 hours7. Of the solvers implemented in Gambit, none finds a symmetric Nash equilibrium within an hour8. Of those, gambit-logit (Turocy, 2005) is expected to scale most gracefully. Experiments from the original paper are run on maximum 5-player games (2-actions per player) and 20-action games (2players), so the 4-player, 66-action game is well outside the original design scope. Attempting to run gambit-logit anyways with a temperature  = 1 returns an approximate Nash with Ladi = 0.066 after 101 minutes. In contrast, Figure 3b shows ADIDAS achieves a lower loss in  3 minutes.
+Auxiliary y re. §4.2 The introduction of auxiliary variables yi are supported by the results in Figure 3--yQREauto significantly improves performance over QREauto and with low algorithmic cost.
+Convergence re. §4.3 In Figure 3, FTRL and RM achieve low ADI quickly in some cases. FTRL has recently been proven not to converge to Nash, and this is suggested to be true of no-regret algorithms
+6Best hyperparameter results are presented because we expect running ADIDAS with multiple hyperparameter settings in parallel to be a sensible approach to approximating Nash in practice.
+7Public correspondence with primary gambit developer. 8gambit-enumpoly returns several non-symmetric, pure Nash equilibria. Solvers listed in Appx. G.2.
+
+8
+
+(a) 3-player, 286-action Blotto
+
+(b) 4-player, 66-action Blotto
+
+Figure 3: Amortizing estimates of joint play using y can reduce gradient bias, further improving performance (e.g., compare QREauto to yQREauto in (a) or (b)).
+
+in general (Flokas et al., 2020; Mertikopoulos et al., 2018). Before proceeding, we demonstrate empirically in Figure 4 that FTRL and RM fail on games where ADIDAS significantly reduces ADI.
+
+(a) 2-player, 3-action modified Shapley's
+
+(b) 6-player, 5-action GAMUT-D7
+
+Figure 4: ADIDAS reduces Ladi in both these nonsymmetric games. In contrast, regret matching stalls or diverges in game (a) and diverges in game (b). FTRL makes progress in game (a) but stalls in
+
+game (b). In game (a), created by Ostrovski & van Strien (2013), to better test performance, x is
+
+initialized randomly rather than with the uniform distribution because the Nash is at uniform.
+
+Large-Scale re. §4.4 Finally, we perform an empirical game theoretic analysis (Wellman, 2006; Jordan et al., 2007; Wah et al., 2016) of a large symmetric 7-player Diplomacy meta-game where each player elects 1 of 21 trained bots to play on their behalf. Each bot represents a snapshot taken from an RL training run on Diplomacy (Anthony et al., 2020). In this case, the expected value of each entry in the payoff tensor is a winrate. Each entry can only be estimated by simulating game play, and the result of each game is a Bernoulli random variable (ruling out deterministic approaches, e.g., gambit). To estimate winrate within 0.015 (ADI within 0.03) of the true estimate with probability 95%, a Chebyshev bound implies approximately 150 samples are needed. The symmetric payoff tensor contains 888, 030 unique entries, requiring over 100 million games in total. Simulating all games, as we show, is unnecessarily wasteful, and just storing the entire payoff tensor in memory, let alone computing with it would be prohibitive without special permutation-invariant data structures ( 50GB with float32). In Figure 5a, ADIDAS with x = y = 0.1 and = 0.001 achieves a stable ADI below 0.03 in less than 100 iterations with 10 samples of joint play per iteration and each game repeated 7 times (< 2.5% of the games run by the naive alternative). Appx. H.2.3 expands Figure 5a with additional data revealing the importance of anealing  . As expected, bots later in training (darker lines) have higher mass under the Nash distribution. Runtime discussed in Appx. A.
+In the Appendix, we perform additional ablation studies (e.g., without entropy, annealing), measure accuracy of L^adi, compare against more algorithms on other domains, and consider Tsallis entropy.
+9
+
+ofPrBoobta1b-ilLiitgyhtuntdoe2r1-NaDsarhk ADI (71 adi)
+
+yATEauto Nash Approximation xt 0.2
+
+Diplomacy MetaGame
+
+10 1
+
+yATE1.0 yATEauto yATE0.0
+
+0.1
+
+0.00 50 1I0te0ratio1n5s0 200
+
+10
+
+2
+0
+
+50 1I0te0ratio1n5s0 200 250
+
+(a) 7-player, 21-action symmetric Nash (xt)
+
+(b) ADI estimate
+
+Figure 5: (a) Evolution of the symmetric Nash approximation returned by ADIDAS; (b) ADI
+
+estimated from auxiliary variable yt. Black vertical lines indicate the temperature  was annealed.
+
+6 Conclusion
+Existing algorithms either converge to Nash, but do not scale to large games or scale to large games, but do not converge to Nash. We proposed an algorithm to fill this void that queries necessary payoffs through sampling, obviating storing the full payoff tensor in memory. ADIDAS is principled and shown empirically to approximate Nash in large-normal form games.
+Acknowledgements
+We are grateful to Luke Marris and Kevin R. McKee for fruitful discussions and advice on revising parts of the manuscript as well as Eugene Nudelman for helping us run GAMUT.
+References
+Ahmadinejad, A., Dehghani, S., Hajiaghayi, M., Lucier, B., Mahini, H., and Seddighin, S. From duels to battlefields: Computing equilibria of Blotto and other games. Mathematics of Operations Research, 44(4):1304­1325, 2019.
+Anthony, T., Eccles, T., Tacchetti, A., Kramár, J., Gemp, I., Hudson, T. C., Porcel, N., Lanctot, M., Pérolat, J., Everett, R., et al. Learning to play no-press Diplomacy with best response policy iteration. arXiv preprint arXiv:2006.04635, 2020.
+Arad, A. and Rubinstein, A. Multi-dimensional iterative reasoning in action: The case of the colonel Blotto game. Journal of Economic Behavior & Organization, 84(2):571­585, 2012.
+Arthur, W. B. Complexity in economic theory: Inductive reasoning and bounded rationality. The American Economic Review, 84(2):406­411, 1994.
+Babichenko, Y. Query complexity of approximate Nash equilibria. Journal of the ACM (JACM), 63 (4):36:1­36:24, 2016.
+Beck, A. and Teboulle, M. Mirror descent and nonlinear projected subgradient methods for convex optimization. Operations Research Letters, 31(3):167­175, 2003.
+Behnezhad, S., Dehghani, S., Derakhshan, M., HajiAghayi, M., and Seddighin, S. Faster and simpler algorithm for optimal strategies of Blotto game. In Proceedings of the AAAI Conference on Artificial Intelligence, pp. 369­375, 2017.
+Behnezhad, S., Blum, A., Derakhshan, M., HajiAghayi, M., Mahdian, M., Papadimitriou, C. H., Rivest, R. L., Seddighin, S., and Stark, P. B. From battlefields to elections: Winning strategies of Blotto and auditing games. In Proceedings of the Twenty-Ninth Annual ACM-SIAM Symposium on Discrete Algorithms, pp. 2291­2310. SIAM, 2018.
+Behnezhad, S., Blum, A., Derakhshan, M., Hajiaghayi, M., Papadimitriou, C. H., and Seddighin, S. Optimal strategies of Blotto games: Beyond convexity. In Proceedings of the 2019 ACM Conference on Economics and Computation, pp. 597­616, 2019.
+
+10
+
+Blackwell et al., D. An analog of the minimax theorem for vector payoffs. Pacific Journal of Mathematics, 6(1):1­8, 1956.
+Blum, A. and Mansour, Y. Learning, Regret Minimization, and Equilibria, pp. 79­102. Cambridge University Press, 2007. doi: 10.1017/CBO9780511800481.006.
+Blum, B., Shelton, C. R., and Koller, D. A continuation method for Nash equilibria in structured games. Journal of Artificial Intelligence Research, 25:457­502, 2006.
+Boix-Adserà, E., Edelman, B. L., and Jayanti, S. The multiplayer colonel Blotto game. In Proceedings of the 21st ACM Conference on Economics and Computation, pp. 47­48, 2020.
+Bowling, M., Burch, N., Johanson, M., and Tammelin, O. Heads-up Limit Hold'em Poker is solved. Science, 347(6218):145­149, January 2015.
+Brown, N. and Sandholm, T. Superhuman AI for Heads-up No-limit Poker: Libratus beats top professionals. Science, 360(6385), December 2017.
+Brown, N., Bakhtin, A., Lerer, A., and Gong, Q. Combining deep reinforcement learning and search for imperfect-information games, 2020.
+Chen, X. and Deng, X. Settling the complexity of two-player Nash equilibrium. In 47th Annual IEEE Symposium on Foundations of Computer Science (FOCS'06), pp. 261­272. IEEE, 2006.
+Chen, X., Deng, X., and Teng, S.-H. Settling the complexity of computing two-player Nash equilibria. Journal of the ACM (JACM), 56(3):1­57, 2009.
+Daskalakis, C., Goldberg, P. W., and Papadimitriou, C. H. The complexity of computing a Nash equilibrium. SIAM Journal on Computing, 39(1):195­259, 2009.
+Deligkas, A., Fearnley, J., Igwe, T. P., and Savani, R. An empirical study on computing equilibria in polymatrix games. arXiv preprint arXiv:1602.06865, 2016.
+Deligkas, A., Fearnley, J., Savani, R., and Spirakis, P. Computing approximate Nash equilibria in polymatrix games. Algorithmica, 77(2):487­514, 2017.
+Etessami, K. and Yannakakis, M. On the complexity of Nash equilibria and other fixed points. SIAM Journal on Computing, 39(6):2531­2597, 2010.
+Facchinei, F. and Pang, J.-S. Finite-dimensional variational inequalities and complementarity problems. Springer Science & Business Media, 2007.
+Fearnley, J. and Savani, R. Finding approximate Nash equilibria of bimatrix games via payoff queries. ACM Transactions on Economics and Computation (TEAC), 4(4):25:1­25:19, 2016.
+Fearnley, J., Gairing, M., Goldberg, P. W., and Savani, R. Learning equilibria of games via payoff queries. The Journal of Machine Learning Research, 16(1):1305­1344, 2015.
+Flokas, L., Vlatakis-Gkaragkounis, E.-V., Lianeas, T., Mertikopoulos, P., and Piliouras, G. No-regret learning and mixed Nash equilibria: They do not mix. arXiv preprint arXiv:2010.09514, 2020.
+Goldberg, P. W., Savani, R., Sørensen, T. B., and Ventre, C. On the approximation performance of fictitious play in finite games. International Journal of Game Theory, 42(4):1059­1083, 2013.
+Govindan, S. and Wilson, R. A global Newton method to compute Nash equilibria. Journal of Economic Theory, 110(1):65­86, 2003.
+Govindan, S. and Wilson, R. Computing Nash equilibria by iterated polymatrix approximation. Journal of Economic Dynamics and Control, 28(7):1229­1241, 2004.
+Gray, J., Lerer, A., Bakhtin, A., and Brown, N. Human-level performance in no-press Diplomacy via equilibrium search. arXiv preprint arXiv:2010.02923, 2020.
+Jordan, P. R., Kiekintveld, C., and Wellman, M. P. Empirical game-theoretic analysis of the TAC supply chain game. In Proceedings of the 6th international joint conference on Autonomous agents and multiagent systems, pp. 1­8, 2007.
+11
+
+Juditsky, A., Nemirovski, A., and Tauvel, C. Solving variational inequalities with stochastic mirrorprox algorithm. Stochastic Systems, 1(1):17­58, 2011.
+Korpelevich, G. M. The extragradient method for finding saddle points and other problems. Matecon, 12:747­756, 1976.
+Lanctot, M., Zambaldi, V., Gruslys, A., Lazaridou, A., Tuyls, K., Pérolat, J., Silver, D., and Graepel, T. A unified game-theoretic approach to multiagent reinforcement learning. In Advances in neural information processing systems, pp. 4190­4203, 2017.
+Lanctot, M., Lockhart, E., Lespiau, J.-B., Zambaldi, V., Upadhyay, S., Pérolat, J., Srinivasan, S., Timbers, F., Tuyls, K., Omidshafiei, S., Hennes, D., Morrill, D., Muller, P., Ewalds, T., Faulkner, R., Kramár, J., Vylder, B. D., Saeta, B., Bradbury, J., Ding, D., Borgeaud, S., Lai, M., Schrittwieser, J., Anthony, T., Hughes, E., Danihelka, I., and Ryan-Davis, J. OpenSpiel: A framework for reinforcement learning in games. CoRR, abs/1908.09453, 2019. URL http: //arxiv.org/abs/1908.09453.
+Lemke, C. and Howson, Jr, J. Equilibrium points of bimatrix games. Journal of the Society for industrial and Applied Mathematics, 12(2):413­423, 1964.
+Lockhart, E., Lanctot, M., Pérolat, J., Lespiau, J.-B., Morrill, D., Timbers, F., and Tuyls, K. Computing approximate equilibria in sequential adversarial games by exploitability descent. In Proceedings of the 28th International Joint Conference on Artificial Intelligence (IJCAI), 2019.
+McKelvey, R. D. and McLennan, A. Computation of equilibria in finite games. Handbook of computational economics, 1:87­142, 1996.
+McKelvey, R. D. and Palfrey, T. R. Quantal response equilibria for normal form games. Games and economic behavior, 10(1):6­38, 1995.
+McKelvey, R. D., McLennan, A. M., and Turocy, T. L. Gambit: Software tools for game theory, version 16.0.1, 2016.
+McMahan, H. B., Gordon, G. J., and Blum, A. Planning in the presence of cost functions controlled by an adversary. In Proceedings of the 20th International Conference on Machine Learning (ICML-03), pp. 536­543, 2003.
+Mertikopoulos, P., Papadimitriou, C., and Piliouras, G. Cycles in adversarial regularized learning. In Proceedings of the Twenty-Ninth Annual ACM-SIAM Symposium on Discrete Algorithms, pp. 2703­2717. SIAM, 2018.
+Mescheder, L., Nowozin, S., and Geiger, A. The numerics of GANs. In Proceedings of the 31st International Conference on Neural Information Processing Systems, NIPS'17, pp. 1823­1833, Red Hook, NY, USA, 2017. Curran Associates Inc. ISBN 9781510860964.
+Moravcík, M., Schmid, M., Burch, N., Lisý, V., Morrill, D., Bard, N., Davis, T., Waugh, K., Johanson, M., and Bowling, M. Deepstack: Expert-level artificial intelligence in Heads-up No-limit Poker. Science, 358(6362), October 2017.
+Nudelman, E., Wortman, J., Shoham, Y., and Leyton-Brown, K. Run the Gamut: A comprehensive approach to evaluating game-theoretic algorithms. In AAMAS, volume 4, pp. 880­887, 2004.
+Ostrovski, G. and van Strien, S. Payoff performance of fictitious play. arXiv preprint arXiv:1308.4049, 2013.
+Perolat, J., Munos, R., Lespiau, J.-B., Omidshafiei, S., Rowland, M., Ortega, P., Burch, N., Anthony, T., Balduzzi, D., De Vylder, B., et al. From Poincaré recurrence to convergence in imperfect information games: Finding equilibrium via regularization. arXiv preprint arXiv:2002.08456, 2020.
+Porter, R., Nudelman, E., and Shoham, Y. Simple search methods for finding a Nash equilibrium. Games and Economic Behavior, 63(2):642­662, 2008.
+Sandholm, T., Gilpin, A., and Conitzer, V. Mixed-integer programming methods for finding Nash equilibria. In AAAI, pp. 495­501, 2005.
+12
+
+Shoham, Y. and Leyton-Brown, K. Multiagent systems: Algorithmic, game-theoretic, and logical foundations. Cambridge University Press, 2009.
+Sutton, R. S., Szepesvári, C., and Maei, H. R. A convergent O(n) algorithm for off-policy temporaldifference learning with linear function approximation. Advances in neural information processing systems, 21(21):1609­1616, 2008.
+Turocy, T. L. A dynamic homotopy interpretation of the logistic quantal response equilibrium correspondence. Games and Economic Behavior, 51(2):243­263, 2005.
+van der Laan, G., Talman, A., and Van der Heyden, L. Simplicial variable dimension algorithms for solving the nonlinear complementarity problem on a product of unit simplices using a general labelling. Mathematics of operations research, 12(3):377­397, 1987.
+Vinyals, O., Babuschkin, I., Chung, J., Mathieu, M., Jaderberg, M., Czarnecki, W. M., Dudzik, A., Huang, A., Georgiev, P., Powell, R., et al. Alphastar: Mastering the real-time strategy game starcraft ii. DeepMind blog, pp. 2, 2019a.
+Vinyals, O., Babuschkin, I., Czarnecki, W. M., Mathieu, M., Dudzik, A., Chung, J., Choi, D. H., Powell, R., Ewalds, T., Georgiev, P., et al. Grandmaster level in starcraft ii using multi-agent reinforcement learning. Nature, 575(7782):350­354, 2019b.
+Wah, E., Lahaie, S., and Pennock, D. M. An empirical game-theoretic analysis of price discovery in prediction markets. In IJCAI, pp. 510­516, 2016.
+Wellman, M. P. Methods for empirical game-theoretic analysis. In AAAI, pp. 1552­1556, 2006. Whitehead, D. The El Farol bar problem revisited: Reinforcement learning in a potential game. ESE
+Discussion Papers, 186, 2008.
+13
+
+Appendices
+
+Contents
+
+A Runtime
+
+15
+
+B Two vs More Than Two Player Games
+
+15
+
+C Convergence of ADIDAS
+
+15
+
+C.1 Convergence Warm-up: Full Access to In-Memory Payoff Tensor . . . . . . . . . 15
+
+C.2 Convergence Sketch: Sampling the Payoff Tensor . . . . . . . . . . . . . . . . . . 16
+
+D Deviation Incentive Gradient
+
+16
+
+D.1 Tsallis-Entropy . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+
+D.2 Shannon Entropy . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+
+E Ablations
+
+21
+
+E.1 Bias re. §3.2+§4.1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+
+E.2 Auxiliary y re. §4.2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+
+E.3 Annealing  re. §3.1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+
+E.4 Convergence re. §4.3 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+
+E.5 ADI stochastic estimate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+
+F Experiments Repeated with ATE
+
+23
+
+G Comparison Against Additional Algorithms
+
+24
+
+G.1 ED and FP Fail . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+
+G.2 Gambit Solvers . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+
+H Additional Game Domains
+
+26
+
+H.1 Diplomacy Experiments - Subsampled Games . . . . . . . . . . . . . . . . . . . . 26
+
+H.2 Diplomacy Experiments - Empirical Game Theoretic Analysis . . . . . . . . . . . 28
+
+H.3 El Farol Bar Stage Game . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+
+I Description of Domains
+
+29
+
+I.1 Modified Shapley's . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+
+I.2 Colonel Blotto . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+
+J Connections to Other Algorithms
+
+30
+
+J.1 Consensus Algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+
+J.2 Exploitability Descent as Extragradient . . . . . . . . . . . . . . . . . . . . . . . 30
+
+K Python Code
+
+31
+
+14
+
+A Runtime
+We briefly discussed runtime of ADIDAS in the main body within the context of the Colonel Blotto game. The focus of the paper is on the divide between algorithms that can solve for Nash in any reasonable amount of time (e.g.,  3 minutes) and those that cannot (e.g., GW with 53,000 hours). The modified Shapley's game and D7-Covariant game from GAMUT are both smaller than the Blotto game, so we omitted a runtime discussion for these.
+The Diplomacy experiment required simulating Diplomacy games on a large shared compute cluster with simulated games taking anywhere from 3 minutes to 3 hours. Games were simulated at each iteration of ADIDAS asynchronously using a pool of 1000 workers (4 CPUs per worker, 1 worker per game); the Nash approximate xt was updated separately on a single CPU. The main computational bottleneck in this experiment was simulating the games themselves, rather than computing gradients from those games. Therefore, the number of games simulated (entries accessed in the payoff tensor) is a realistic metric of algorithmic efficiency.
+B Two vs More Than Two Player Games
+An n-player game for all n  3 can be reduced in polynomial time to a 2-player game such that the Nash equilibria of the 2-player game can be efficiently used to compute approximate Nash equilibria of the n-player game (Daskalakis et al., 2009; Chen & Deng, 2006; Etessami & Yannakakis, 2010).
+C Convergence of ADIDAS
+We first establish convergence of the simplified algorithm as described in the warm-up and then discuss convergence of the our more sophisticated, scalable algorithm ADIDAS.
+C.1 Convergence Warm-up: Full Access to In-Memory Payoff Tensor
+The proof of this simple warm-up algorithm relies heavily on the detailed examination of the continuum of QREs proposed in McKelvey & Palfrey (1995) and further analyzed in Turocy (2005). The Theorem presented below is essentially a succinct repetition of one of their results. Assumption 1 (Bounded sensitivity of QRE to temperature). The shift in location of the QRE is upper bounded by an amount proportional to the increase in inverse temperature: ||x+ - x||  . Assumption 2 (Bound on BoA's of QRE's). Under gradient descent dynamics, the basin of attraction for any quantal response equilibrium, x = QRE=-1 , contains a ball of radius r. Formally, assuming xt+1  xt - tgt with gt = xLadi(xt), t a square-summable, not summable step size (e.g.,  t-1), and given x0  B(x, r), there exists a T such that xtT  B(x, ) for any . Theorem 1. Assume the QREs along the homotopy path have bounded sensitivity to  given by a parameter  (Assumption 1), and basins of attraction with radii lower bounded by r (Assumption 2). Let the step size   (r - ) with tolerance . And let T  be the supremum over all T such that Assumption 2 is satisfied for any inverse temperature   . Then, assuming gradient descent for OPT, Algorithm 1 converges to the limiting logit equilibrium x= = x=0 in the limit as T  .
+Proof. Recall McKelvey & Palfrey (1995) proved there exists a unique continuum of QREs tracing from infinite temperature ( = 0) to zero temperature ( = ) for almost all games. Assumption 2 effectively assumes the game in question is one from that class. Algorithm 1 initializes  = 0 and x to the uniform distribution which is the exact QRE for that temperature. Next, in step 5, the temperature is annealed by an amount that, by Lemma 1, ensures ||x+ - x|| = ||x+ - x||  r - , where r is a minimal radius of the basin of attraction for any QRE. Then, in step 6, OPT returns an -approximation, x, to the new QRE after T  steps, which implies ||x - x+||  . The proof then continues by induction. The inverse temperature is increased by an amount ensuring then next QRE is within r - of the previous. The current approximation, x is within of the previous, therefore, it is within r - + = r of the next QRE, i.e., it is in its basin of attraction. The inverse temperature  is always increased by an amount such that the current approximation is always within the boundary of attraction for the next QRE. Therefore, in the limit of infinite annealing steps, x converges to the QRE with zero temperature, known as the limiting logit equilibrium.
+15
+
+C.2 Convergence Sketch: Sampling the Payoff Tensor
+
+We do not rigorously prove any theoretical convergence result for the stochastic setting. A convergence
+
+proof is complicated by the fact that despite our efforts to reduce gradient bias, some bias will always
+
+remain. Although we make assumptions that ensure each iterate begins in the basin of attraction
+
+of the QRE of interest, even proving convergence of a hypothetically unbiased stochastic gradient
+
+descent to that specific local minimum could only be guaranteed with high probability (dependent
+
+on step size). Our goal was to outline a sensible argument that ADIDAS would converge to Nash
+
+asymptotically. Our claim of convergence stands on the shoulders of the work of McKelvey &
+
+Palfrey (1995) who proved that there exists a unique path P of Quantal Response Equilibria (QREs)
+
+parameterized by temperature  which begins at the uniform distribution Nash ( = ) and ends at
+
+the limiting logit equilibium ( = 0). Turocy (2005) solves for this path explicitly by solving the
+
+associated
+
+initial
+
+value
+
+problem
+
+(differential
+
+equation)
+
+where
+
+t
+
+=
+
+1 
+
+takes
+
+the
+
+place
+
+of
+
+the
+
+typical
+
+independent variable time. By numerically integrating this differential equation with infintessimally
+
+small steps dt, Turocy (2005) can ensure the iterates progress along the path towards the limiting
+
+logit equilibrium (LLE). ADIDAS takes a conceptually similar approach. First, it initializes to the
+
+uniform equilibrium. Then it takes a small step t. In practice, the initial step we take increases
+
+t from 0 to 1, which worked well enough, but one can imagine taking a smaller step, e.g., 0 to 10-9. After such a small step, the QRE of the game with lower temperature will not have moved far
+
+from the initial uniform equilibrium. Therefore, we can minimize ADI to solve for the new QRE,
+
+thereby recovering to a point on the unique path P . The fact that we can only access the payoff
+
+tensor by samples means that we may need to sample many times (s times) to obtain an accurate
+
+Monte Carlo estimate of the gradient of ADI. By repeating this process of decaying the temperature
+
+(k > k+1  tk < tk+1) and recovering the new QRE with gradient descent (possibly nk steps) on ADI (xt = x(k)  xt+nk = x(k+1)), we too can follow P . In the limit as s, nk, and N = k nk go to infinity and t goes to zero, the issues identified in Figure 2a are mitigated and we recover
+
+the LLE. Note, nk is effectively increased by reducing in Algorithm 2. We claim "ADIDAS is the
+
+first that can approximate Nash in large many-player, many-action normal-form games" because, in
+
+principle, it is technically sound according to the argument just presented but also efficient (does
+
+not require infinite samples in practice) as demonstrated empirically in our experiments. Note that
+
+because we only argue ADIDAS is asymptotically convergent (we provide no convergence rates), we
+
+do not contradict any Nash complexity results.
+
+D Deviation Incentive Gradient
+We now provide the general form for the ADI gradient for normal form games.
+
+xi Ladi(x) = xi [ui (BR(x-i), x-i) - ui (xi, x-i)]
+
++ xi [uj (BR(x-j ), x-j ) - uj (xj , x-j )].
+
+(8)
+
+j=i
+
+0
+
+xi [ui (BR(x-i), x-i) - ui (xi, x-i)] = Jxi (BR(x-i) :) zi ui (zi, x-i)|BRi,x-i
+
+(9)
+
++
+
+Jxi (xk :) 0zk ui (BR(xi), z-i)|BRi,x-i
+
+k=i
+
+- xi ui (xi, x-i) = -xi ui (xi, x-i).
+
+(10)
+
+16
+
+xi [uj (BR(x-j ), x-j ) - uj (xj , x-j )] = Jxi (BR(x-j )) zj uj (zj , x-j )|BRj,x-j
++ Jxi (xk) zk uj (BR(x-j ), z-j )|BRj,x-j
+k=j
+- xi uj (xj , x-j ) = Jxi (BR(x-j )) zj uj (zj , x-j )|BRj,x-j + zi uj (BR(x-j ), z-j )|BRj,x-j -xi uj (xj , x-j ).
+
+(11)
+(12) (13) (14)
+
+For entropy regularized utilities ui = ui + Si , the policy gradient decomposes as
+
+xi uj (xj , x-j ) = xi uj (xj , x-j ) + xi Sj (xj , x-j ).
+
+(15)
+
+D.1 Tsallis-Entropy
+
+First we derive gradients assuming utilities are carefully regularized using a Tsallis entropy bonus, Sk , parameterized by temperature  = p  [0, 1]:
+
+Tsallis entropy
+
+Sk (xk, x-k)
+
+=
+
+sk (1 p+1
+
+-
+
+xpk+m1)
+
+=
+
+sk
+
+p
+
+p +
+
+1
+
+1 (1 -
+p
+
+xpk+m1)
+
+(16)
+
+m
+
+m
+
+where sk =
+
+p
+m(kxkm )1/p = ||kxk ||1/p. For Tsallis entropy, we assume payoffs in the game
+
+have been offset by a constant so that they are positive.
+
+The coefficients in front of the Tsallis entropy term are chosen carefully such that a best response for player k can be efficiently computed:
+
+BR(x-k )
+
+=
+
+arg max
+zk 
+
+zk
+
+kxk
+
++
+
+sk p+
+
+(1 1
+
+-
+
+m
+
+zkpm+1).
+
+(17)
+
+First note that the maximization problem above is strictly concave for sk > 0 and p  (0, 1]. If these assumptions are met, then any maximum is a unique global maximum. This is a constrained optimization problem, so in general the gradient need not be zero at the global optimum, but in this case it is. We will find a critical point by setting the gradient equal to zero and then prove that this point lies in the feasible set (the simplex) and satisfies second order conditions for optimality.
+
+xk uk(xk, x-k) = kxk - ||kxk ||1/pxpk = 0
+
+= BR(x-k) =
+
+kxk ||kxk ||1/p
+
+1 p
+=
+
+kxk sk
+
+1 p
+=
+
+(kxk
+
+)
+
+1 p
+
+=
+
+||kxk ||11//pp
+
+(kxk
+
+)
+
+1 p
+
+m
+
+(kxkm
+
+)
+
+1 p
+
+ .
+
+(18) (19)
+
+The critical point is on the simplex as desired. Furthermore, the Hessian at the critical point is negative definite, H(BR) = -pskdiag(BR-1)  0, so this point is a local maximum (and by strict concavity, a unique global maximum).
+If the original assumptions are not met and sk = 0, then this necessarily implies uk(xk, x-k) = 0 for all xk. As all actions achieve equal payoff, we define the best response in this case to be the uniform distribution. Likewise, if p = 0, then the Tsallis entropy regularization term disappears (1 - m xkm = 0) and the best response is the same as for the unregularized setting. Note in the unregularized setting, we define the best response to be a mixed strategy over all actions achieving the maximal possible utility.
+
+D.1.1 Gradients We now derive the necessary derivatives for computing the deviation incentive gradient.
+
+17
+
+Entropy Gradients (A) xi Si (xi, x-i) = -sixpi
+
+(B) xi sj = p
+
+p-1
+(jxjm )1/p
+m
+
+1 p
+
+(jxjm
+
+)
+
+1 p
+
+-1
+
+Hjjm
+
+i
+
+m
+
+=
+
+p-1
+(jxjm )1/p
+
+(jxjm
+
+)
+
+1 p
+
+-1
+
+Hjjm
+
+i
+
+m
+
+m
+
+=
+
+1
+
+1
+sjp
+
+-1
+
+Hijj
+
+(jxj
+
+)
+
+1 p
+
+-1
+
+=
+
+Hijj BR(x-j )1-p
+
+p==1 Hijj 1
+
+p==12
+
+Hijj
+
+jxj sj
+
+(20) (21)
+
+(C )
+
+xi Sj (xj , x-j )
+
+=
+
+1 sj
+
+Sj
+
+(xj
+
+,
+
+x-j
+
+)xi
+
+sj
+
+(22)
+
+(B)
+
+Best Response Gradients
+
+(D)
+
+Jxi
+
+[(jxj
+
+)
+
+1 p
+
+]
+
+=
+
+Jxi
+
+[(Hjji
+
+xi
+
+)
+
+1 p
+
+]
+
+=
+
+1 p
+
+(jxj
+
+)
+
+1 p
+
+-1
+
+Hjji
+
+(23)
+
+where denotes elementwise multiplication or, more generally, broadcast multiplication. In this
+
+case,
+
+(jxj
+
+)
+
+1 p
+
+-1
+
+
+
+Rdj ×1
+
+is
+
+broadcast
+
+multiplied
+
+by
+
+Hjji
+
+
+
+Rdj ×di
+
+to
+
+produce
+
+a
+
+Jacobian
+
+matrix
+
+in
+
+Rdj ×di .
+
+(E) Jxi (BR(x-j)) =
+
+1 m(jxjm )
+
+1 p
+
+Jxi [(jxj
+
+)
+
+1 p
+
+]
+
+-
+
+[(jxj
+
+)
+
+1 p
+
+][
+
+1
+
+m
+
+(jxjm
+
+)
+
+1 p
+
+]2xi [
+
+m
+
+(jxjm
+
+)
+
+1 p
+
+]
+
+=
+
+1 m(jxjm )
+
+1 p
+
+Jxi [(jxj
+
+)
+
+1 p
+
+]
+
+-
+
+[(jxj
+
+)
+
+1 p
+
+][
+
+1 m(jxjm )
+
+1 p
+
+]2[
+
+m
+
+Jxi
+
+[(jxjm
+
+)
+
+1 p
+
+]]
+
+=
+
+1 m(jxjm )
+
+1 p
+
+Jxi [(jxj
+
+)
+
+1 p
+
+]
+
+-
+
+[(jxj
+
+)
+
+1 p
+
+][
+
+1 m(jxjm )
+
+1 p
+
+]2[1
+
+Jxi
+
+[(jxj
+
+)
+
+1 p
+
+]]
+
+=[
+
+1
+
+m
+
+(jxjm
+
+)
+
+1 p
+
+Ij
+
+-
+
+[(jxj
+
+)
+
+1 p
+
+][
+
+1
+
+m
+
+(jxjm
+
+)
+
+1 p
+
+]21
+
+]Jxi
+
+[(jxj
+
+)
+
+1 p
+
+]
+
+=
+
+1 ||jxj ||11//pp [Ij
+
+-
+
+(jxj
+
+)
+
+1 p
+
+1
+
+||jxj ||11//pp
+
+]Jxi
+
+[(jxj
+
+)
+
+1 p
+
+]
+
+1 = ||jxj ||11//pp [Ij - BR(x-j )1
+
+]Jxi
+
+[(jxj
+
+)
+
+1 p
+
+]
+
+(D)
+
+1 = s1j/p [Ij - BR(x-j )1
+
+][
+
+1 p
+
+(jxj
+
+)
+
+1 p
+
+-1
+
+Hjji]
+
+(24)
+
+Deviation Incentive Gradient Terms Here, we derive each of the terms in the ADI gradient. The
+
+numbers left of the equations mark which terms we are computing in subsection D.
+
+(10) xi [ui (BR(x-i), x-i) - ui (xi, x-i)] = -xi ui (xi, x-i)
+
+(15)=+(A) -(ixi - sixpi ).
+
+(25)
+
+18
+
+(12) zj uj (zj , x-j )|BRj,x-j = [zj uj (zj , x-j ) + zj Sj (zj , x-j )]|BRj,x-j
+(A)
+= [jzj - sj zjp]|BRj ,x-j = jxj - sj BR(x-j )p = jxj - jxj = 0.
+
+(26)
+
+(13) zi uj (BR(x-j ), z-j )|BRj,x-j = [zi uj (BR(x-j ), z-j ) + zi Sj (BR(x-j ), z-j )]|BRj,x-j
+
+(C )
+
+=
+
+[Hijj BR(x-j )
+
++
+
+1 sj
+
+Sj (BR(x-j ),
+
+x-j )Hijj BR(x-j )1-p]
+
+=
+
+Hijj BR(x-j )[1
+
++
+
+1 sj
+
+Sj
+
+(BR(x-j ),
+
+x-j )BR(x-j )-p]
+
+(27)
+
+(14) zi uj (xj , z-j )|xj,x-j = [zi uj (xj , z-j ) + zi Sj (xj , z-j )]|xj,x-j
+
+(C)
+
+=
+
+[Hijj xj
+
++
+
+1 sj
+
+Sj (xj , x-j )Hijj x1j-p]
+
+=
+
+Hijj xj [1
+
++
+
+1 sj
+
+Sj (xj , x-j )x-j p]
+
+(28)
+
+(11) xi [uj (BR(x-j ), x-j ) - uj (xj , x-j )]
+
+(29)
+
+(12)+(1=3)-(14)
+
+Hijj BR(x-j )[1
+
++
+
+1 sj
+
+Sj (BR(x-j ), x-j )BR(x-j )-p]
+
+-
+
+Hijj xj [1
+
++
+
+1 sj
+
+Sj (xj , x-j )x-j p]
+
+= Hijj (BR(x-j ) - xj )
+
++
+
+p
+
+1 +
+
+(1 1
+
+-
+
+||BR(x-j )||pp++11)Hijj BR(x-j )1-p
+
+-
+
+p
+
+1 +
+
+(1 1
+
+-
+
+||xj ||pp++11)Hijj x1j-p
+
+= Hijj
+
+1 (BR(x-j) - xj) + p + 1
+
+(1 - ||BR(x-j )||pp++11)BR(x-j )1-p - (1 - ||xj ||pp++11)x1j-p
+
+.
+
+Deviation Incentive Gradient (Tsallis Entropy) Finally, combining the derived terms gives:
+
+xi Ladi(x) = -(ixi - xpi ||ixi ||1/p)
+
+(30)
+
++
+
+Hijj
+
+1 (BR(x-j) - xj) + p + 1
+
+(1 - ||BR(x-j )||pp++11)BR(x-j )1-p - (1 - ||xj ||pp++11)x1j-p
+
+.
+
+j=i
+
+Note that in the limit of zero temperature, the gradient approaches
+
+policy gradient
+
+xi Ladi(x) p=0+ - (ixi - 1||ixi ||) +
+
+Hijj (BRj - xj ).
+
+j=i
+
+(31)
+
+The second component of the policy gradient term is orthogonal to the tangent space of the simplex, i.e., it does not contribute to movement along the simplex so it can be ignored in the limit of p  0+.
+Also, a Taylor series expansion of the adaptive Tsallis entropy around p = 0 shows Sk=p = pskH(xk) + O(p2), so the Tsallis entropy converges to a multiplicative constant of the Shannon
+
+19
+
+entropy in the limit of zero entropy. If a similar homotopy exists for Tsallis entropy, this suggests its limit point may be the same limiting logit equilibrium as before.
+
+Aside: If you want to increase the entropy, just add a large constant to all payoffs which makes
+
+BR
+
+=
+
+1 d
+
+in the
+
+limit;
+
+it
+
+can be shown that
+
+1 d
+
+then becomes
+
+an
+
+equilibrium.
+
+Notice
+
+BR is invariant
+
+to multiplicative scaling of the payoffs. Therefore, deviation incentive is linear with respect to
+
+multiplicative scaling. One idea to decrease entropy is to subtract a constant from the payoffs such
+
+that they are still positive but smaller. This can accomplish the desired effect, but will require more
+
+samples to estimate random variables with tiny values in their denominator. It seems like it won't be
+
+any more efficient than decreasing p.
+
+D.2 Shannon Entropy
+The Nash equilibrium of utilities regularized with Shannon entropy is well known as the Quantal Response Equilbrium or Logit Equilibrium. The best response is a scaled softmax over the payoffs. We present the relevant intermediate gradients below.
+
+Sk (xk, x-k) = - xi log(xi)
+
+(32)
+
+i
+
+BR(x-k )
+
+=
+
+softmax(
+
+kxk 
+
+)
+
+(33)
+
+xi Si (xi, x-i) = - (log(xi) + 1)
+
+(34)
+
+xi Sj (xj , x-j ) = 0
+
+(35)
+
+Jxi (BR(x-j ))
+
+=
+
+1  (diag(BRj)
+
+-
+
+BRj BRj
+
+)Hjji
+
+(36)
+
+zj uj (zj , x-j )|BRj,x-j = jxj -  (log(BRj ) + 1)
+
+(37)
+
+xi [ui (BR(x-i), x-i) - ui (xi, x-i)] = -(ixi -  (log(BRi) + 1))
+
+(38)
+
+zi uj (BR(x-j ), z-j )|BRj,x-j = Hijj BR(x-j )
+
+(39)
+
+zi uj (xj , z-j )|xj ,x-j = Hijj xj
+
+(40)
+
+xi [uj (BR(x-j ), x-j ) - uj (xj , x-j )]
+
+=
+
+1 [  (diag(BRj)
+
+-
+
+BRj BRj
+
+)Hjji]
+
+(jxj -  (log(BRj ) + 1)) + Hijj BR(x-j ) - Hijj xj
+
+(41)
+
+Deviation Incentive Gradient (Shannon Entropy) Combining the derived terms gives:
+
+xi Ladi(x) = -(ixi -  (log(xi) + 1))
+
+(42)
+
++
+
+1 [  (diag(BRj)
+
+-
+
+BRj BRj
+
+)Hjji]
+
+(jxj -  (log(BRj) + 1)) + Hijj[BR(x-j) - xj].
+
+j=i
+
+20
+
+|| n 0 || || n 0 ||
+
+E Ablations
+
+We introduce some additional notation here. A superscript indicates the temperature of the entropy regularizer, e.g., QRE0.1 uses  = 0.1 and QREauto anneals  as before. PED minimizes Ladi without any entropy regularization or amortized estimates of payoff gradients (i.e., without the auxiliary
+variable y).
+
+E.1 Bias re. §3.2+§4.1
+
+Figure 6 demonstrates there exists a sweet spot for the amount of entropy regularization--too little and gradients are biased, too much and we solve for the Nash of a game we are not interested in.
+
+Error (Mean of Gradients) 10.0
+
+Error (Gradient of Mean) 10.0
+
+7.5
+
+n=1
+
+7.5
+
+n=1
+
+5.0
+
+n=4 n=21 n=100
+
+5.0
+
+n=4 n=21 n=100
+
+2.5
+
+2.5
+
+0.010 2
+
+10 1
+
+100
+
+0.010 2
+
+10 1
+
+100
+
+(a) Bias
+
+(b) Concentration
+
+Figure 6: Bias-Bias Tradeoff on Blotto(10 coins, 3 fields, 4 players). Curves are drawn for samples
+
+sizes of n = {1, 4, 21, 100}. Circles denote the minimum of each curve for all n  [1, 100]. Zero entropy regularization results in high gradient bias, i.e., stochastic gradients, n=0, do not align well with the expected gradient, =0, where n is the number of samples. On the other hand, higher entropy regularization allows lower bias gradients but with respect to the entropy regularized utilities,
+
+not the unregularized utilities that we are interested in. The sweet spot lies somewhere in the middle.
+
+(a) SGD guarantees assume gradients are unbiased, i.e., the mean of sampled gradients is equal to the
+
+expected gradient in the limit of infinite samples n. Stochastic average deviation incentive gradients
+
+violate this assumption, the degree to which depends on the amount of entropy regularization  and number of samples n;  = 10-2 appears to minimize the gradient bias for n = 100 although with a
+
+nonzero asymptote around 2.5. (b) Computing a single stochastic gradient using more samples can
+
+reduce bias to zero in the limit. Note samples here refers to joint actions drawn from strategy profile
+
+x, not gradients as in (a). Additional samples makes gradient computation more expensive, but as we
+
+show later, these sample estimates can be amortized over iterations by reusing historical play. Both
+
+of the effects seen in (a) and (b) guide development of our proposed algorithm: (a) suggests using
+
+ > 0 and (b) suggests reusing recent historical play to compute gradients (with  > 0).
+
+E.2 Auxiliary y re. §4.2 The introduction of auxiliary variables yi are also supported by the results in Figure 7--QRE0.0 is equivalent to PED and yQRE0.0 is equivalent to PED augmented with y's to estimate averages of payoff gradients.
+E.3 Annealing  re. §3.1
+ADIDAS includes temperature annealing, replacing the need to preset  with instead an ADI threshold . Figure 8 compares this approach against other variants of the algorithm and shows this automated annealing mechanism reaches comparable final levels of ADI.
+E.4 Convergence re. §4.3
+In Figure 8, FTRL and RM achieve low ADI quickly in some cases. FTRL has recently been proven not to converge to Nash, and this is suggested to be true of no-regret algorithms in general (Flokas et al.,
+
+21
+
+(a) 3-player Blotto
+
+(b) 4-player Blotto
+
+Figure 7: Adding an appropriate level of entropy can accelerate convergence (compare PED to QRE0.01 in (b)). And amortizing estimates of joint play using y can reduce gradient bias, further improving performance (e.g., compare QRE0.00 to yQRE0.00 in (a) or (b)).
+
+(a) 3-player Blotto
+
+(b) 4-player Blotto
+
+Figure 8: Average deviation incentive of the symmetric joint strategy x(t) is plotted against algorithm
+
+iteration t. Despite FTRL's lack of convergence guarantees, it converges quickly in these games.
+
+2020; Mertikopoulos et al., 2018). Before proceeding, we demonstrate empirically in Figure 9 that FTRL and RM fail on games where minimizing Ladi still makes progress, even without an annealing schedule.
+
+(a) Modified-Shapley's
+
+(b) GAMUT-D7
+
+Figure 9: ADIDAS reduces Ladi in both games. In game (a), created by Ostrovski & van Strien (2013), to better test performance, x is initialized randomly rather than with the uniform distribution
+
+because the Nash is at uniform. In (b), computing gradients using full expectations (in black) results
+
+in very low ADI. Computing gradients using only single samples plus historical play allows a small reduction in ADI. More samples (e.g., n = 103) allows further reduction.
+
+22
+
+E.5 ADI stochastic estimate
+Computing ADI exactly requires the full payoff tensor, so in very large games, we must estimate ADI. Figure 10 shows how estimates of Ladi computed from historical play track their true expected value throughout training.
+
+(a) Blotto-3
+
+(b) Blotto-4
+
+Figure 10: Accuracy of running estimate of Ladi computed from y(t) (in light coral) versus true value (in red).
+
+F Experiments Repeated with ATE
+Bias re. §3.2+§4.1 We first empirically verify that adding an entropy regularizer to the player utilities introduces a trade-off: set entropy regularization too low and the best-response operator will have high bias; set entropy regularization too high and risk solving for the Nash of a game we are not interested in. Figure 11 shows there exists a sweet spot in the middle for moderate amounts of regularization (temperatures).
+Auxiliary y re. §4.2 The introduction of auxiliary variables yi are supported by the results in Figure 12--ATE0.0 is equivalent to PED and yATE0.0 is equivalent to PED augmented with y's to estimate averages of payoff gradients.
+In Figure 12, we also see a more general relationship between temperature and convergence rate. Higher temperatures appear to result in faster initial convergence (Ladi spikes initially in Figure 12a for  < 0.1) and lower variance but higher asymptotes, while the opposite holds for lower temperatures. These results suggest annealing the temperature over time to achieve fast initial convergence and lower asymptotes. Lower variance should also be possible by carefully annealing the learning rate to allow y to accurately perform tracking. Fixed learning rates were used here; we leave investigating learning rate schedules to future work.
+Figure 12b shows how higher temperatures (through a reduction in gradient bias) can result in accelerated convergence.
+Annealing  re. §3.1 ADIDAS includes temperature annealing replacing the need for setting the hyperparameter  with instead an ADI threshold . Figure 13 compares this approach against several other variants of the algorithm and shows this automated annealing mechanism reaches comparable final levels of ADI.
+Convergence re. §4.3 In Figure 13, FTRL and RM achieve low levels of ADI quickly in some cases. FTRL has recently been proven not to converge to Nash, and this is suggested to be true of no-regret algorithms such as RM in general (Flokas et al., 2020; Mertikopoulos et al., 2018). Before proceeding, we demonstrate empirically in Figure 14 that FTRL and RM fail on some games where ADIDAS still makes progress.
+Large-Scale re §4.4 Computing ADI exactly requires the full payoff tensor, so in very large games, we must estimate the ADI. Figure 15 shows how estimates of Ladi computed from historical play track their true expected value throughout training.
+
+23
+
+|| np 0 || || np 0 ||
+
+10.0 Error (Mean of Gradients)
+
+10.0 Error (Gradient of Mean)
+
+7.5
+
+7.5
+
+n=1
+
+n=1
+
+5.0
+
+n=4 n=21
+
+5.0
+
+n=4 n=21
+
+n=100
+
+n=100
+
+2.5
+
+2.5
+
+0.010 3 10 2 p 10 1 100
+
+0.010 3 10 2 p 10 1 100
+
+(a) Bias
+
+(b) Concentration
+
+Figure 11: Bias-Bias Tradeoff on Blotto(10 coins, 3 fields, 4 players). Curves are drawn for samples
+
+sizes of n = {1, 4, 21, 100}. Circles denote the minimum of each curve for all n  [1, 100]. Zero entropy regularization results in high gradient bias, i.e., stochastic gradients, n=0, do not align well with the expected gradient, =0, where n is the number of samples. On the other hand, higher entropy regularization allows lower bias gradients but with respect to the entropy regularized utilities,
+
+not the unregularized utilities that we are interested in. The sweet spot lies somewhere in the middle.
+
+(a) SGD guarantees assume gradients are unbiased, i.e., the mean of sampled gradients is equal to the
+
+expected gradient in the limit of infinite samples n. Stochastic average deviation incentive gradients
+
+violate this assumption, the degree to which depends on the amount of entropy regularization  and number of samples n; p = 10-2 appears to minimize the gradient bias for n = 100 although with a
+
+nonzero asymptote around 2.5. (b) Computing a single stochastic gradient using more samples can
+
+reduce bias to zero in the limit. Note samples here refers to joint actions from strategy profile x, not
+
+gradients as in (a). Additional samples makes gradient computation more expensive, but as we show
+
+later, these sample estimates can be amortized over iterations by reusing historical play. Both the
+
+effects seen in (a) and (b) guide development of our proposed algorithm: (a) suggests using  > 0
+
+and (b) suggests reusing recent historical play to compute gradients (with  > 0).
+
+(a) Blotto-3
+
+(b) Blotto-4
+
+Figure 12: (a) 3-player Blotto game; (b) 4-player Blotto game. Adding an appropriate level of entropy (e.g.,  = 0.01) can accelerate convergence (compare PED to ATE0.01 in (b)). And amortizing
+
+estimates of joint play can reduce gradient bias, further improving performance (e.g., compare ATE0.01 to yATE0.01 in (a) or (b)).
+
+G Comparison Against Additional Algorithms
+G.1 ED and FP Fail
+We chose not to include Exploitability Descent (ED) or Fictitious Play (FP) in the main body as we considered them to be "straw men". ED is only expected to converge in 2-player, zero-sum games. FP is non-convergent in some 2-player games as well (Goldberg et al., 2013). We run ED and FP with true expected gradients & best responses (s=) on the 3 player game in Figure 16 to convince the reader that failure to converge is not due to stochasticity.
+24
+
+(a) Blotto-3
+
+(b) Blotto-4
+
+Figure 13: (a) 3-player Blotto game; (b) 4-player Blotto game. The maximum a single agent can exploit the symmetric joint strategy x(t) is plotted against algorithm iteration t. Despite FTRL's lack
+
+of convergence guarantees, it converges quickly in these Blotto games.
+
+(a) Modified-Shapley's
+
+(b) GAMUT-D7
+
+Figure 14: (a) Modified-Shapley's; (b) GAMUT-D7. Deviation incentive descent reduces Ladi in both games. In (a), to better test the performance of the algorithms, x is initialized randomly rather
+
+than with the uniform distribution because the Nash is at uniform. In (b), computing ADI gradients
+
+using full expectations (in black) results in very low levels of ADI. Computing estimates using only single samples plus historical play allows a small reduction in ADI. More samples (e.g., n = 103)
+
+allows further reduction.
+
+(a) Blotto-3
+
+(b) Blotto-4
+
+Figure 15: Accuracy of running estimate of Ladi computed from y(t) (in light coral) versus true value (in blue).
+
+25
+
+Figure 16: FP, ED, PED access the full tensor. yATEauto samples.
+
+G.2 Gambit Solvers
+
+We ran all applicable gambit solvers on the 4-player, 10-coin, 3-field Blotto game (comand listed below). All solvers fail to return a Nash equilibrium except gambit-enumpoly which returns all 36 permutations of the following pure, non-symmetric Nash equilibrium:
+
+x = [(10, 0, 0), (10, 0, 0), (0, 10, 0), (0, 0, 10)]
+
+(43)
+
+where each of the four players places 10 coins on one of the three fields.
+
+· gambit-enumpoly · gambit-gnm · gambit-ipa · gambit-liap · gambit-simpdiv · gambit-logit
+
+Command:
+1 timeout 3600s gambit -enumpoly -H < blotto_10_3_4.nfg >> enumpoly.txt; timeout 3600s gambit -gnm < blotto_10_3_4.nfg >> gnm.txt; timeout 3600s gambit -ipa < blotto_10_3_4.nfg >> ipa.txt; timeout 3600s gambit -liap < blotto_10_3_4.nfg >> liap.txt; timeout 3600s gambit simpdiv < blotto_10_3_4.nfg >> simpdiv.txt; timeout 3600s gambit logit -m 1.0 -e < blotto_10_3_4.nfg >> logit.txt
+
+H Additional Game Domains
+H.1 Diplomacy Experiments - Subsampled Games
+Figure 17 runs a comparison on 40 subsampled tensors (7-players, 4-actions each) taken from the 40 turns of a single Diplomacy match. The four actions selected for each player are sampled from the corresponding player's trained policy.
+Figure 18 runs a comparison on two Diplomacy meta-games, one with 5 bots trained using Fictious Play and the other with bots trained using Iterated Best Response (IBR) --these are the same meta-games analyzed in Figure 3 of (Anthony et al., 2020).
+Figure 19 demonstrates an empirical game theoretic analysis (Wellman, 2006; Jordan et al., 2007; Wah et al., 2016) of a large symmetric 7-player Diplomacy meta-game where each player elects 1 of 5 trained bots to play on their behalf. In this case, the expected value of each entry in the payoff tensor represents a winrate. Each entry can only be estimated by simulating game play, and the result of each game is a Bernoulli random variable. To obtain a winrate estimate within 0.01 of the true estimate with probability 95%, a Chebyshev bound implies more than 223 samples are needed. The
+26
+
+Figure 17: Subsampled games.
+
+Probability under Nash ADI (71 adi)
+
+(a) Diplomacy FP
+
+(b) Diplomacy IBR
+
+Figure 18: (a) FP; (b) IBR. The maximum a single agent can exploit the symmetric joint strategy x(t) is plotted against algorithm iteration t. Many of the algorithms quickly achieve near zero Ladi, so unlike in the other experiments, hyperparameters are selected according according to the earliest point at which exploitablity falls below 0.01 with ties split according to the final value.
+
+symmetric payoff tensor contains 330 unique entries, requiring over 74 thousand games in total. In the experiment below, ADIDAS achieves negligible ADI in less than 7 thousand iterations with 50 samples of joint play per iteration ( 5× the size of the tensor).
+
+1.00 yATEauto Nash Approximation xt
+
+0.75
+
+0.50
+
+20 10
+
+0.25
+
+4 2
+
+0.000
+
+0
+2000 40It0e0rati6o0n0s0 8000 10000
+
+0.10 0.08 0.06 0.04 0.02 0.000
+
+Diplomacy MetaGame
+yATE1.0 yATEauto yATE0.0
+2000 40It0e0rati6o0n0s0 8000 10000
+
+(a) 7-player, 5-action symmetric Nash (xt)
+
+(b) ADI Estimate
+
+Figure 19: (a) Evolution of the symmetric Nash approximation returned by ADIDAS; (b) ADI
+
+estimated from auxiliary variable yt. Black vertical lines indicate the temperature  was annealed.
+
+27
+
+H.2 Diplomacy Experiments - Empirical Game Theoretic Analysis
+H.2.1 Continuum of Quantal Response Equilibria
+The purpose of this work is to approximate Nash which ADIDAS is designed to do, however, the approach ADIDAS takes of attempting to track the continuum of QREs (or the continuum defined by the Tsallis entropy) allows returning these intermediate QRE strategies which may be of interest. Access to these intermediate approximations can be useful when a game playing program cannot wait for ADIDAS's final output to play a strategy, for example, in online play. Moreover, as mentioned in the main body, human play appears to track the continuum of QREs in some cases where the human must both learn about the game (rules, payoffs, etc.) whilst also evolving their strategy (McKelvey & Palfrey, 1995).
+Notice that the trajectory of the Nash approximation is not monotonic; for example, see the kink around 2000 iterations where Bot 10 and 20 swap rank. The continuum of QRE's from  =  to  = 0 is known to be complex providing further reason to carefully estimate ADI and its gradients.
+
+H.2.2 Convergence to a Local Optimum: Example
+One can also see that yATE0.0 has converged to a suboptimal local minimum in the energy landscape. This is likely due to the instability and bias in the gradients computed without any entropy bonus; notice the erratic behavior of its ADI within the first 2000 iterations.
+
+H.2.3 Importance of Entropy Bonus
+Figure 20 shows how the automated annealing mechanism (yATEauto) seeks to maintain entropy regularization near a "sweet spot" --too little entropy (yATE0.0) results in an erratic evolution of Nash and too much entropy (yATE1.0) prevents significant movement from the initial uniform distribution. Figure 21 repeats the computation with a smaller auxiliary learning rate y and achieves better results.
+
+ofPrBoobta1b-ilLiitgyhtuntdoe2r1-NaDsarhk ADI (71 adi)
+
+0.3
+
+Nash Approximation xt
+yATEauto
+
+yATE1.0
+
+0.2
+
+yATE0.0
+
+Diplomacy MetaGame
+
+10 1
+
+yATE1.0 yATEauto yATE0.0
+
+0.1
+
+0.00 50 1I0te0ratio1n5s0 200
+
+10
+
+2
+0
+
+50 1I0te0ratio1n5s0 200 250
+
+(a) 7-player, 21-action symmetric Nash (xt)
+
+(b) ADI Estimate
+
+Figure 20: (a) Evolution of the symmetric Nash approximation; (b) ADI estimated from auxiliary
+
+variable yt. Black vertical lines indicate the temperature  was annealed. Auxiliary learning rate y = 1/10.
+
+H.3 El Farol Bar Stage Game
+We compare ADIDAS variants and regret matching in Figure 22 on the 10-player symmetric El Farol Bar stage game with hyperparameters n = 10, c = 0.7, C = nc, B = 0, S = 1, G = 2 (see Section 3.1, The El Farol stage game in (Whitehead, 2008)). Recall that the homotopy that ADIDAS attempts to trace is displayed in Figure 2b of the main body.
+28
+
+ofPrBoobta1b-ilLiitgyhtuntdoe2r1-NaDsarhk ADI (71 adi)
+
+0.6
+
+Nash Approximation xt yATEauto
+
+yATE0.0
+
+0.4
+
+Diplomacy MetaGame
+
+10 1
+
+yATEauto yATE0.0
+
+0.2
+
+10 2
+
+0.00 100 2I0te0ratio3n0s0 400 500
+
+0 100 2I0te0ratio3n0s0 400 500
+
+(a) 7-player, 21-action symmetric Nash (xt)
+
+(b) ADI Estimate
+
+Figure 21: (a) Evolution of the symmetric Nash approximation; (b) ADI estimated from auxiliary
+
+variable yt. Black vertical lines indicate the temperature  was annealed. Auxiliary learning rate y = 1/25. In addition to the change in y, also note the change in axes limits versus Figure 20.
+
+Figure 22: (10-player, 2-action El Farol stage game) ADIDAS and regret matching both benefit from additional samples. Both find the same unique mixed Nash equilibrium. In this case, regret matching finds it much more quickly.
+
+I Description of Domains
+
+I.1 Modified Shapley's
+The modified Shapley's game mentioned in the main body (Figure 4a) is defined in Table 5 (Ostrovski & van Strien, 2013).
+
+10 10 01
+
+- 1 0 0 - 1 1 0 -
+
+(a) Player A's Payoff Matrix
+
+(b) Player B's Payoff Matrix
+
+Table 5: (a) Player A; (b) Player B. We set  = 0.5 in experiments and subtract - from each payoff matrix to ensure payoffs are non-negative; ATE requires non-negative payoffs.
+
+I.2 Colonel Blotto Despite its apparently simplicity, Colonel Blotto is a complex challenge domain and one under intense research (Behnezhad et al., 2017, 2018, 2019; Ahmadinejad et al., 2019; Boix-Adserà et al., 2020).
+29
+
+J Connections to Other Algorithms
+
+J.1 Consensus Algorithm
+
+ADIDAS with Tsallis entropy and temperature fixed to  = p = 1 recovers the regularizer proposed
+
+for the Consensus algorithm (Mescheder et al., 2017) plus entropy regularization. To see this, recall
+
+from Appx. D.1, the Tsallis entropy regularizer:
+
+Sk=p=1(xk, x-k)
+
+=
+
+sk (1 2
+
+-
+
+x2km)
+
+(44)
+
+m
+
+where sk =
+
+1
+m(kxkm )1/1 = ||kxk ||1/1 is treated as a constant w.r.t. x.
+
+In
+
+the
+
+case
+
+with
+
+
+
+=
+
+p
+
+=
+
+1,
+
+BRk
+
+=
+
+BR(x-k )
+
+=
+
+1 sk
+
+kxk
+
+where
+
+we
+
+have
+
+assumed
+
+the
+
+game
+
+has
+
+been
+
+offset by a constant so that it contains only positive payoffs. Plugging these into the definition of
+
+Ladi, we find
+
+Ladi(x) = uk(BRk, x-k) - uk(xk, x-k)
+
+(45)
+
+k
+
+
+
+k
+
+uk
+
+(
+
+1 sk
+
+kxk
+
+,
+
+x-k )
+
+-
+
+uk (xk
+
+,
+
+x-k
+
+)
+
+(46)
+
+1 =
+k sk
+
+||kxk ||2
+
+-xk kxk .
+
+consensus regularizer
+
+(47)
+
+Note the Consensus regularizer can also be arrived at by replacing the best response with a 1-step gradient ascent lookahead, i.e., BRk = xk + kxk :
+
+Ladi(x) = uk(BRk, x-k) - uk(xk, x-k)
+
+(48)
+
+k
+
+ uk(xk + kxk , x-k) - uk(xk, x-k)
+
+(49)
+
+k
+
+= (xk kxk ) + ||kxk ||2 - (xk kxk )
+
+(50)
+
+k
+
+= ||kxk ||2.
+
+(51)
+
+k
+
+J.2 Exploitability Descent as Extragradient
+
+In normal-form games, Exploitability Descent (ED) (Lockhart et al., 2019) is equivalent to Extragradi-
+ent (Korpelevich, 1976) (or Mirror Prox (Juditsky et al., 2011)) with an infinite intermediate step size. Recall BRk = arg maxxmk-1 uk(xk, x-k) = arg maxxmk-1 x kxk . Using the convention that ties between actions result in vectors that distribute a 1 uniformly over the maximizers, the best response can be rewritten as BRk = lim^ [xk + ^kxk ] where  is the Euclidean projection onto the simplex. Define F (x) such that its kth component F (x)k = -kxk = -kxk (x-k) where we have simply introduced x-k in parentheses to emphasize that player k's gradient is a function of x-k
+only, and not xk. Equations without subscripts imply they are applied in parallel over the players.
+
+ED executes the following update in parallel for all players k:
+
+xk+1  [xk + xk {uk(xk, x-k)}|x-k=BR-k ].
+
+(52)
+
+Define x^k = xk - ^F (x)k. And as an abuse of notation, let x^-k = x-k - ^F (x)-k. Extragradient executes the same update in parallel for all players k:
+
+xk+1  [xk - F ([x - ^F (x)])k]
+
+(53)
+
+= [xk - F ([x + ^x])k]
+
+(54)
+
+= [xk - F (BR)k]
+
+(55)
+
+= [xk + xk {uk(xk, x-k)}|x-k=BR-k ].
+
+(56)
+
+30
+
+Extragradient is known to converge in two-player zero-sum normal form games given an appropriate step size scheme. The main property that Extragradient relies on is monotonicity of the vector function F . All two-player zero-sum games induce a monotone F , however, this is not true in general of two-player general-sum or games with more players. ED is only proven to converge for two-player zero-sum, but this additional connection provides an additional reason why we do not expect ED to solve many-player general-sum normal-form games, which are the focus of this work. Please see Appx. G.1 for an experimental demonstration.
+
+K Python Code
+For the sake of reproducibility we have included code in python+numpy.
+1 """ 2 Copyright 2020 ADIDAS Authors.
+3
+4
+5 Licensed under the Apache License , Version 2.0 (the "License"); 6 you may not use this file except in compliance with the License. 7 You may obtain a copy of the License at
+8
+9 https://www.apache.org/licenses/LICENSE -2.0
+10
+11 Unless required by applicable law or agreed to in writing , software 12 distributed under the License is distributed on an " AS IS " BASIS , 13 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND , either express or
+implied. 14 See the License for the specific language governing permissions and 15 limitations under the License . 16 """ 17 import numpy as np 18 from scipy import special
+19
+20 def s i m p l e x _ p r o j e c t _ g r a d ( g ) : 21 """ Project gradient onto tangent space of simplex . """ 22 return g - g . sum () / g . size
+Listing 1: Header.
+
+1 def gradients_qre_nonsym(dist , y, anneal_steps , payoff_matrices ,
+
+2
+
+num_players , temp=0., proj_grad=True ,
+
+3
+
+exp_thresh =1e-3, lrs=(1e-2, 1e-2),
+
+4
+
+logit_clip = -1 e5 ):
+
+5
+
+"""Computes exploitablity gradient and aux variable gradients.
+
+6
+
+7
+
+Args:
+
+8
+
+dist: list of 1-d np.arrays , current estimate of nash
+
+9
+
+y: list of 1-d np.arrays , current est. of payoff gradient
+
+10
+
+anneal_steps: int , elapsed num steps since last anneal
+
+11
+
+payoff_matrices: dict with keys as tuples of agents (i, j) and
+
+12
+
+values of (2 x A x A) arrays , payoffs for each joint action.
+
+13
+
+keys are sorted and arrays are indexed in the same order.
+
+14
+
+num_players: int , number of players
+
+15
+
+temp: non -negative float , default 0.
+
+16
+
+proj_grad: bool , if True , projects dist gradient onto simplex
+
+17
+
+exp_thresh: ADI threshold at which temp is annealed
+
+18
+
+lrs: tuple of learning rates (lr_x , lr_y)
+
+19
+
+logit_clip: float , minimum allowable logit
+
+20
+
+Returns:
+
+21
+
+gradient of ADI w.r.t. (dist , y, anneal_steps)
+
+22
+
+temperature (possibly annealed , i.e., reduced)
+
+23
+
+unregularized ADI (stochastic estimate)
+
+24
+
+shannon regularized ADI (stochastic estimate)
+
+25
+
+"""
+
+26
+
+# first compute policy gradients and player effects (fx)
+
+31
+
+27
+
+policy_gradient = []
+
+28
+
+other_player_fx = []
+
+29
+
+grad_y = []
+
+30
+
+unreg_exp = []
+
+31
+
+reg_exp = []
+
+32
+
+for i in range(num_players):
+
+33
+
+34
+
+nabla_i = np.zeros_like(dist[i])
+
+35
+
+for j in range(num_players):
+
+36
+
+if j == i:
+
+37
+
+continue
+
+38
+
+if i < j:
+
+39
+
+hess_i_ij = payoff_matrices[(i, j)][0]
+
+40
+
+else:
+
+41
+
+hess_i_ij = payoff_matrices[(j, i)][1].T
+
+42
+
+43
+
+nabla_ij = hess_i_ij.dot(dist[j])
+
+44
+
+nabla_i += nabla_ij / float(num_players - 1)
+
+45
+
+46
+
+grad_y.append(y[i] - nabla_i)
+
+47
+
+48
+
+if temp >= 1e-3: # numerical under/overflow for temp < 1e-3
+
+49
+
+br_i = special.softmax(y[i] / temp)
+
+50
+
+br_i_mat = (np.diag(br_i) - np.outer(br_i , br_i)) / temp
+
+51
+
+log_br_i_safe = np.clip(np.log(br_i), logit_clip , 0)
+
+52
+
+br_i_policy_gradient = nabla_i - temp * (log_br_i_safe + 1)
+
+53
+
+else:
+
+54
+
+power = np.inf
+
+55
+
+s_i = np.linalg.norm(y[i], ord=power)
+
+56
+
+br_i = np.zeros_like(dist[i])
+
+57
+
+maxima_i = (y[i] == s_i)
+
+58
+
+br_i[maxima_i] = 1. / maxima_i.sum()
+
+59
+
+br_i_mat = np.zeros((br_i.size , br_i.size))
+
+60
+
+br_i_policy_gradient = np.zeros_like(br_i)
+
+61
+
+62
+
+policy_gradient_i = np.array(nabla_i)
+
+63
+
+if temp > 0:
+
+64
+
+log_dist_i_safe = np.clip(np.log(dist[i]), logit_clip , 0)
+
+65
+
+policy_gradient -= temp * (log_dist_i_safe + 1)
+
+66
+
+policy_gradient.append(policy_gradient_i)
+
+67
+
+68
+
+unreg_exp_i = np.max(y[i]) - y[i].dot(dist[i])
+
+69
+
+unreg_exp.append(unreg_exp_i)
+
+70
+
+71
+
+entr_br_i = temp * special.entr(br_i).sum()
+
+72
+
+entr_dist_i = temp * special.entr(dist[i]).sum()
+
+73
+
+74
+
+reg_exp_i = y[i].dot(br_i - dist[i]) + entr_br_i - entr_dist_i
+
+75
+
+reg_exp.append(reg_exp_i)
+
+76
+
+77
+
+other_player_fx_i = (br_i - dist[i])
+
+78
+
+other_player_fx_i += br_i_mat.dot(br_i_policy_gradient)
+
+79
+
+other_player_fx.append(other_player_fx_i)
+
+80
+
+81
+
+# then construct ADI gradient
+
+82
+
+grad_dist = []
+
+83
+
+for i in range(num_players):
+
+84
+
+85
+
+grad_dist_i = -policy_gradient[i]
+
+86
+
+for j in range(num_players):
+
+87
+
+if j == i:
+
+88
+
+continue
+
+89
+
+if i < j:
+
+90
+
+hess_j_ij = payoff_matrices[(i, j)][1]
+
+91
+
+else:
+
+32
+
+92
+
+hess_j_ij = payoff_matrices[(j, i)][0].T
+
+93
+
+94
+
+grad_dist_i += hess_j_ij.dot(other_player_fx[j])
+
+95
+
+96
+
+if proj_grad:
+
+97
+
+grad_dist_i = simplex_project_grad(grad_dist_i)
+
+98
+
+99
+
+grad_dist.append(grad_dist_i)
+
+100
+
+101
+
+unreg_exp_mean = np.mean(unreg_exp)
+
+102
+
+reg_exp_mean = np.mean(reg_exp)
+
+103
+
+104
+
+_, lr_y = lrs
+
+105
+
+if (reg_exp_mean < exp_thresh) and (anneal_steps >= 1 / lr_y):
+
+106
+
+temp = np.clip(temp / 2., 0., 1.)
+
+107
+
+if temp < 1e-3: # consistent with numerical issue above
+
+108
+
+temp = 0.
+
+109
+
+grad_anneal_steps = -anneal_steps
+
+110
+
+else:
+
+111
+
+grad_anneal_steps = 1
+
+112
+
+113
+
+return ((grad_dist , grad_y , grad_anneal_steps), temp ,
+
+114
+
+unreg_exp_mean , reg_exp_mean)
+
+Listing 2: ADIDAS Gradient.
+
+1 def gradients_ate_sym(dist , y, anneal_steps , payoff_matrices ,
+
+2
+
+num_players , p=1, proj_grad=True ,
+
+3
+
+exp_thresh =1e-3, lrs=(1e-2, 1e-2)):
+
+4
+
+"""Computes ADI gradient and aux variable gradients.
+
+5
+
+6
+
+Args:
+
+7
+
+dist: list of 1-d np.arrays , current estimate of nash
+
+8
+
+y: list of 1-d np.arrays , current est. of payoff gradient
+
+9
+
+anneal_steps: int , elapsed num steps since last anneal
+
+10
+
+payoff_matrices: dict with keys as tuples of agents (i, j) and
+
+11
+
+values of (2 x A x A) arrays , payoffs for each joint action.
+
+12
+
+keys are sorted and arrays are indexed in the same order.
+
+13
+
+num_players: int , number of players
+
+14
+
+p: float in [0, 1], Tsallis entropy -regularization
+
+15
+
+proj_grad: bool , if True , projects dist gradient onto simplex
+
+16
+
+exp_thresh: ADI threshold at which p is annealed
+
+17
+
+lrs: tuple of learning rates (lr_x , lr_y)
+
+18
+
+Returns:
+
+19
+
+gradient of ADI w.r.t. (dist , y, anneal_steps)
+
+20
+
+temperature , p (possibly annealed , i.e., reduced)
+
+21
+
+unregularized ADI (stochastic estimate)
+
+22
+
+tsallis regularized ADI (stochastic estimate)
+
+23
+
+"""
+
+24
+
+nabla = payoff_matrices [0].dot(dist)
+
+25
+
+if p >= 1e-2: # numerical under/overflow when power > 100.
+
+26
+
+power = 1. / float(p)
+
+27
+
+s = np.linalg.norm(y, ord=power)
+
+28
+
+if s == 0:
+
+29
+
+br = np.ones_like(y) / float(y.size) # uniform dist
+
+30
+
+else:
+
+31
+
+br = (y / s)**power
+
+32
+
+else:
+
+33
+
+power = np.inf
+
+34
+
+s = np.linalg.norm(y, ord=power)
+
+35
+
+br = np.zeros_like(dist)
+
+36
+
+maxima = (y == s)
+
+37
+
+br[maxima] = 1. / maxima.sum()
+
+38
+
+39
+
+unreg_exp = np.max(y) - y.dot(dist)
+
+33
+
+40
+
+br_inv_sparse = 1 - np.sum(br**(p + 1))
+
+41
+
+dist_inv_sparse = 1 - np.sum(dist**(p + 1))
+
+42
+
+entr_br = s / (p + 1) * br_inv_sparse
+
+43
+
+entr_dist = s / (p + 1) * dist_inv_sparse
+
+44
+
+reg_exp = y.dot(br - dist) + entr_br - entr_dist
+
+45
+
+46
+
+entr_br_vec = br_inv_sparse * br**(1 - p)
+
+47
+
+entr_dist_vec = dist_inv_sparse * dist**(1 - p)
+
+48
+
+49
+
+policy_gradient = nabla - s * dist**p
+
+50
+
+other_player_fx = (br - dist)
+
+51
+
+other_player_fx += 1 / (p + 1) * (entr_br_vec - entr_dist_vec)
+
+52
+
+53
+
+other_player_fx_translated = payoff_matrices [1].dot(
+
+54
+
+other_player_fx)
+
+55
+
+grad_dist = -policy_gradient
+
+56
+
+grad_dist += (num_players - 1) * other_player_fx_translated
+
+57
+
+if proj_grad:
+
+58
+
+grad_dist = simplex_project_grad(grad_dist)
+
+59
+
+grad_y = y - nabla
+
+60
+
+61
+
+_, lr_y = lrs
+
+62
+
+if (reg_exp < exp_thresh) and (anneal_steps >= 1 / lr_y):
+
+63
+
+p = np.clip(p / 2., 0., 1.)
+
+64
+
+if p < 1e-2: # consistent with numerical issue above
+
+65
+
+p = 0.
+
+66
+
+grad_anneal_steps = -anneal_steps
+
+67
+
+else:
+
+68
+
+grad_anneal_steps = 1
+
+69
+
+70
+
+return ((grad_dist , grad_y , grad_anneal_steps), p, unreg_exp ,
+
+71
+
+reg_exp)
+
+Listing 3: ADIDAS Gradient (assuming symmetric Nash and with Tsallis entropy).
+
+34
+
+

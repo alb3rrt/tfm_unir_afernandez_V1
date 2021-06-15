@@ -1,0 +1,723 @@
+Normalizing Flows for Knockoff-free Controlled Feature Selection
+
+arXiv:2106.01528v1 [stat.ML] 3 Jun 2021
+
+Derek Hansen Department of Statistics University of Michigan
+
+Brian Manzo Department of Statistics University of Michigan
+
+Jeffrey Regier Department of Statistics University of Michigan
+
+Abstract
+The goal of controlled feature selection is to discover the features a response depends on while limiting the proportion of false discoveries to a predefined level. Recently, multiple methods have been proposed that use deep learning to generate knockoffs for controlled feature selection through the Model-X knockoff framework. We demonstrate, however, that these methods often fail to control the false discovery rate (FDR). There are two reasons for this shortcoming. First, these methods often learn inaccurate models of features. Second, the "swap" property, which is required for knockoffs to be valid, is often not well enforced. We propose a new procedure called FLOWSELECT that remedies both of these problems. To more accurately model the features, FLOWSELECT uses normalizing flows, the state-ofthe-art method for density estimation. To circumvent the need to enforce the swap property, FLOWSELECT uses a novel MCMC-based procedure to directly compute p-values for each feature. Asymptotically, FLOWSELECT controls the FDR exactly. Empirically, FLOWSELECT controls the FDR well on both synthetic and semisynthetic benchmarks, whereas competing knockoff-based approaches fail to do so. FLOWSELECT also demonstrates greater power on these benchmarks. Additionally, using data from a genome-wide association study of soybeans, FLOWSELECT correctly infers the genetic variants associated with specific soybean traits.2
+1 Introduction
+Researchers in machine learning have made much progress in developing models that can predict a response Y from features X with high accuracy. In many application areas, however, practitioners need to know which features drive variation in the response, and they need to do so in a way that limits the number of false discoveries. For example, in genome-wide association studies (GWAS), scientists scan hundreds of thousands of genetic markers to identify variants associated with a particular trait or disease. The cost of false discoveries (i.e., selecting variants that are not associated with the disease) is high, as costly follow-up experiments are often conducted on selected variants. Another example is analyzing observational data about the effectiveness of educational interventions; in this case, researchers may want to select certain educational programs to implement on a larger scale and require confidence that their selection does not include unacceptably many ineffective programs. As a result, researchers are interested in methods that model the dependence structure of the data while providing an upper bound on the false discovery rate (FDR) [1].
+Model-X knockoffs [2] were introduced for controlled variable selection and offer theoretical guarantees of FDR control along with the flexibility of using an arbitrary predictive model. But the potential to control FDR with knockoffs comes at the expense of having to know (or model) the joint
+Email: dereklh@umich.edu 2Software to reproduce the experiments is posted publicly at https://github.com/dereklhansen/ flowselect.
+Preprint. Under review.
+
+distribution of the covariates. Hence, a body of research has developed that explores the use of deep generative models [3, 4, 5, 6] to estimate the distribution of X and to sample knockoff features based on that distribution. However, the ability of these methods to control the FDR is contingent on their ability to correctly model the distribution of the features. Learning a sufficiently expressive model for the covariates can be challenging. The knockoff procedure also requires learning the knockoff distribution, typically an even more challenging task as it requires matching the covariate distribution without constructing exact copies of the original variables and satisfying the knockoff swap property, which states that the joint distribution of the covariates and the knockoffs should be invariant to swapping any subset of covariates with their knockoffs.
+Even if it is possible to successfully model the feature distribution, knockoffs are computationally efficient because they require only one sample from the knockoff distribution to assess the relevance of all p features. However, in situations where the joint density of the feature is unknown, empirical approaches to knockoff generation (e.g., [3, 4, 5, 6]) fail to characterize a valid knockoff distribution and therefore do not control the FDR (Section 5). Even with a known covariate model, it is not straightforward to construct a valid knockoff distribution unless a specific model structure is known (e.g., a hidden Markov model).
+We propose a new feature selection method called FLOWSELECT (Section 3), which does not suffer from these problems. FLOWSELECT uses normalizing flows to learn the joint density of the covariates. Normalizing flows is a state-of-the-art method for density estimation; asymptotically, they can approximate any distribution arbitrarily well [7, 8, 9]. Additionally, FLOWSELECT circumvents the need to sample the knockoff distribution by instead applying a fast variant of the conditional randomization test [2]. Samples from the complete conditionals are drawn using MCMC, ensuring they are unbiased with respect to the learned data distribution.
+Asymptotically, FLOWSELECT computes exactly correct p-values (Section 4). The proof makes use of the universal approximation property of normalizing flows and the convergence of MCMC samples to the chain's stationary distribution. Empirically, FLOWSELECT outperforms the alternatives on synthetic (Gaussian) data and semi-synthetic data (real predictors and a synthetic response); FLOWSELECT controls the FDR where other, knockoff-based approaches do not, while also achieving higher power than competing methods (Section 5). Finally, in a challenging real-world problem with soybean genome-wide association study (GWAS) data, FLOWSELECT successfully harnesses normalizing flows for modeling discrete and sequential GWAS data, and for selecting genetic variants the traits depend on (Section 5.3).
+2 Background
+FLOWSELECT brings together four existing lines of research, which we briefly introduce below.
+Normalizing flows Normalizing flows [7] is a general framework for density estimation of a multidimensional distribution with arbitrary dependencies. The basic idea of a normalizing flow is to start with a simple probability distribution (e.g., Gaussian or uniform), which is called the base distribution and denoted Z, and push samples from the base distribution through a series of invertible and differentiable transformations, denoted J, to define the joint distribution of X  Rp  PX . Assuming such a mapping J exists, then J-1(X) = Z and normalizing flows can approximate any multivariate density, subject to regularity conditions detailed in [8]. Details about the specific normalizing flow architecture used in FLOWSELECT are provided in Appendix A.
+Controlled feature selection Suppose one fits a model Y |X, where X  Rp is a matrix of features, and there is some subset of the features (i.e., the relevant features) such that conditioned on that subset, Y is independent of the other features (the null features). The goal of the controlled feature selection procedure is to maximize the number of relevant features selected while limiting the number of null features selected to a predefined level. If we denote the total number of selected features R, then we can decompose R into V , the number of relevant features selected, and S, the number of null features selected. Using this notation, the false discovery rate is equal to E[V / max(V + S, 1)] = E[V / max(R, 1)], which is the expected proportion of discoveries that are actually null.
+2
+
+Conditional randomization test Controlled feature selection can be seen as a multiple hypothesis
+testing problem where there are p null hypotheses, each of which says that feature Xj is conditionally independent of the response Y , given all the other features X-j. Explicitly, the test of the following hypothesis is conducted for each feature j = {1, . . . , p}:
+
+H0 : Xj  Y |X-j versus H1 : Hj  Y |X-j.
+
+(1)
+
+To test these hypotheses, one can use a conditional randomization test (CRT) [2]. For each feature tested in a conditional randomization test, a test statistic Tj (e.g., the LASSO coefficient or another measure of feature importance) is first computed on the original data. Then, the null distribution of Tj is estimated by computing its value T~j based on samples X~j drawn from the conditional distribution of Xj|X-j. Finally, the p-value is calculated based on the empirical CDF of the null test statistics, and features whose p-values fall below the threshold set by the Benjamini-Hochberg procedure [1] are
+selected. Though the CRT is introduced as a computationally inefficient alternative to knockoffs, the
+CRT nonetheless has some appeal as it requires only knowledge of the distribution of the covariates
+(and not of a knockoff distribution); the former can be learned empirically by maximum likelihood.
+
+Holdout randomization test A potential computational bottleneck of the CRT is that many statis-
+tics such as the LASSO coefficient require fitting a predictive model for every null sample. The
+holdout randomization test (HRT) [10] introduces a test statistic that requires fitting the model only once. Let  represent the parameters of the chosen model, and let T (X, Y, ) be an importance statistic calculated from the model with input data. For example, T , could be the predictive likelihood P(Y test|Xtest) or the predictive score R2. To use the HRT, first fit model parameters ^ based on the training data. Next, for each covariate j, calculate the test statistic Tj  T (Xtest, Y test, ^). Then, generate k null samples and compute Tj,k  T (X(tejst jk), Y test, ^), where X(tejst jk) replaces the j-th covariate with the k-th generated null sample. Finally, calculate the p-value as in the CRT, based on
+the empirical CDF of the null test statistics.
+
+3 Methodology
+
+FLOWSELECT implements the CRT for arbitrary feature distributions by using a normalizing flow to fit the feature distribution and Markov chain Monte Carlo (MCMC) to sample from each complete conditional distribution. Performing controlled feature selection with this procedure consists of the three steps outlined below.
+
+Step 1: Model the predictors with a normalizing flow
+
+Starting with the samples X1, . . . , XN  PX , we fit the parameters of a normalizing flow J to maximize the log likelihood of the data with respect to a base distribution pZ:
+
+N
+
+^ = arg max log p(Xi)
+
+
+
+i=1
+
+(2)
+
+where p(Xi) = pZ (J(X)) det
+
+ J (X ) X
+
+.
+
+The resulting density p^ is a fitted approximation to the true density PX . The specific normalizing flow architecture we use in experiments consists of a single Gaussianization layer [11] followed by a masked autoregressive flow (MAF) [12]. The first layer can learn complex marginal distributions for each covariate, while the MAF learns the dependencies between them. We call this collective architecture GaussMAF. More detail on the architecture of normalizing flows and GaussMAF can be found in Appendix A.
+
+Step 2: Sample from the complete conditionals with MCMC
+For each feature j, we aim to sample corresponding null features X~i,j,k that are equal in distribution to p^(Xi,j|Xi,-j), but independent of Yi. However, we cannot directly sample from this conditional distribution. Instead, we implement an MCMC algorithm that admits it as a stationary distribution.
+
+3
+
+Input: Feature matrix X  RN×D, observation index i, feature index j, number of samples K,
+
+fitted normalizing flow p^, MCMC proposal qj Output: Null features X~i,j,k for k = 1, . . . , K
+
+1 for k = 1, . . . , K do
+
+2 Propose from MCMC kernel: Xi,j,k  qj (·|X~i,j,k-1, Xi,-j )
+
+3
+
+Calculate acceptance probability:
+
+ri,j,k
+
+
+
+p^(Xi,j,k ,Xi,-j )qj (X~i,j,k-1|Xi,j,k ,Xi,-j ) p^(X~i,j,k-1,Xi,-j )qj (Xi,j,k |X~i,j,k-1,Xi,-j )
+
+4 Sample rejection indicator: Ui,j,k  Bernoulli(ri,j,k  1)
+
+5 if Ui,j,k = 1 then
+
+6
+
+X~i,j,k  Xi,j,k
+
+7 else
+
+8
+
+X~i,j,k  X~i,j,k-1
+
+9 end
+
+10 end
+
+Algorithm 1: Step 2 of the FLOWSELECT procedure for drawing K null features X~i,j|Xi--j for feature j at observation i.
+
+The samples drawn from MCMC are autocorrelated, but any statistic calculated over these samples will converge almost surely to the correct value. The choice of the MCMC proposal distribution qj is flexible. Since each Markov chain is only one-dimensional, a Metropolis-Hastings Gaussian random walk with the standard deviation set based on the covariance works reasonably well in experiments. However, one could easily use information from p^, such as higher-order derivatives, to construct a more efficient proposal. Algorithm 1 shows how to implement step 2.
+
+Step 3: Test for significance with the CRT/HRT
+
+As in the CRT, feature j has high evidence of being significant if, under the null hypothesis that j is a null feature, the probability of observing a test statistic greater than Tj(X, Y ) is low:
+
+j  PX Tj(X, Y ) < Tj([X~j, X-j], Y )|X, Y
+
+(3)
+
+However, the above p-value j is not tractable. For each sample X~·,j,k drawn using MCMC, we calculate the corresponding feature statistic and compare it to the real feature statistic, leading to an approximated p-value ^j:
+
+1 ^j  K + 1
+
+K
+1 + 1[Tj(X, Y ) < Tj([X~j,k, X-j], Y )]
+
+.
+
+(4)
+
+k=1
+
+To control the FDR, we use the Benjamini-Hochberg procedure to establish a threshold for the
+
+observed p-values. First, sort the p-values in ascending order ^1  · · ·  ^p. Then, to control the
+
+FDR at level   [0, 1], set the selection threshold s()
+
+maxj {^j
+
+:
+
+^j
+
+
+
+j D
+
+},
+
+and
+
+select
+
+all
+
+features j such that j  s().
+
+Under the assumptions of the Benjamini-Hochberg procedure, the FDR will be controlled with any
+function Tj, but the power of the test depends on Tj being higher when j is a significant feature. For example, if Y is believed to vary linearly with respect to X, Tj(X, Y ) could be the absolute estimated regression coefficient |^j| for the linear model Y = X + . Another choice is the HRT feature statistic described earlier.
+
+4 Asymptotic results
+The ability of FLOWSELECT to control the FDR relies on its ability to produce p-values estimates that converge to the correct p-values for the hypothesis test in Equation (1). Given asymptotically correct p-values, rejecting according to the threshold set by Benjamini-Hochberg gives FDR control.
+
+4
+
+Theorem 1. Suppose there exists a sequence of normalizing flows (Jn) n=1 such that
+1. There exists a triangular, increasing, and continuously differentiable map J and base distribution Z  pZ such that J(X) =D Z.
+2. Each Jn is continously differentiable, invertible, and Jn  J pointwise. 3. For all X  RD, there is some M > 0 such that 0 < p(X) < M .
+4. The feature statistic Tj(X, Y ) is bounded and its set of discontinuities with respect to X has measure zero w.r.t the distribution of X.
+
+Then,
+
+the
+
+estimated
+
+p-value
+
+^j,K,n
+
+=
+
+1 K +1
+
+(1
+
++
+
+K m=1
+
+1[Tj
+
+<
+
+T~j,m,n]),
+
+calculated
+
+using
+
+K
+
+MCMC
+
+samples targeting X~i,j|Xi,-j  pn (X), converges to the correct p-value:
+
+lim
+n
+
+lim
+K 
+
+^j,K,n
+
+=
+
+j
+
+w.p.1.
+
+(5)
+
+Proof. A full proof can be found in Appendix B. The proof uses the fact that the normalizing flows
+are bounded, continuous functions over which the dominated convergence theorem can be applied.
+As a result, the sequence of normalizing flows can approximate any target density. With Jn  J (the learned flow density converging to the joint density of the features), one can then calculate any
+conditional density of the form pXj|X-j which will converge to the true conditional. The MCMC algorithm then targets the conditional density from the learned flow and generates samples X~j from the distribution Xj|X-j. Finally, the Cesaro average of a function g(X~j) calculated over the MCMC samples will converge almost surely to EX~j|X-j g(X~j).
+
+5 Experiments
+
+5.1 Synthetic experiment with a mixture of highly correlated Gaussians
+
+We compare FLOWSELECT to the aforementioned knockoff methods on synthetic data drawn from a mixture of three highly correlated Gaussian distributions with dimension D = 100. We also compare it to the holdout randomization test (HRT) as implemented in [10], which uses mixture density networks (MDNs) to model the conditional distribution of each feature. This is adapted from the experiment in [6], but we have increased the correlation between features within each mixture. To generate the data, we draw N = 100, 000 highly correlated samples. For i = 1, . . . , N , sample
+
+Xi i.i.d
+
+3
+j pN (Xi; µj , j ),
+
+(6)
+
+j=1
+
+where mixing weights  = (0.371, 0.258, 0.371), mean vector µ = (0, 20, 40), and covariance
+matrix j has ones on the diagonal and (0.982, 0.976, 0.970)j in all off-diagonal cells. The response Yi is linear in fi(Xi) for some function fi, i.e., Yi = fi(Xi) + i, and 80% of the j are set to zero. We consider two different schemes for the fi that connect the features to the response. In the "linear" case, fi is equal to the identity function. In the "nonlinear" case, fi(x) is set equal to sin(5x) for odd i and fi(x) = cos(5x) for even i.
+
+We use the HRT to define the feature statistics, with different predictive models for each response type ("linear" and "non-linear"). Specifically, for the linear response, we calculate predictive scores from a LASSO [13], and for the non-linear response, we use a random forest [14].
+
+First, we look at how each procedure models the covariate distribution in Figure 1. In order to be valid knockoffs, the distribution of two knockoff features needs to be equal to that of the covariates. In this challenging example, each of the empirical knockoff methods fails to match the ground truth. In particular, DDLK and DeepKnockoffs are over-dispersed, while KnockoffGAN suffers from mode collapse. The findings for DeepKnockoffs and KnockoffGAN are similar to those in [6]. Only FLOWSELECT matches the basic structure of the ground truth.
+
+Figure 2 shows that the empirical knockoff procedures fail to control the FDR for both linear and nonlinear responses. One explanation for this lack of FDR control is the inability of these methods to accurately model the knockoff distribution (c.f., Figure 1). As a result, the assumptions for
+
+5
+
+Figure 1: A density plot of the feature distribution for coordinates j = 1, 2 ("Ground Truth") compared to the normalizing flow fitted within FLOWSELECT; the mixture density network fitted within HRT; and the distribution of each knockoff method. To have FDR control, each distribution should match the distribution of the features.
+the knockoff procedure will not hold, and FDR control is not guaranteed. We also compare to the HRT from [10], which uses mixture density networks [15] to model each covariate's complete conditional distribution. Lastly, we compare to Model-X knockoffs. Model-X knockoffs do not require learning a separate knockoff distribution and are guaranteed to control FDR. However, they rely on the mixture-of-Gaussians structure in the covariates. Only FLOWSELECT and Model-X knockoffs succeed in controlling FDR for any level. However, Model-X knockoffs cannot be applied to non-Gaussian settings without strict assumptions on dependencies between features, limiting their broad applicability. Even so, on this dataset FLOWSELECT has consistently better power than Model-X knockoffs.
+5.2 Semi-synthetic experiment with scRNA-seq data
+In this experiment, we use single-cell RNA sequencing (scRNA-seq) data from 10x Genomics [16]. Each variable Xn,g is the observed gene expression of gene g in cell n. These data provide a setting that is both realistic and, because gene expressions are often highly correlated, challenging. More background information about scRNA-seq data can be found in [17].
+We normalize the gene expression measurements to have support in [0, 1], and add a small amount of Gaussian noise so that the data is not zero-inflated. As in the semi-synthetic experiment from [6], we pick the 100 most correlated genes to provide a challenging, yet realistic example. We simulate responses that are both linear and nonlinear in the features.
+Figure 3 shows that FLOWSELECT maintains good FDR control across multiple FDR target levels, feature statistics, and generated responses. In cases where the knockoff methods control FDR successfully, FLOWSELECT has higher power in discovering the features the response depends on. The HRT also does well in this example, with similar power to FLOWSELECT in the linear example and worse power and loss of FDR in the non-linear example. This suggests that mixture density networks work well enough when both the outcome and feature statistic come from a linear model, but may not be sufficient for non-linear responses when the exact feature model is unknown.
+6
+
+Figure 2: Comparison of FDR control of FLOWSELECT to the HRT and knockoff methods at targeted FDRs of 0.05, 0.1, and 0.25 (indicated by the dashed lines). In the top row, the response depends linearly on the features, and the feature statistics are calculated using the HRT with the LASSO. In the bottom row, the response depends non-linearly on the features, and the feature statistics are calculated using the HRT with random forest regression.
+Figure 3: Comparison of FDR across 10 simulated linear and nonlinear responses calculated on the scRNA-seq dataset. All dots above the line represent p-values that were below the threshold set using the Benjamini-Hochberg procedure.
+An advantage of knockoffs over CRT-based methods like FLOWSELECT is that the predictive model only needs to be evaluated once. Hence, while FLOWSELECT has a faster runtime than DDLK and the HRT for this experiment, it is considerably slower than DeepKnockoff and KnockoffGAN. Further runtime details can be found in Appendix F. 5.3 Real data experiment: soybean GWAS Genome-wide association studies are a way for scientists to identify genetic variants (single-nucleotide polymorphisms, or SNPs) that are associated with a particular trait (phenotype). We tested FLOWSELECT on a dataset from the SoyNAM project [18], which is used to conduct GWAS for soybeans.
+7
+
+- log10(p)
+
+5
+
+1685024
+
+4
+
+4220331744167797
+
+15975626
+
+1753922 1799390
+
+1821662
+
+3
+
+2
+
+1
+
+0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 Chromosome
+
+Figure 4: Manhattan plot for oil content in soybean GWAS experiment [24]. p is the estimated p-value from the FLOWSELECT procedure, and the blue line indicates the rejection threshold for a nominal FDR of 20%.
+
+Each feature Xj takes on one of four discrete values, indicating whether a particular SNP is homozygous in the non-reference allele, heterozygous, homozygous in the reference allele, or missing. A number of traits are included in the SoyNAM data; we considered oil content (percentage in the seed) as the phenotype of interest in our analysis. There are 5,128 samples and 4,236 SNPs in total.
+To estimate the joint density of the genotypes, we used a discrete flow [19]. Modeling of genomic data is typically done with a hidden Markov model [20]; however, such a model may fail to account for long range dependence between SNPs, which a normalizing flow is better suited to handle. Having a more flexible model of the genome enables FLOWSELECT to provide better FDR control for assessing genotype/phenotype relationships. For the predictive model, we used a feed-forward neural network with three hidden layers. Additional details of training and architecture are presented in Appendix E.
+A graphical representation of our results is shown as a Manhattan plot in Figure 4, which plots the negative logarithm of the estimated p-values for each SNP. At a nominal FDR of 20%, we identified seven SNPs that are associated with oil content in soybeans. We cross-referenced our discoveries with other publications to identify SNPs that have been previously shown to be associated with oil content in soybeans. For example, FLOWSELECT identifies one SNP on the 18th chromosome, Gm18_1685024, which is also selected in [21]. FLOWSELECT also selects a SNP on the 5th chromosome, Gm05_37467797, which is near two SNPs (Gm05_38473956 and Gm05_38506373) identified in [22] but which are not in the SoyNAM dataset. [23] identifies eight SNPs near the start of the 14th chromosome, and we select multiple SNPs in a nearby region on the 14th chromosome (seen in the peak of dots on chromosome 14 in Figure 4). However, the dataset in [23] is much larger ( 47, 000 SNPs), which prevents an exact comparison. A list of all SNPs selected by our method is provided in Appendix E.
+For this experiment, FLOWSELECT tests over 4000 features in 10 hours using a single GPU. No other empirical knockoff procedure [6, 3, 5] or the HRT [10] tested more than 387 features. This shows the potential for FLOWSELECT for high-dimensional feature selection with FDR control in a reasonable amount of time. Additional details about this experiment are available in Appendix E.
+6 Discussion
+Knockoffs offer appealing theoretical guarantees of FDR control in finite samples. However, without stringent distributional assumptions, learning a valid knockoff distribution from data is difficult in practice. Even with a flexible architecture, the optimization problem for each of the empirical knockoff procedures is non-trivial. All three deep-learning-based knockoff methods (i.e., DDLK,
+8
+
+KnockoffGAN, and DeepKnockoffs) have to minimize an objective function that depends on a distribution over every possible swap between the original covariates and the knockoffs. As the data dimension grows, this is an exponentially growing sample space. Both DDLK and KnockoffGAN require finding a saddle point in their objective function. For DDLK, which also fits a joint distribution as part of its training procedure, even providing access to the exact joint density via an oracle did not improve the empirical FDR or the power. Without a valid knockoff distribution, there is no longer a promise of FDR control, defeating the purpose of using knockoffs in the first place.
+In contrast, FLOWSELECT only requires learning a normalizing flow that maximizes the log-likelihood of the feature distribution. Because the density estimation is self-contained, FLOWSELECT can use any family of normalizing flows­including discrete flows­which is a state-of-the-art method for density estimation tasks, and which continues to be an active area of research. The success of FLOWSELECT in controlling the FDR where knockoff methods and HRT do not suggests that having a better model of the feature distribution is key.
+FLOWSELECT has the capacity to perform controlled feature selection in high-dimensional settings. As the dimension grows, however, we need feature statistics which both deliver high power and are computationally efficient. Thus, exploring the choice of feature statistic within FLOWSELECT provides an avenue for future work.
+Broader impact
+Advances in variable selection for highly expressive predictive models will enable scientists and other practitioners to harness the power of these models while providing them with an understanding of which features are most associated with variation in the response variable. Additionally, a method that provides tighter control of the false discovery rate can offer scientists reassurance that their discoveries are significant. While our proposed method should not be misinterpreted as making causal statements, its ability to reduce the number of potential causes to a smaller subset of the variables, which scientists can then explore in greater depth, offers one way to draw conclusions from large-scale machine learning models.
+However, our method may appear to offer a false sense of confidence to users of complex "black box" models looking to make strong statements about the patterns they observe in their data.Practitioners should take great care when using methods of this kind to make inferences from large, complex datasets. In all applications, though especially in high-stakes situations where issues of fairness and equity are at play, procedures like ours need to be used correctly so that their conclusions are not misinterpreted.
+References
+[1] Yoav Benjamini and Yosef Hochberg. Controlling the false discovery rate: A practical and powerful approach to multiple testing. Journal of the Royal Statistical Society: Series B, 57(1):289­300, 1995.
+[2] Emmanuel Candès, Yingying Fan, Lucas Janson, and Jinchi Lv. Panning for gold: `model-X' knockoffs for high dimensional controlled variable selection. Journal of the Royal Statistical Society: Series B, 80(3):551­577, 2018.
+[3] James Jordon, Jinsung Yoon, and Mihaela van der Schaar. KnockoffGAN: Generating knockoffs for feature selection using generative adversarial networks. In International Conference on Learning Representations, 2019.
+[4] Ying Liu and Cheng Zheng. Auto-Encoding Knockoff Generator for FDR Controlled Variable Selection. arXiv:1809.10765, September 2018.
+[5] Yaniv Romano, Matteo Sesia, and Emmanuel Candès. Deep knockoffs. Journal of the American Statistical Association, 115(532):1861­1872, 2020.
+[6] Mukund Sudarshan, Wesley Tansey, and Rajesh Ranganath. Deep direct likelihood knockoffs. In Neural Information Processing Systems, 2020.
+[7] George Papamakarios, Eric Nalisnick, Danilo Jimenez Rezende, Shakir Mohamed, and Balaji Lakshminarayanan. Normalizing flows for probabilistic modeling and inference. Journal of Machine Learning Research, 22(57):1­64, 2021.
+9
+
+[8] Ivan Kobyzev, Simon Prince, and Marcus Brubaker. Normalizing flows: An introduction and review of current methods. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2020.
+[9] Chin-Wei Huang, David Krueger, Alexandre Lacoste, and Aaron Courville. Neural autoregressive flows. In International Conference on Machine Learning, pages 2078­2087, July 2018.
+[10] Wesley Tansey, Victor Veitch, Haoran Zhang, Raul Rabadan, and David M. Blei. The holdout randomization test for feature selection in black box models. Journal of Computational and Graphical Statistics, 2021. [In press; available on arXiv].
+[11] Chenlin Meng, Yang Song, Jiaming Song, and Stefano Ermon. Gaussianization flows. In Proceedings of the Twenty Third International Conference on Artificial Intelligence and Statistics, volume 108 of Proceedings of Machine Learning Research, pages 4336­4345, 26­28 Aug 2020.
+[12] George Papamakarios, Theo Pavlakou, and Iain Murray. Masked autoregressive flow for density estimation. In Advances in Neural Information Processing Systems, volume 30, 2017.
+[13] Robert Tibshirani. Regression shrinkage and selection via the Lasso. Journal of the Royal Statistical Society: Series B, 58:267­288, 1996.
+[14] Leo Breiman. Random forests. Machine Learning, 45(1):5­32, 2001.
+[15] Christopher M. Bishop. Mixture density networks. Technical report, Aston University, 1994.
+[16] 10x Genomics. Our 1.3 million single cell dataset is ready to download. https://www.10xgenomics.com/blog/our-13-million-single-cell-dataset-is-ready-to-download, 2017.
+[17] Divyansh Agarwal, Jingshu Wang, and Nancy Zhang. Data denoising and post-denoising corrections in single cell rna sequencing. Statistical Science, 35(1):112­128, 2020.
+[18] Qijian Song, Long Yan, Charles Quigley, Brandon D. Jordan, Edward Fickus, Steve Schroeder, Bao-Hua Song, Yong-Qiang Charles An, David Hyten, Randall Nelson, Katy Rainey, William D Beavis, Jim Specht, Brian Diers, and Perry Cregan. Genetic characterization of the soybean nested association mapping population. The Plant Genome, 10(2), 2017.
+[19] Dustin Tran, Keyon Vafa, Kumar Agrawal, Laurent Dinh, and Ben Poole. Discrete flows: Invertible generative models of discrete data. In Neural Information Processing Systems, 2019.
+[20] Alencar Xavier, William Muir, and Katy Rainey. Impact of imputation methods on the amount of genetic variation captured by a single-nucleotide polymorphism panel in soybeans. BMC Bioinformatics, 17(1), February 2016.
+[21] Yang Liu, Duolin Wang, Fei He, Juexin Wang, Trupti Joshi, and Dong Xu. Phenotype prediction and genome-wide association study using deep convolutional neural network of soybean. Frontiers in Genetics, 10, 2019.
+[22] Yongce Cao, Shuguang Li, Zili Wang, Fangguo Chang, Jiejie Kong, Junyi Gai, and Tuanjie Zhao. Identification of major quantitative trait loci for seed oil content in soybeans by combining linkage and genome-wide association mapping. Frontiers in Plant Science, 8, July 2017.
+[23] Humira Sonah, Louise O'Donoughue, Elroy Cober, Istvan Rajcan, and François Belzile. Identification of loci governing eight agronomic traits using a GBS-GWAS approach and validation by QTL mapping in soya bean. Plant Biotechnology Journal, 13(2):211­221, September 2014.
+[24] Stephen Turner. qqman: an R package for visualizing GWAS results using Q-Q and Manhattan plots. The Journal of Open Source Software, 2018.
+[25] V. I. Bogachev, A. V. Kolesnikov, and K. V. Medvedev. Triangular transformations of measures. Sbornik: Mathematics, 196(3):309, April 2005.
+[26] Alencar Xavier, William Beavis, James Specht, Brian Diers, Rouf Mian, Reka Howard, George Graef, Randall Nelson, William Schapaugh, Dechun Wang, Grover Shannon, Leah McHale, Perry Cregan, Qijian Song, Miguel Lopez, William Muir, and Katy Rainey. SoyNAM: Soybean Nested Association Mapping Dataset, 2019. R package version 1.6.
+[27] Adam Gayoso, Romain Lopez, Galen Xing, Pierre Boyeau, Katherine Wu, Michael Jayasuriya, Edouard Mehlman, Maxime Langevin, Yining Liu, Jules Samaran, Gabriel Misrachi, Achille Nazaret, Oscar Clivio, Chenling Xu, Tal Ashuach, Mohammad Lotfollahi, Valentine Svensson,
+10
+
+Eduardo da Veiga Beltrame, Carlos Talavera-Lopez, Lior Pachter, Fabian J Theis, Aaron Streets, Michael I Jordan, Jeffrey Regier, and Nir Yosef. scvi-tools: a library for deep probabilistic analysis of single-cell omics data. bioRxiv, 2021.
+11
+
+Appendices
+
+A Normalizing flows
+
+Normalizing flows [7] represent a general framework for density estimation of a multi-dimensional distribution with arbitrary dependencies. Briefly, suppose X  PX is a random variable in Rd. Now, let Z  N (0, Id) be a multivariate standard normal distribution. We assume there exists a mapping J that is triangular, increasing, and differentiable such that
+J(X) = Z.
+A formal treatment of when such a J exists can be found in [25]. However, a sufficient condition is that the density of X is greater than 0 on Rd and the cumulative density function of Xj, conditional on the previous components Xj, is differentiable with respect to Xj, Xj [7]:
+Ui = Ji(X)  Fi(Xi|Xi)
+From this construction, each Ui is independent of all previous Ui and has distribution Unif[0, 1]. From there, we simply set Zi = -1(Ui), where  is the CDF of the standard normal.
+Since Ji(X) depends only on the elements in X up to i, it is triangular. Because pX > 0, the conditional cdfs are strictly increasing, so J is an increasing map. Finally, since each cdf is differentiable, the entire map J is differentiable, and its Jacobian is non-zero.
+Because of the inverse mapping theorem, J is invertible and we can write
+X = J(Z).
+
+Normalizing flows are a collection of distributions that parameterize a family of invertible, differentiable transformations J from a fixed base distribution Z to an unknown distribution X. Using the change-of-variables theorem, we can express the distribution of X in terms of the base distribution density pZ and the transformation J:
+
+p(X) = p(J(X)) det
+
+ J (X ) X
+
+where
+
+J (X) X
+
+is the Jacobian of J.
+
+The goal is to find a parameter value ^ that maximizes the
+
+likelihood of the observed X:
+
+^ = arg max p(X).
+
+
+
+A key feature of normalizing flows is that they are composable.
+
+A.1 GaussMAF
+
+In experiments, the first layer G is a Gaussianization flow [11] applied elementwise:
+
+Gj (Xj ) = -1
+
+M
+
+m=1
+
+Xj - µj,m sj,m
+
+With sufficiently large M , this Gaussianization layer can approximate any univariate distribution. This is composed with a Masked Autoregressive Flow (MAF) F [12], which consists of MADE layers interspersed with batch normalization:
+
+MADEj,k = (Xj - µj,k) exp(-j,k) where µj = fµj,k (X<j )
+j = fj,k (X<j ) F = MADEj,K  BatchNorm  MADEj,K-1  · · · BatchNorm  MADEj,1
+
+Here, fµj and fj are fully connected neural networks.
+
+12
+
+B Proof of convergence
+
+Here we prove Theorem 1. Theorem 1. Suppose there exists a sequence of normalizing flows (Jn) n=1 such that
+1. There exists a triangular, increasing, and continuously differentiable map J and base distribution Z  pZ such that J(X) =D Z.
+2. Each Jn is continously differentiable, invertible, and Jn  J pointwise. 3. For all X  RD, there is some M > 0 such that 0 < p(X) < M .
+4. The feature statistic Tj(X, Y ) is bounded and its set of discontinuities with respect to X has measure zero w.r.t the distribution of X.
+
+Then,
+
+the
+
+estimated
+
+p-value
+
+^j,K,n
+
+=
+
+1 K +1
+
+(1
+
++
+
+K m=1
+
+1[Tj
+
+<
+
+T~j,m,n]),
+
+calculated
+
+using
+
+K
+
+MCMC
+
+samples targeting X~i,j|Xi,-j  pn (X), converges to the correct p-value:
+
+lim lim ^j,K,n = j w.p.1.
+
+(5)
+
+n K
+
+The assumption that Jn  J depends on the universality of the family of normalizing flows chosen. Universality has been shown for a wide variety of normalizing flows [9, 11, 8].
+
+Proof of Theorem 1. Without loss of generality, we consider j = 1. For each i.i.d observation at i = 1, . . . , N , let F1 be the CDF of Xi,1 conditional on the other features Xi,-1:
+
+J1(x1; Xi,-1)
+
+P (X1  x1|Xi,-1) = =
+
+x1 -
+
+pX
+
+(x1
+
+,
+
+Xi,-1
+
+)dx1
+
+ -
+
+pX
+
+(x1,
+
+Xi,-1)dx1
+
+x1 -
+
+pZ
+
+(J
+
+(x1
+
+,
+
+Xi,-1
+
+))|
+
+J
+
+|dx1
+
+ -
+
+pZ
+
+(J
+
+(x1
+
+,
+
+Xi,-1
+
+))|
+
+J
+
+|dx1
+
+(7)
+
+For a particular mapping with parameter n, we define Jn,1 analogously:
+
+Jn,1(x1; Xi,-1)
+
+x1 -
+
+pZ
+
+(Jn
+
+(x1,
+
+Xi,-1))|Jn
+
+|dx1
+
+ -
+
+pZ
+
+(Jn
+
+(x1,
+
+Xi,-1))|Jn
+
+|dx1
+
+(8)
+
+Since Jn and J are continuously differentiable, the corresponding densities pn converge to pX pointwise. Then, by the dominated convergence theorem, J1n  J1.
+Each J1n is the distribution function corresponding to X~1n|X-1. Since J1n  J1 pointwise, and J1 is proper, X~in,1|X-1 converges in distribution to X~i,1|X-1. Because each observation i is i.i.d, the joint distribution across all observations, X~·n,1|X·,-1, converges in distribution to X~·,1|X·,-1.
+
+Define g1(X~·,1) 1[T1(X, Y ) < T1([X~·,1|X·,-1], Y )]. Since g is bounded and is discontinuous on a measure-zero set, the expectation converges:
+
+lim
+n
+
+EX~·n,1
+
+|X·,-1
+
+(g1
+
+)
+
+
+
+EX~·,1|X·,-1 (g1)
+
+=
+
+1
+
+(9)
+
+The Cesaro average of g calculated over MCMC samples which target the conditional distribution of X~·n,1|X·,-1 under the probability law of Jn converges almost surely to EX~·n,1|X·,-1 (g1). That is
+
+1
+
+lim ^j,K,n
+K 
+
+=
+
+lim
+K 
+
+K
+
+K
+
+g1(X~·,1,k) = EX~·n,1|X·,-1 (g1) w.p.1.
+
+k=1
+
+(10)
+
+Combining Equation (9) and Equation (10) gives the desired result.
+
+13
+
+C Feature datasets
+
+Name
+Gaussian Mixture scRNA-seq Soybean
+
+Covariate
+Synthetic Real Real
+
+Response
+Synthetic Synthetic Real
+
+N
+100, 000 100, 000 5, 128
+
+D
+100 100 4, 236
+
+# Relevant
+20 10 -
+
+Source
+[16] [26]
+
+Licensing All of the data used is available for personal use. Terms for the scRNA-seq data can be found here: https://www.10xgenomics.com/terms-of-use. The scRNA-seq data was accessed using scvi-tools [27], distributed under the BSD 3-Clause license. The soybean data is part of the SoyNAM R package [26], distributed under the GPL-3 license.
+
+D Architecture and training details for synthetic experiments
+
+D.1 FlowSelect
+For FLOWSELECT, the joint distribution was fitted with a GaussMAF normalizing flow as described in Appendix A. The first Gaussianization layer consisted of M = 6 clusters, followed by 5 layers of MAF. Within each MAF layer, the neural network consisted of three masked fully connected residual layers with 100 hidden units, followed by a BatchNorm layer.
+We trained the Gaussianization layer first with 100 epochs and learning rate 1 × 10-3 within the ADAM optimizer. This allowed the Gaussianization layer to learn the marginal distribution of each feature. Then, we jointly trained the whole architecture with 100 epochs and learning rate 1 × 10-3 using ADAM.
+
+MCMC We draw 1000 samples using a Metropolis-Hastings procedure. The proposal distribution
+
+is a random walk:
+
+Xi,j,k  N (X~i,j,k-1, ^j2),
+
+where ^j2 is the sample conditional variance:
+
+^j2 = ^ j,j - ^ j,-j ^ --1j,-j ^ Tj,-j where ^ j = Var(X)
+
+D.2 Variable selection methods
+
+Linear For the linear response, we estimate a linear model with an L1 penalty (aka the LASSO) on
+
+training data:
+
+^ = arg min 1 N
+
+X - Y
+
+D
+
+2 2
+
++
+
+
+
+|j |
+
+j=1
+
+(11)
+
+The penalization term  is selected via 5-fold cross-validation.
+
+Nonlinear For the nonlinear response, we fit a random forest on the training data. The hyperparameters are the defaults in the scikit-learn implementation.
+
+Feature statistic If f^(X) is the fitted regression function, then the feature statistic is the negative
+
+mean-squared error:
+
+1 T (X, Y ) = -
+N
+
+f^(X) - Y
+
+22.
+
+D.3 Competing methods
+
+For DDLK [6], KnockoffGAN [3], DeepKnockoffs [5], and HRT [10], we used the exact architecture and hyperparameter settings from their respective papers. For all methods, we used the code that the researchers graciously made publicly available:
+
+14
+
+Method
+DDLK DeepKnockoffs
+HRT KnockoffGAN
+
+Link
+https://github.com/rajesh-lab/ddlk/ https://github.com/msesia/deepknockoffs/ https://github.com/tansey/hrt/ https://github.com/firmai/tsgan/tree/master/alg/knockoffgan
+
+E Architecture and training details for soybean GWAS
+Discrete flows For the discrete flows in the soybean example, we use a single layer of MADE which outputs a dimension of size 4. µ is then set equal to the argmax of this output. For training the flows, we use a relaxation of argmax with temperature equal to 0.1.
+Discrete MCMC Each feature has K = 4 values, so we can enumerate all four possible states for each proposal and sample in proportional to these probabilities via a Gibbs Sampling procedure. Setting the probabilities leads to an acceptance rate of 1, and the samples are uncorrelated since the previous sample doesn't enter into the proposal distribution
+Predictive model For the predictive model of each trait conditional on the SNPs, we use a fully connected neural network. This network has three hidden layers of size 128, 256, and 128. ReLU activations are used between each fully connected layer. Dropout is used on both the input layer and after each hidden layer with p = 0.2. The learning rate in ADAM was set to 1 × 10-5, with early stopping implemented using a held-out validation set. The feature statistic for each sample is the negative mean-squared error (MSE) for each observation.
+Runtime To obtain sufficient resolution on roughly 4200 simultaneous tests, we drew 100,000 samples from our model. The runtime was 10 hours using a single NVIDIA 2080 Ti.
+Selected SNPs Table 1 shows the SNPs selected by FLOWSELECT that are associated with oil content in soybeans.
+
+Chromosome 4 5 8 14 14 14 18
+
+SNP Gm04_42203141 Gm05_37467797 Gm08_15975626 Gm14_1753922 Gm14_1799390 Gm14_1821662 Gm18_1685024
+
+p-value 1.60e-04 1.90e-04 2.10e-04 9.00e-05 1.60e-04 2.90e-04 5.00e-05
+
+Table 1: Selected SNPs for soybean GWAS experiment.
+
+F Runtime comparison for each method on scRNA-seq
+Below, we show the median runtime for each method on the scRNA-seq data. All experiments were run on Ubuntu 20.04 LTS using PyTorch, except for KnockoffGAN, which was implemented in Tensorflow. The CPU was a Intel Xeon Gold 6130 (64) @ 3.700GHz, and the GPU was a NVIDIA GeForce RTX 2080 Ti.
+Even though the runtimes for DeepKnockoff and KnockoffGAN were magnitudes faster than the other methods, it is not immediately clear how to take advantage of this to improve their performance.
+
+15
+
+Method
+DDLK FlowSelect DeepKnockoff HRT KnockoffGAN
+
+Runtime (sec)
+5511 3561 182 7806 224
+
+16
+
+
