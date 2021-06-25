@@ -2,6 +2,7 @@
 # -*- ENCODING: UTF-8 -*#
  
 %https://pypi.org/project/pdftotext/
+
 %Convert *.pdf to plain text in a folder
 %Remove *.pdf files
 
@@ -19,3 +20,5 @@ if [ "$1" = "rm" ]
     rm *.pdf
 fi
 exit
+
+
